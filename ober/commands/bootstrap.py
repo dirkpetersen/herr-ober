@@ -129,13 +129,12 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
     use_existing_venv = current_venv is not None
 
     if use_existing_venv and current_venv is not None:
-        # ober is running in a venv (e.g., pipx), use it for ExaBGP too
+        # ober is running in a venv (e.g., pipx), use it for ExaBGP and configs too
         venv_path: Path = current_venv
-        # For pipx installs, only use /opt/ober for config files (or custom path)
-        install_path = Path(path) if path else Path("/opt/ober")
+        # For pipx installs, everything goes in the venv (unless custom path specified)
+        install_path = Path(path) if path else venv_path
         console.print(f"[bold]Detected venv:[/bold] {venv_path}")
-        console.print(f"[bold]Config path:[/bold] {install_path}")
-        console.print("ExaBGP will be installed in the existing venv.")
+        console.print("ExaBGP and configs will be installed in the existing venv.")
     else:
         # Not in a venv, need to create one at /opt/ober (or custom path)
         install_path = Path(path) if path else Path("/opt/ober")
