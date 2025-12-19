@@ -16,7 +16,6 @@ keywords = ["s3", "ceph", "rgw", "haproxy", "bgp", "ecmp", "load-balancer", "ing
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
-    "Framework :: HAProxy",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
