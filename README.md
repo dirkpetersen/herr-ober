@@ -35,12 +35,11 @@ Before installing, ensure the VM is configured for 50GB/s throughput:
 ```bash
 # Install via pipx (recommended)
 sudo apt install -y pipx
-sudo pipx install --global herr-ober
+sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install herr-ober
 
-# Or via uv
-sudo apt install -y pipx
-sudo pipx install --global uv
-sudo uv tool install --python-preference system herr-ober
+# Or via uv (alternative)
+curl -LsSf https://astral.sh/uv/install.sh | sudo sh
+sudo uv tool install herr-ober
 ```
 
 ### 3. Bootstrap
