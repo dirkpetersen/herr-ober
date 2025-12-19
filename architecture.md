@@ -119,18 +119,7 @@ SELinux should be disabled. `ober bootstrap` will disable it if found enabled.
 
 ## 4. Software Layer: The "Ober" Stack
 
-### Installation
-
-```bash
-# Install via pipx (recommended)
-pipx install ober
-
-# Or via pip
-pip install ober
-
-# Or via uv
-uv pip install ober
-```
+For installation instructions, see [README.md](README.md#quick-start).
 
 ### Component 1: The Controller (`ober`)
 
@@ -359,9 +348,9 @@ BGP passwords and other sensitive data. Permissions: 600.
 
 1. **Proxmox:** Add `Intel 6300ESB` Watchdog device to VM.
 2. **Network:** Verify `virtio` Multiqueue is active.
-3. **Install:** `pipx install ober`
+3. **Install:** See [README.md](README.md#quick-start) for installation instructions.
 4. **Bootstrap:** `sudo ober bootstrap` (installs HAProxy, ExaBGP, applies tuning)
 5. **Configure:** `sudo ober config` (interactive wizard)
-6. **Test:** `ober test` (validate BGP connectivity without starting services)
-7. **Verify:** `ober doctor` and `ober status`
+6. **Test:** `sudo ober test` (validate BGP connectivity without starting services)
+7. **Verify:** `sudo ober doctor` and `sudo ober status`
 8. **Router:** Configure ECMP and BGP Neighbors (enable BFD).
