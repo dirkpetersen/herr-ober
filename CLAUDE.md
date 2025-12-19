@@ -112,6 +112,11 @@ With custom installation (prompted during bootstrap):
 - `<install-path>/etc/bgp/config.ini` - ExaBGP config
 - `<install-path>/etc/certs/` - SSL certificates
 
+**Note:** There are NO hardcoded default paths. When not in a venv, bootstrap requires an explicit path:
+```bash
+sudo ober bootstrap /path/to/install
+```
+
 ### Systemd Services
 - `ober-http.service` - HAProxy
 - `ober-bgp.service` - ExaBGP (bound to ober-http)

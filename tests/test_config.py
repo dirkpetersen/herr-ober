@@ -91,7 +91,7 @@ class TestOberConfig:
     def test_default_values(self) -> None:
         """Test OberConfig default values."""
         config = OberConfig()
-        assert config.install_path == Path.home() / ".ober"
+        assert isinstance(config.install_path, Path)
         assert config.log_retention_days == 7
         assert config.stats_port == 8404
 
@@ -237,7 +237,7 @@ stats_port: 9000
 
         config = OberConfig.load(config_path)
 
-        assert config.install_path == Path.home() / ".ober"
+        assert isinstance(config.install_path, Path)
         assert config.bgp.local_as == 65100
         assert config.bgp.peer_as == 65200
         assert config.bgp.neighbors == ["10.0.0.1", "10.0.0.2"]
@@ -282,7 +282,7 @@ bgp:
         config = OberConfig.load(config_path)
 
         # All values should be defaults
-        assert config.install_path == Path.home() / ".ober"
+        assert isinstance(config.install_path, Path)
         assert config.bgp.local_as == 65001
 
     def test_load_searches_default_paths(self, temp_dir: Path) -> None:

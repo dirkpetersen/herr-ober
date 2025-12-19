@@ -136,23 +136,18 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
         console.print(f"[bold]Detected venv:[/bold] {venv_path}")
         console.print("ExaBGP and configs will be installed in the existing venv.")
     else:
-        # Not in a venv, prompt for install path
-        if path:
-            install_path = Path(path)
-        else:
-            # Prompt user for installation path
-            if yes:
-                console.print("[red]Error:[/red] --yes/-y requires PATH argument when not in venv")
-                console.print("Usage: sudo ober bootstrap /path/to/install -y")
-                ctx.exit(1)
+        # Not in a venv, require explicit path
+        if not path:
+            console.print("[red]Error:[/red] Ober is not running in a venv (e.g., pipx).")
+            console.print()
+            console.print("Please specify an installation path:")
+            console.print("  sudo ober bootstrap /path/to/install")
+            console.print()
+            console.print("Example:")
+            console.print("  sudo ober bootstrap /srv/ober")
+            ctx.exit(1)
 
-            console.print()
-            console.print("[bold]Installation Path Required[/bold]")
-            console.print("Ober is not running in a venv (e.g., pipx).")
-            console.print("Please specify where to install ober (venv + configs).")
-            console.print()
-            install_input = click.prompt("Installation path", default="/srv/ober", type=str)
-            install_path = Path(install_input)
+        install_path = Path(path)
 
         venv_path = install_path / "venv"
         console.print(f"[bold]Installation path:[/bold] {install_path}")

@@ -196,44 +196,16 @@ def get_haproxy_version() -> str | None:
 def get_exabgp_version() -> str | None:
     """Get installed ExaBGP version.
 
-    Checks multiple locations in order:
+    Checks:
     1. Current venv (sys.prefix) - handles pipx installs
-    2. The venv_path from ober config (if it exists)
-    3. Fallback paths (~/.ober/venv, /srv/ober/venv)
-    4. System exabgp command
+    2. System exabgp command
     """
     pip_paths: list[Path] = []
 
-    # First, check the current venv (if running in one, e.g., pipx)
+    # Check the current venv (if running in one, e.g., pipx)
     if sys.prefix != sys.base_prefix:
         current_venv = Path(sys.prefix)
         pip_paths.append(current_venv / "bin" / "pip")
-
-    # Then try to load venv_path from config
-    try:
-        import yaml
-
-        config_paths = [
-            Path.home() / ".ober" / "ober.yaml",
-            Path("/srv/ober/etc/ober.yaml"),
-        ]
-        for config_path in config_paths:
-            if config_path.exists():
-                with open(config_path) as f:
-                    data = yaml.safe_load(f) or {}
-                if "venv_path" in data:
-                    pip_paths.append(Path(data["venv_path"]) / "bin" / "pip")
-                break
-    except Exception:
-        pass
-
-    # Add fallback paths
-    pip_paths.extend(
-        [
-            Path.home() / ".ober" / "venv" / "bin" / "pip",
-            Path("/srv/ober/venv/bin/pip"),
-        ]
-    )
 
     for pip_path in pip_paths:
         # Get the venv's bin directory

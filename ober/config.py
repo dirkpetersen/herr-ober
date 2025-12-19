@@ -54,11 +54,24 @@ class CertConfig:
     route53_hosted_zone_id: str = ""
 
 
+def _get_default_install_path() -> Path:
+    """Get default install path - current venv if in one, otherwise temp dir."""
+    import sys
+    import tempfile
+
+    # If running in a venv (e.g., pipx), use the venv path
+    if sys.prefix != sys.base_prefix:
+        return Path(sys.prefix)
+
+    # Otherwise, use a temp directory (for tests/fallback only)
+    return Path(tempfile.gettempdir()) / "ober"
+
+
 @dataclass
 class OberConfig:
     """Main Ober configuration."""
 
-    install_path: Path = field(default_factory=lambda: Path.home() / ".ober")
+    install_path: Path = field(default_factory=_get_default_install_path)
     bgp: BGPConfig = field(default_factory=BGPConfig)
     vips: list[VIPConfig] = field(default_factory=list)
     backends: list[BackendConfig] = field(default_factory=list)
@@ -104,7 +117,7 @@ class OberConfig:
         """Load configuration from YAML file.
 
         Args:
-            path: Path to config file. If None, searches default locations.
+            path: Path to config file. If None, uses default install path.
 
         Returns:
             OberConfig instance.
@@ -112,15 +125,8 @@ class OberConfig:
         config = cls()
 
         if path is None:
-            # Search default locations
-            search_paths = [
-                Path.home() / ".ober" / "ober.yaml",
-                Path("/srv/ober/etc/ober.yaml"),
-            ]
-            for p in search_paths:
-                if p.exists():
-                    path = p
-                    break
+            # Use the default config path from the instance
+            path = config.config_path
 
         if path and path.exists():
             config._load_from_file(path)
