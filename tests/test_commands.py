@@ -563,6 +563,9 @@ class TestUninstallCommand:
         with (
             patch("ober.cli.SystemInfo") as mock_system,
             patch("ober.commands.uninstall.inquirer.confirm", return_value=False),
+            patch("ober.commands.uninstall.Path.exists", return_value=False),
+            patch("ober.commands.uninstall.Path.is_symlink", return_value=False),
+            patch("ober.commands.uninstall.check_command_exists", return_value=False),
         ):
             mock_instance = MagicMock()
             mock_instance.is_root = True

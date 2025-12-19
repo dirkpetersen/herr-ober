@@ -47,6 +47,11 @@ class CertConfig:
     path: str = ""
     acme_enabled: bool = False
     acme_email: str = ""
+    acme_domain: str = ""
+    # Route53 DNS-01 challenge settings
+    route53_enabled: bool = False
+    route53_profile: str = "default"
+    route53_hosted_zone_id: str = ""
 
 
 @dataclass
@@ -168,6 +173,10 @@ class OberConfig:
                 path=cert_data.get("path", ""),
                 acme_enabled=cert_data.get("acme_enabled", False),
                 acme_email=cert_data.get("acme_email", ""),
+                acme_domain=cert_data.get("acme_domain", ""),
+                route53_enabled=cert_data.get("route53_enabled", False),
+                route53_profile=cert_data.get("route53_profile", "default"),
+                route53_hosted_zone_id=cert_data.get("route53_hosted_zone_id", ""),
             )
 
         self.log_retention_days = data.get("log_retention_days", 7)
@@ -213,6 +222,10 @@ class OberConfig:
                 "path": self.certs.path,
                 "acme_enabled": self.certs.acme_enabled,
                 "acme_email": self.certs.acme_email,
+                "acme_domain": self.certs.acme_domain,
+                "route53_enabled": self.certs.route53_enabled,
+                "route53_profile": self.certs.route53_profile,
+                "route53_hosted_zone_id": self.certs.route53_hosted_zone_id,
             },
             "log_retention_days": self.log_retention_days,
             "stats_port": self.stats_port,

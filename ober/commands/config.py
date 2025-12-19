@@ -268,16 +268,26 @@ def _configure_backends(current: list[BackendConfig]) -> list[BackendConfig]:
 
 def _configure_certs(current: CertConfig) -> CertConfig:
     """Configure certificate settings."""
+    # Determine default based on current config
+    if current.path:
+        default_method = "file"
+    elif current.route53_enabled:
+        default_method = "route53"
+    elif current.acme_enabled:
+        default_method = "acme"
+    else:
+        default_method = "skip"
+
     questions = [
         inquirer.List(
             "cert_method",
             message="Certificate method",
             choices=[
                 ("Provide certificate file path", "file"),
-                ("Use HAProxy ACME (Let's Encrypt)", "acme"),
+                ("Let's Encrypt via Route53 DNS-01", "route53"),
                 ("Skip certificate configuration", "skip"),
             ],
-            default="file" if current.path else ("acme" if current.acme_enabled else "skip"),
+            default=default_method,
         ),
     ]
 
@@ -287,19 +297,126 @@ def _configure_certs(current: CertConfig) -> CertConfig:
 
     if answers["cert_method"] == "file":
         cert_path = inquirer.text(
-            message="Certificate file path (PEM format)",
+            message="Certificate file path (PEM format, must include private key)",
             default=current.path or "/opt/ober/etc/certs/server.pem",
         )
         return CertConfig(path=cert_path)
 
-    elif answers["cert_method"] == "acme":
-        acme_email = inquirer.text(
-            message="ACME account email",
-            default=current.acme_email,
-        )
-        return CertConfig(acme_enabled=True, acme_email=acme_email)
+    elif answers["cert_method"] == "route53":
+        return _configure_route53_acme(current)
 
     return CertConfig()
+
+
+def _configure_route53_acme(current: CertConfig) -> CertConfig:
+    """Configure Let's Encrypt with Route53 DNS-01 challenge."""
+    # Prompt for AWS profile
+    aws_profile = inquirer.text(
+        message="AWS profile name",
+        default=current.route53_profile or "default",
+    )
+
+    # Try to list hosted zones
+    hosted_zones = _list_route53_hosted_zones(aws_profile)
+
+    if not hosted_zones:
+        console.print("[yellow]Warning:[/yellow] Could not list Route53 hosted zones.")
+        console.print("Make sure AWS credentials are configured for the profile.")
+        hosted_zone_id = inquirer.text(
+            message="Route53 Hosted Zone ID (e.g., Z1234567890ABC)",
+            default=current.route53_hosted_zone_id,
+        )
+        domain = inquirer.text(
+            message="Domain name for certificate",
+            default=current.acme_domain,
+        )
+    else:
+        # Build choices from hosted zones
+        zone_choices = [(f"{z['Name']} ({z['Id']})", z['Id']) for z in hosted_zones]
+
+        if len(hosted_zones) == 1:
+            # Only one zone, use it directly
+            hosted_zone_id = hosted_zones[0]['Id']
+            zone_name = hosted_zones[0]['Name'].rstrip('.')
+            console.print(f"Using hosted zone: {zone_name} ({hosted_zone_id})")
+        else:
+            # Multiple zones, prompt user to select
+            selected = inquirer.list_input(
+                message="Select Route53 hosted zone",
+                choices=zone_choices,
+                default=current.route53_hosted_zone_id if current.route53_hosted_zone_id else None,
+            )
+            hosted_zone_id = selected
+
+        # Get the domain name from selected zone
+        selected_zone = next((z for z in hosted_zones if z['Id'] == hosted_zone_id), None)
+        zone_name = selected_zone['Name'].rstrip('.') if selected_zone else ""
+
+        domain = inquirer.text(
+            message="Domain name for certificate",
+            default=current.acme_domain or zone_name,
+        )
+
+    acme_email = inquirer.text(
+        message="Email for Let's Encrypt notifications",
+        default=current.acme_email,
+    )
+
+    return CertConfig(
+        acme_enabled=True,
+        acme_email=acme_email,
+        acme_domain=domain,
+        route53_enabled=True,
+        route53_profile=aws_profile,
+        route53_hosted_zone_id=hosted_zone_id,
+    )
+
+
+def _list_route53_hosted_zones(profile: str) -> list[dict[str, str]]:
+    """List Route53 hosted zones using AWS CLI or boto3."""
+    import subprocess
+
+    try:
+        # Try using AWS CLI first (doesn't require boto3 installed)
+        result = subprocess.run(
+            ["aws", "route53", "list-hosted-zones", "--profile", profile, "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            import json
+            data = json.loads(result.stdout)
+            zones = []
+            for zone in data.get("HostedZones", []):
+                # Extract just the zone ID (remove /hostedzone/ prefix)
+                zone_id = zone["Id"].replace("/hostedzone/", "")
+                zones.append({
+                    "Id": zone_id,
+                    "Name": zone["Name"],
+                })
+            return zones
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+
+    # Fallback: try boto3 if available
+    try:
+        import boto3  # type: ignore[import-untyped]
+        session = boto3.Session(profile_name=profile)
+        client = session.client("route53")
+        response = client.list_hosted_zones()
+        zones = []
+        for zone in response.get("HostedZones", []):
+            zone_id = zone["Id"].replace("/hostedzone/", "")
+            zones.append({
+                "Id": zone_id,
+                "Name": zone["Name"],
+            })
+        return zones
+    except Exception:
+        pass
+
+    return []
 
 
 def _configure_additional(log_retention: int, stats_port: int) -> tuple[int, int]:
@@ -371,6 +488,12 @@ def _print_config_summary(config: OberConfig) -> None:
     console.print("[cyan]Certificates:[/cyan]")
     if config.certs.path:
         console.print(f"  Path: {config.certs.path}")
+    elif config.certs.route53_enabled:
+        console.print("  Method: Let's Encrypt (Route53 DNS-01)")
+        console.print(f"  Domain: {config.certs.acme_domain}")
+        console.print(f"  AWS Profile: {config.certs.route53_profile}")
+        console.print(f"  Hosted Zone: {config.certs.route53_hosted_zone_id}")
+        console.print(f"  Email: {config.certs.acme_email}")
     elif config.certs.acme_enabled:
         console.print(f"  ACME: enabled ({config.certs.acme_email})")
     else:
