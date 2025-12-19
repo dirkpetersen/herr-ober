@@ -36,12 +36,12 @@ Before installing, ensure the VM is configured for 50GB/s throughput:
 # Install via pipx (recommended)
 sudo apt install -y pipx
 sudo pipx install herr-ober
+sudo ln -s /root/.local/bin/ober /usr/local/bin/ober
 
-# Or via pip
-pip install herr-ober
-
-# Or via uv
-uv pip install herr-ober
+# Or via pip in a venv
+sudo python3 -m venv /opt/ober/venv
+sudo /opt/ober/venv/bin/pip install herr-ober
+sudo ln -s /opt/ober/venv/bin/ober /usr/local/bin/ober
 ```
 
 ### 3. Bootstrap
