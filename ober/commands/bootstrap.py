@@ -226,9 +226,9 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
     console.print("[bold green]Bootstrap complete![/bold green]")
     console.print()
     console.print("Next steps:")
-    console.print("  1. Run [bold]sudo ober config[/bold] to configure BGP, VIPs, and backends")
-    console.print("  2. Run [bold]sudo ober doctor[/bold] to verify installation")
-    console.print("  3. Run [bold]sudo ober start[/bold] to start services")
+    console.print("  1. Run [bold]'sudo ober config'[/bold] to configure BGP, VIPs, and backends")
+    console.print("  2. Run [bold]'sudo ober doctor'[/bold] to verify installation")
+    console.print("  3. Run [bold]'sudo ober start'[/bold] to start services")
 
 
 def _apply_kernel_tuning() -> None:
