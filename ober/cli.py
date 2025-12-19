@@ -68,7 +68,7 @@ def version_callback(ctx: click.Context, _param: click.Parameter, value: bool) -
     versions = {
         "ober": __version__,
         "haproxy": get_haproxy_version() or "not installed",
-        "exabgp": get_exabgp_version() or "not installed",
+        "exabgp": get_exabgp_version() or "not yet bootstrapped",
     }
 
     # Check if we want JSON output
