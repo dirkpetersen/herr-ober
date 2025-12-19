@@ -144,7 +144,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
             console.print("  sudo ober bootstrap /path/to/install")
             console.print()
             console.print("Example:")
-            console.print("  sudo ober bootstrap /srv/ober")
+            console.print("  sudo ober bootstrap /opt/ober")
             ctx.exit(1)
 
         install_path = Path(path)
