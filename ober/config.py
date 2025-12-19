@@ -60,6 +60,7 @@ class OberConfig:
     certs: CertConfig = field(default_factory=CertConfig)
     log_retention_days: int = 7
     stats_port: int = 8404
+    _venv_path_override: Path | None = field(default=None, repr=False)
 
     @property
     def config_path(self) -> Path:
@@ -83,7 +84,9 @@ class OberConfig:
 
     @property
     def venv_path(self) -> Path:
-        """Path to Python venv."""
+        """Path to Python venv (may be pipx venv or /opt/ober/venv)."""
+        if self._venv_path_override is not None:
+            return self._venv_path_override
         return self.install_path / "venv"
 
     @property
@@ -170,6 +173,10 @@ class OberConfig:
         self.log_retention_days = data.get("log_retention_days", 7)
         self.stats_port = data.get("stats_port", 8404)
 
+        # Load venv_path if specified (for pipx installations)
+        if "venv_path" in data:
+            self._venv_path_override = Path(data["venv_path"])
+
     def save(self, path: Path | None = None) -> None:
         """Save configuration to YAML file.
 
@@ -211,6 +218,10 @@ class OberConfig:
             "stats_port": self.stats_port,
         }
 
+        # Save venv_path if it differs from default (e.g., pipx venv)
+        if self._venv_path_override is not None:
+            data["venv_path"] = str(self._venv_path_override)
+
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
@@ -221,8 +232,10 @@ class OberConfig:
             self.install_path / "etc" / "bgp",
             self.install_path / "etc" / "certs",
             self.install_path / "bin",
-            self.install_path / "venv",
         ]
+        # Only create venv dir if not using an external venv (e.g., pipx)
+        if self._venv_path_override is None:
+            dirs.append(self.install_path / "venv")
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
 

@@ -15,6 +15,18 @@ from ober.system import OSFamily, SystemInfo, run_command
 console = Console()
 
 
+def _is_in_venv() -> bool:
+    """Check if ober is running inside a virtual environment."""
+    return sys.prefix != sys.base_prefix
+
+
+def _get_current_venv_path() -> Path | None:
+    """Get the path to the current venv if running in one."""
+    if _is_in_venv():
+        return Path(sys.prefix)
+    return None
+
+
 KERNEL_TUNING = """# Herr Ober kernel tuning for 50GB/s throughput
 # Maximize Network Backlogs (Prevent drops during micro-bursts)
 net.core.netdev_max_backlog = 250000
@@ -87,14 +99,16 @@ WantedBy=multi-user.target
 
 @click.command()
 @click.argument("path", required=False, type=click.Path())
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompts")
 @click.pass_context
-def bootstrap(ctx: click.Context, path: str | None) -> None:
+def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
     """Bootstrap Ober installation.
 
-    Automatically installs HAProxy, ExaBGP, creates Python venv,
-    applies kernel tuning, and generates configuration templates.
+    Automatically installs HAProxy, ExaBGP, applies kernel tuning,
+    and generates configuration templates.
 
-    PATH is the installation directory (default: /opt/ober or current venv).
+    If ober is installed via pipx, ExaBGP will be installed in the same venv.
+    Otherwise, a new venv will be created at /opt/ober (or PATH if specified).
     """
     parent_ctx = ctx.obj
     system = parent_ctx.system if parent_ctx else SystemInfo()
@@ -110,11 +124,35 @@ def bootstrap(ctx: click.Context, path: str | None) -> None:
         console.print("Run with: sudo ober bootstrap")
         ctx.exit(1)
 
-    # Determine installation path
-    install_path = _determine_install_path(path)
-    console.print(f"[bold]Installation path:[/bold] {install_path}")
+    # Determine venv and install paths
+    current_venv = _get_current_venv_path()
+    use_existing_venv = current_venv is not None
+    install_path = Path(path) if path else Path("/opt/ober")
+
+    if use_existing_venv and current_venv is not None:
+        # ober is running in a venv (e.g., pipx), use it for ExaBGP too
+        venv_path: Path = current_venv
+        console.print(f"[bold]Detected venv:[/bold] {venv_path}")
+        console.print(f"[bold]Config path:[/bold] {install_path}")
+        console.print("ExaBGP will be installed in the existing venv.")
+    else:
+        # Not in a venv, need to create one at /opt/ober
+        venv_path = install_path / "venv"
+        console.print(f"[bold]Installation path:[/bold] {install_path}")
+        console.print(f"[bold]Venv path:[/bold] {venv_path}")
+
+        if not yes:
+            console.print()
+            if not click.confirm(
+                f"This will create a new Python venv at {venv_path}. Continue?",
+                default=True,
+            ):
+                console.print("Aborted.")
+                ctx.exit(0)
 
     config = OberConfig(install_path=install_path)
+    # Override venv_path if using existing venv
+    config._venv_path_override = venv_path if use_existing_venv else None
 
     with Progress(
         SpinnerColumn(),
@@ -136,23 +174,30 @@ def bootstrap(ctx: click.Context, path: str | None) -> None:
         _install_haproxy(system)
         progress.update(task, completed=True, description="[green]Installed HAProxy[/green]")
 
-        # Step 4: Create Python venv for ExaBGP and install it
-        task = progress.add_task("Setting up ExaBGP venv...", total=None)
-        _setup_venv(config.venv_path)
-        progress.update(task, completed=True, description="[green]Setup ExaBGP venv[/green]")
+        # Step 4: Setup venv and install ExaBGP
+        if use_existing_venv:
+            task = progress.add_task("Installing ExaBGP in existing venv...", total=None)
+            _install_exabgp(venv_path)
+            progress.update(
+                task, completed=True, description="[green]Installed ExaBGP in existing venv[/green]"
+            )
+        else:
+            task = progress.add_task("Creating Python venv...", total=None)
+            _setup_venv(venv_path)
+            progress.update(task, completed=True, description="[green]Created Python venv[/green]")
 
-        task = progress.add_task("Installing ExaBGP...", total=None)
-        _install_exabgp(config.venv_path)
-        progress.update(task, completed=True, description="[green]Installed ExaBGP[/green]")
+            task = progress.add_task("Installing ExaBGP...", total=None)
+            _install_exabgp(venv_path)
+            progress.update(task, completed=True, description="[green]Installed ExaBGP[/green]")
 
         # Step 5: Create systemd services
         task = progress.add_task("Creating systemd services...", total=None)
-        _create_systemd_services(config)
+        _create_systemd_services(config, venv_path)
         progress.update(task, completed=True, description="[green]Created systemd services[/green]")
 
         # Step 6: Create initial config templates
         task = progress.add_task("Creating config templates...", total=None)
-        _create_config_templates(config, system)
+        _create_config_templates(config, system, venv_path)
         progress.update(task, completed=True, description="[green]Created config templates[/green]")
 
         # Step 7: Configure watchdog
@@ -167,19 +212,6 @@ def bootstrap(ctx: click.Context, path: str | None) -> None:
     console.print("  1. Run [bold]ober config[/bold] to configure BGP, VIPs, and backends")
     console.print("  2. Run [bold]ober doctor[/bold] to verify installation")
     console.print("  3. Run [bold]ober start[/bold] to start services")
-
-
-def _determine_install_path(path: str | None) -> Path:
-    """Determine the installation path."""
-    if path:
-        return Path(path)
-
-    # Check if we're in a venv
-    if sys.prefix != sys.base_prefix:
-        return Path(sys.prefix)
-
-    # Default to /opt/ober
-    return Path("/opt/ober")
 
 
 def _apply_kernel_tuning() -> None:
@@ -225,7 +257,7 @@ def _install_exabgp(venv_path: Path) -> None:
     run_command([str(pip_path), "install", "exabgp"])
 
 
-def _create_systemd_services(config: OberConfig) -> None:
+def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
     """Create systemd service files."""
     systemd_path = Path("/etc/systemd/system")
 
@@ -235,7 +267,7 @@ def _create_systemd_services(config: OberConfig) -> None:
 
     # ExaBGP service
     bgp_service = EXABGP_SERVICE.format(
-        venv_path=config.venv_path,
+        venv_path=venv_path,
         config_path=config.bgp_config_path,
     )
     (systemd_path / "ober-bgp.service").write_text(bgp_service)
@@ -244,7 +276,7 @@ def _create_systemd_services(config: OberConfig) -> None:
     run_command(["systemctl", "daemon-reload"])
 
 
-def _create_config_templates(config: OberConfig, system: SystemInfo) -> None:
+def _create_config_templates(config: OberConfig, system: SystemInfo, venv_path: Path) -> None:
     """Create initial configuration templates."""
     # Get local IP for defaults
     local_ip = system.get_local_ip() or "0.0.0.0"
@@ -297,7 +329,7 @@ frontend stats
 # Generated by ober bootstrap - run 'ober config' to customize
 
 process announce-routes {{
-    run {config.venv_path}/bin/python -m ober.commands.health;
+    run {venv_path}/bin/python -m ober.commands.health;
     encoder text;
 }}
 
@@ -321,9 +353,10 @@ process announce-routes {{
     config.bgp_config_path.parent.mkdir(parents=True, exist_ok=True)
     config.bgp_config_path.write_text(exabgp_cfg)
 
-    # Save main config
+    # Save main config with venv_path
     config.bgp.local_address = local_ip
     config.bgp.router_id = local_ip
+    config._venv_path_override = venv_path
     config.save()
 
 

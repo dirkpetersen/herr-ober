@@ -904,40 +904,59 @@ class TestTestCommandHelpers:
 class TestBootstrapHelpers:
     """Tests for bootstrap command helper functions."""
 
-    def test_determine_install_path_explicit(self) -> None:
-        """Test _determine_install_path with explicit path."""
-        from ober.commands.bootstrap import _determine_install_path
-
-        result = _determine_install_path("/custom/path")
-        assert result == Path("/custom/path")
-
-    def test_determine_install_path_default(self) -> None:
-        """Test _determine_install_path returns /opt/ober by default."""
+    def test_is_in_venv_true(self) -> None:
+        """Test _is_in_venv when in a venv."""
         import sys
 
-        from ober.commands.bootstrap import _determine_install_path
-
-        # When not in venv (sys.prefix == sys.base_prefix)
-        with (
-            patch.object(sys, "prefix", "/usr"),
-            patch.object(sys, "base_prefix", "/usr"),
-        ):
-            result = _determine_install_path(None)
-            assert result == Path("/opt/ober")
-
-    def test_determine_install_path_venv(self) -> None:
-        """Test _determine_install_path when in venv."""
-        import sys
-
-        from ober.commands.bootstrap import _determine_install_path
+        from ober.commands.bootstrap import _is_in_venv
 
         # When in venv (sys.prefix != sys.base_prefix)
         with (
             patch.object(sys, "prefix", "/home/user/.venv"),
             patch.object(sys, "base_prefix", "/usr"),
         ):
-            result = _determine_install_path(None)
+            assert _is_in_venv() is True
+
+    def test_is_in_venv_false(self) -> None:
+        """Test _is_in_venv when not in a venv."""
+        import sys
+
+        from ober.commands.bootstrap import _is_in_venv
+
+        # When not in venv (sys.prefix == sys.base_prefix)
+        with (
+            patch.object(sys, "prefix", "/usr"),
+            patch.object(sys, "base_prefix", "/usr"),
+        ):
+            assert _is_in_venv() is False
+
+    def test_get_current_venv_path_in_venv(self) -> None:
+        """Test _get_current_venv_path when in venv."""
+        import sys
+
+        from ober.commands.bootstrap import _get_current_venv_path
+
+        # When in venv (sys.prefix != sys.base_prefix)
+        with (
+            patch.object(sys, "prefix", "/home/user/.venv"),
+            patch.object(sys, "base_prefix", "/usr"),
+        ):
+            result = _get_current_venv_path()
             assert result == Path("/home/user/.venv")
+
+    def test_get_current_venv_path_not_in_venv(self) -> None:
+        """Test _get_current_venv_path when not in venv."""
+        import sys
+
+        from ober.commands.bootstrap import _get_current_venv_path
+
+        # When not in venv (sys.prefix == sys.base_prefix)
+        with (
+            patch.object(sys, "prefix", "/usr"),
+            patch.object(sys, "base_prefix", "/usr"),
+        ):
+            result = _get_current_venv_path()
+            assert result is None
 
 
 class TestDoctorPrintResults:
