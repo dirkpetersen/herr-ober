@@ -316,21 +316,39 @@ def _configure_route53_acme(current: CertConfig) -> CertConfig:
         default=current.route53_profile or "default",
     )
 
-    # Try to list hosted zones
+    # Try to list hosted zones with profile
     hosted_zones = _list_route53_hosted_zones(aws_profile)
 
+    # If profile failed, prompt for manual credential entry
     if not hosted_zones:
-        console.print("[yellow]Warning:[/yellow] Could not list Route53 hosted zones.")
-        console.print("Make sure AWS credentials are configured for the profile.")
-        hosted_zone_id = inquirer.text(
-            message="Route53 Hosted Zone ID (e.g., Z1234567890ABC)",
-            default=current.route53_hosted_zone_id,
+        console.print("[yellow]Warning:[/yellow] Could not find AWS profile or credentials.")
+        use_manual = inquirer.confirm(
+            "Enter credentials manually?",
+            default=True,
         )
-        domain = inquirer.text(
-            message="Domain name for certificate",
-            default=current.acme_domain,
-        )
-    else:
+
+        if use_manual:
+            aws_access_key = inquirer.text(
+                message="AWS Access Key ID",
+            )
+            aws_secret_key = inquirer.password(
+                message="AWS Secret Access Key",
+            )
+            aws_region = inquirer.text(
+                message="AWS Region (e.g., us-east-1)",
+                default="us-east-1",
+            )
+
+            # Try to list zones with manual credentials
+            hosted_zones = _list_route53_hosted_zones_with_creds(
+                aws_access_key, aws_secret_key, aws_region
+            )
+
+            if not hosted_zones:
+                console.print("[red]Error:[/red] Could not authenticate with provided credentials.")
+
+    # Now select/enter zone and domain
+    if hosted_zones:
         # Build choices from hosted zones
         zone_choices = [(f"{z['Name']} ({z['Id']})", z['Id']) for z in hosted_zones]
 
@@ -355,6 +373,16 @@ def _configure_route53_acme(current: CertConfig) -> CertConfig:
         domain = inquirer.text(
             message="Domain name for certificate",
             default=current.acme_domain or zone_name,
+        )
+    else:
+        # No zones found - get manual input
+        hosted_zone_id = inquirer.text(
+            message="Route53 Hosted Zone ID (e.g., Z1234567890ABC)",
+            default=current.route53_hosted_zone_id,
+        )
+        domain = inquirer.text(
+            message="Domain name for certificate",
+            default=current.acme_domain,
         )
 
     acme_email = inquirer.text(
@@ -403,6 +431,33 @@ def _list_route53_hosted_zones(profile: str) -> list[dict[str, str]]:
     try:
         import boto3  # type: ignore[import-untyped]
         session = boto3.Session(profile_name=profile)
+        client = session.client("route53")
+        response = client.list_hosted_zones()
+        zones = []
+        for zone in response.get("HostedZones", []):
+            zone_id = zone["Id"].replace("/hostedzone/", "")
+            zones.append({
+                "Id": zone_id,
+                "Name": zone["Name"],
+            })
+        return zones
+    except Exception:
+        pass
+
+    return []
+
+
+def _list_route53_hosted_zones_with_creds(
+    access_key: str, secret_key: str, region: str
+) -> list[dict[str, str]]:
+    """List Route53 hosted zones using explicit AWS credentials."""
+    try:
+        import boto3  # type: ignore[import-untyped]
+        session = boto3.Session(
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+        )
         client = session.client("route53")
         response = client.list_hosted_zones()
         zones = []
