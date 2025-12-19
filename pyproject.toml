@@ -49,7 +49,6 @@ dev = [
 
 [project.scripts]
 ober = "ober.cli:main"
-ober-install-wrapper = "ober.wrapper:install_wrapper"
 
 [project.urls]
 Homepage = "https://github.com/dirkpetersen/ober"
