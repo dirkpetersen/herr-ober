@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Herr Ober - High-performance S3 ingress controller for Ceph RGW clusters."""
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __author__ = "Dirk Petersen"
 
 from ober.config import OberConfig
