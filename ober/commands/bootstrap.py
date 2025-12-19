@@ -253,8 +253,16 @@ def _setup_venv(venv_path: Path) -> None:
 
 def _install_exabgp(venv_path: Path) -> None:
     """Install ExaBGP in the virtual environment."""
+    python_path = venv_path / "bin" / "python"
     pip_path = venv_path / "bin" / "pip"
-    run_command([str(pip_path), "install", "exabgp"])
+
+    # pipx venvs don't include pip by default, so use python -m pip
+    # which works whether pip is installed as a standalone or as a module
+    if pip_path.exists():
+        run_command([str(pip_path), "install", "exabgp"])
+    else:
+        # Use python -m pip (works in pipx venvs)
+        run_command([str(python_path), "-m", "pip", "install", "exabgp"])
 
 
 def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
