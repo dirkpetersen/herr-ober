@@ -178,6 +178,114 @@ ober/
 - Initial version: 0.1.0
 - Docstrings: Google style
 
+### Integration Test Infrastructure
+
+End-to-end testing with mock S3 backends:
+
+```
+                    ┌─────────────┐
+                    │   boto3     │
+                    │   client    │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │  HAProxy    │
+                    │  (test cfg) │
+                    └──────┬──────┘
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+       ┌─────────────┐          ┌─────────────┐
+       │   moto S3   │          │   moto S3   │
+       │  (port 5001)│          │  (port 5002)│
+       └─────────────┘          └─────────────┘
+```
+
+**Components:**
+- **2x moto S3 servers** - Mock S3 backends running as daemon processes (ports 5001, 5002)
+- **HAProxy** - Test configuration proxying to both moto instances (least-connections)
+- **boto3 client** - Uploads auto-generated test files through HAProxy
+
+**Test scenarios:**
+- Upload/download files of various sizes through HAProxy
+- Verify least-connections load balancing across backends
+- Test HAProxy health checks detect moto backend failures
+- Test graceful reload of HAProxy config
+- Test certificate handling (self-signed for tests)
+
+**What we CAN'T test on single host:**
+- BGP announcement/withdrawal (requires router or network namespace trickery)
+- ECMP failover (requires multiple nodes)
+- BFD (requires router support)
+
+BGP-related code should be unit tested with mocked ExaBGP interactions.
+
+**pytest fixture example:**
+```python
+import pytest
+import subprocess
+import time
+import boto3
+from moto.server import create_backend_app
+import threading
+
+@pytest.fixture(scope="session")
+def moto_servers():
+    """Start two moto S3 servers as backends."""
+    servers = []
+    for port in [5001, 5002]:
+        app = create_backend_app("s3")
+        thread = threading.Thread(
+            target=lambda p=port: app.run(host="127.0.0.1", port=p, threaded=True),
+            daemon=True
+        )
+        thread.start()
+        servers.append(f"http://127.0.0.1:{port}")
+    time.sleep(1)  # Wait for servers to start
+    yield servers
+
+@pytest.fixture(scope="session")
+def haproxy_test(moto_servers, tmp_path_factory):
+    """Start HAProxy with test config pointing to moto backends."""
+    cfg_dir = tmp_path_factory.mktemp("haproxy")
+    cfg_file = cfg_dir / "haproxy.cfg"
+    cfg_file.write_text(f'''
+global
+    daemon
+
+defaults
+    mode http
+    timeout connect 5s
+    timeout client 30s
+    timeout server 30s
+
+frontend s3_front
+    bind *:8080
+    default_backend s3_back
+
+backend s3_back
+    balance leastconn
+    option httpchk GET /
+    server moto1 127.0.0.1:5001 check
+    server moto2 127.0.0.1:5002 check
+''')
+    proc = subprocess.Popen(["haproxy", "-f", str(cfg_file)])
+    time.sleep(1)
+    yield "http://127.0.0.1:8080"
+    proc.terminate()
+
+@pytest.fixture
+def s3_client(haproxy_test):
+    """boto3 client configured to use HAProxy endpoint."""
+    return boto3.client(
+        "s3",
+        endpoint_url=haproxy_test,
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+    )
+```
+
 ## Package Usage
 
 - CLI: `ober <command>`
@@ -219,6 +327,8 @@ Python 3.12+ required. Key packages:
 
 Dev dependencies (optional `[dev]` extra):
 - `pytest`, `pytest-cov` - Testing
+- `moto[server]` - Mock S3 backend servers for integration tests
+- `boto3` - S3 client for integration tests
 - `ruff` - Linting/formatting
 - `mypy` - Type checking
 
