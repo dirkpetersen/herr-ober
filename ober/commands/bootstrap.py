@@ -217,6 +217,11 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
         _configure_watchdog()
         progress.update(task, completed=True, description="[green]Configured watchdog[/green]")
 
+        # Step 8: Open firewall ports
+        task = progress.add_task("Opening firewall ports...", total=None)
+        _open_firewall_ports(system)
+        progress.update(task, completed=True, description="[green]Opened firewall ports[/green]")
+
     console.print()
     console.print("[bold green]Bootstrap complete![/bold green]")
     console.print()
@@ -392,3 +397,54 @@ def _configure_watchdog() -> None:
                 f.write("\n# Herr Ober watchdog settings\n")
                 f.write("RuntimeWatchdogSec=10s\n")
                 f.write("ShutdownWatchdogSec=2min\n")
+
+
+def _open_firewall_ports(system: SystemInfo) -> None:
+    """Open firewall ports 80 (HTTP) and 443 (HTTPS)."""
+    if system.os_family == OSFamily.DEBIAN:
+        # Ubuntu/Debian uses ufw or iptables
+        # First check if ufw is available and active
+        result = run_command(["which", "ufw"], check=False)
+        if result.returncode == 0:
+            # Try to enable ufw if not already enabled
+            run_command(["ufw", "--force", "enable"], check=False)
+            # Open ports
+            run_command(["ufw", "allow", "80/tcp"], check=False)
+            run_command(["ufw", "allow", "443/tcp"], check=False)
+        else:
+            # Fall back to iptables if ufw is not available
+            run_command(
+                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"],
+                check=False,
+            )
+            run_command(
+                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
+                check=False,
+            )
+            # Save iptables rules
+            run_command(["iptables-save"], check=False)
+    elif system.os_family == OSFamily.RHEL:
+        # RHEL 10+ uses firewalld
+        # Check if firewalld is available
+        result = run_command(["which", "firewall-cmd"], check=False)
+        if result.returncode == 0:
+            # Enable firewalld if not running
+            run_command(["systemctl", "start", "firewalld"], check=False)
+            run_command(["systemctl", "enable", "firewalld"], check=False)
+            # Open ports
+            run_command(["firewall-cmd", "--permanent", "--add-port=80/tcp"], check=False)
+            run_command(["firewall-cmd", "--permanent", "--add-port=443/tcp"], check=False)
+            # Reload firewall
+            run_command(["firewall-cmd", "--reload"], check=False)
+        else:
+            # Fall back to iptables if firewalld is not available
+            run_command(
+                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"],
+                check=False,
+            )
+            run_command(
+                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
+                check=False,
+            )
+            # Save iptables rules (for RHEL)
+            run_command(["iptables-save"], check=False)
