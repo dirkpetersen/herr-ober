@@ -531,7 +531,7 @@ def _list_route53_hosted_zones(profile: str) -> list[dict[str, str]]:
     console.print("[yellow]Trying boto3...[/yellow]")
     try:
         import boto3  # type: ignore[import-untyped]
-        from botocore.session import Session as BotocoreSession
+        from botocore.session import Session as BotocoreSession  # type: ignore[import-untyped]
 
         # Use explicit credentials file path to handle sudo scenarios
         creds_file = _get_aws_credentials_path()

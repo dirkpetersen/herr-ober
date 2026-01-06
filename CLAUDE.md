@@ -99,6 +99,62 @@ Critical relationship: `ober-bgp.service` has `BindsTo=ober-http.service`. If HA
 - BGP-related code unit tested with mocked ExaBGP
 - Minimum coverage: 50%
 
+### Testing Patterns
+Key fixtures in `tests/conftest.py`:
+- `cli_runner` - Click CLI test runner for testing commands
+- `temp_dir` / `temp_config` - Temporary test environments with isolated directories
+- `mock_system_info` - Mock `SystemInfo` to simulate different OS environments (Ubuntu/RHEL)
+- `mock_root_system_info` - Same as above but with `is_root = True` for testing privileged operations
+- `mock_run_command` - Mock system command execution to avoid actual shell calls
+- `mock_check_command_exists` - Mock command availability checks
+- `sample_config` - Pre-configured `OberConfig` with BGP, VIPs, backends, and certs for testing
+
+Pattern: All tests use these fixtures to avoid real system calls. Mock the system detection, command execution, and file operations consistently.
+
+### Health Check Mechanism
+**CRITICAL:** The `ober health <vip>` command is NOT run directly by users. It's spawned by ExaBGP as a process.
+
+How it works:
+1. ExaBGP starts `ober health <vip>` as a subprocess (configured in `bgp/config.ini`)
+2. The health command continuously polls HAProxy's health endpoint (`http://127.0.0.1:8404/health`)
+3. It outputs BGP commands to **stdout** using ExaBGP's text encoder format:
+   - `announce route <vip>/32 next-hop self` - when HAProxy is healthy
+   - `withdraw route <vip>/32 next-hop self` - when HAProxy fails
+4. ExaBGP reads these commands from stdout and updates BGP routes accordingly
+5. On SIGTERM/SIGINT, the process gracefully withdraws all routes before exiting
+
+The health check is the bridge between HAProxy's operational state and BGP route announcements. If HAProxy fails, routes are withdrawn within ~1-2 seconds.
+
+### Path Resolution Logic
+**IMPORTANT:** Ober auto-detects whether it's running in a virtual environment (venv/pipx) vs a custom installation. This affects ALL config and certificate paths.
+
+Detection logic (`ober/commands/bootstrap.py`):
+```python
+def _is_in_venv():
+    return sys.prefix != sys.base_prefix
+
+def _get_current_venv_path():
+    if _is_in_venv():
+        return Path(sys.prefix)
+    return None
+```
+
+Behavior:
+- **If in venv (pipx recommended):** Automatically uses `sys.prefix` as install path
+  - Example: `~/.local/pipx/venvs/herr-ober/` becomes the base for all config/certs
+  - Bootstrap command: `sudo ober bootstrap` (no path required)
+- **If NOT in venv:** Requires explicit install path
+  - Bootstrap command: `sudo ober bootstrap /opt/ober`
+  - All paths derived from this explicit location
+
+All config paths are computed as properties in `OberConfig`:
+- `config_path = install_path / "etc" / "ober.yaml"`
+- `haproxy_config_path = install_path / "etc" / "haproxy" / "haproxy.cfg"`
+- `bgp_config_path = install_path / "etc" / "bgp" / "config.ini"`
+- `cert_dir = install_path / "etc" / "certs"`
+
+**There are NO hardcoded default paths.** This ensures predictable behavior across different installation methods.
+
 ### Key Paths
 With pipx (recommended):
 - `~/.local/pipx/venvs/herr-ober/etc/ober.yaml` - Main config
