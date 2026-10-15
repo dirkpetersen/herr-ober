@@ -102,7 +102,8 @@ class TestProtectHome:
             patch.object(bs, "run_command"),
         ):
             bs._create_systemd_services(config, venv)
-        return {f.name: f.read_text() for f in sysd.iterdir()}
+        # Services only: timers have no ProtectHome
+        return {f.name: f.read_text() for f in sysd.iterdir() if f.suffix == ".service"}
 
     def test_home_venv_read_only(self, temp_dir: Path) -> None:
         units = self._units(
@@ -110,15 +111,19 @@ class TestProtectHome:
             Path("/root/.local/pipx/venvs/herr-ober"),
             temp_dir,
         )
-        assert len(units) == 3
+        assert len(units) == 5  # http, bgp, ha, watch, blocklist
         for text in units.values():
             assert "ProtectHome=read-only" in text
             assert "ProtectHome=true" not in text
 
     def test_opt_is_true(self, temp_dir: Path) -> None:
         units = self._units(Path("/opt/ober"), Path("/opt/pipx/venvs/herr-ober"), temp_dir)
-        for text in units.values():
-            assert "ProtectHome=true" in text
+        for name, text in units.items():
+            if name in ("ober-watch.service", "ober-blocklist.service"):
+                # These read secrets from /root/.ober/login, so always read-only
+                assert "ProtectHome=read-only" in text
+            else:
+                assert "ProtectHome=true" in text
 
     def test_venv_under_home_install_elsewhere(self, temp_dir: Path) -> None:
         units = self._units(Path("/opt/ober"), Path("/home/u/venv"), temp_dir)

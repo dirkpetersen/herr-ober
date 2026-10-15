@@ -1,0 +1,196 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Direct data collection rule (no DCE needed) for Herr Ober. Deploy tables.json first."
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string"
+    },
+    "dcrName": {
+      "type": "string",
+      "defaultValue": "dcr-herr-ober"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Must equal the workspace region."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Insights/dataCollectionRules",
+      "apiVersion": "2023-03-11",
+      "name": "[parameters('dcrName')]",
+      "location": "[parameters('location')]",
+      "kind": "Direct",
+      "properties": {
+        "streamDeclarations": {
+          "Custom-OberFindings_CL": {
+            "columns": [
+              {
+                "name": "TimeGenerated",
+                "type": "datetime"
+              },
+              {
+                "name": "finding_id",
+                "type": "string"
+              },
+              {
+                "name": "ts",
+                "type": "real"
+              },
+              {
+                "name": "rule",
+                "type": "string"
+              },
+              {
+                "name": "severity",
+                "type": "string"
+              },
+              {
+                "name": "client_ip",
+                "type": "string"
+              },
+              {
+                "name": "access_key",
+                "type": "string"
+              },
+              {
+                "name": "bucket",
+                "type": "string"
+              },
+              {
+                "name": "node",
+                "type": "string"
+              },
+              {
+                "name": "count",
+                "type": "long"
+              },
+              {
+                "name": "window_s",
+                "type": "long"
+              },
+              {
+                "name": "detail",
+                "type": "string"
+              },
+              {
+                "name": "action",
+                "type": "string"
+              },
+              {
+                "name": "layer",
+                "type": "string"
+              }
+            ]
+          },
+          "Custom-OberKeySummary_CL": {
+            "columns": [
+              {
+                "name": "TimeGenerated",
+                "type": "datetime"
+              },
+              {
+                "name": "window_start",
+                "type": "real"
+              },
+              {
+                "name": "window_s",
+                "type": "long"
+              },
+              {
+                "name": "access_key",
+                "type": "string"
+              },
+              {
+                "name": "requests",
+                "type": "long"
+              },
+              {
+                "name": "bytes_in",
+                "type": "long"
+              },
+              {
+                "name": "bytes_out",
+                "type": "long"
+              },
+              {
+                "name": "auth_failures",
+                "type": "long"
+              },
+              {
+                "name": "errors_5xx",
+                "type": "long"
+              },
+              {
+                "name": "distinct_ips",
+                "type": "long"
+              },
+              {
+                "name": "distinct_buckets",
+                "type": "long"
+              },
+              {
+                "name": "internet_requests",
+                "type": "long"
+              },
+              {
+                "name": "nodes",
+                "type": "dynamic"
+              }
+            ]
+          }
+        },
+        "destinations": {
+          "logAnalytics": [
+            {
+              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+              "name": "ober-workspace"
+            }
+          ]
+        },
+        "dataFlows": [
+          {
+            "streams": [
+              "Custom-OberFindings_CL"
+            ],
+            "destinations": [
+              "ober-workspace"
+            ],
+            "transformKql": "source",
+            "outputStream": "Custom-OberFindings_CL"
+          },
+          {
+            "streams": [
+              "Custom-OberKeySummary_CL"
+            ],
+            "destinations": [
+              "ober-workspace"
+            ],
+            "transformKql": "source",
+            "outputStream": "Custom-OberKeySummary_CL"
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "dcrResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('dcrName'))]"
+    },
+    "dcrImmutableId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', parameters('dcrName')), '2023-03-11').immutableId]"
+    },
+    "logsIngestionEndpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', parameters('dcrName')), '2023-03-11').endpoints.logsIngestion]"
+    }
+  }
+}
