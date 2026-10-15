@@ -48,9 +48,9 @@ To achieve 50GB/s and true HA, the VM hardware definition is critical.
 ### VM Hardware Configuration
 
 * **CPU:** Type = **`host`** (Pass-through AES-NI instructions for SSL).
-* **Memory:** Static allocation (Disable Ballooning to prevent latency spikes).
-* **Network:** Device = **`VirtIO`** (virtio-net).
-  * **Multiqueue:** Set to match vCPU count (e.g., 8 Queues for 8 vCPUs).
+* **Memory:** Static allocation (Disable Ballooning to prevent latency spikes), backed by 1G hugepages.
+* **Network:** **SR-IOV VFs** passed through to the VM (front and back on separate VLANs). Bridged virtio-net can't reach the per-node target.
+  * **Fallback:** `VirtIO` with multiqueue set to the vCPU count (e.g., 8 queues for 8 vCPUs).
 * **Watchdog:**
   * **Model:** `Intel 6300ESB`
   * **Action:** `Reset` (Hard reboot if guest OS freezes).
@@ -357,8 +357,8 @@ BGP passwords and other sensitive data. Permissions: 600.
 
 ## 11. Deployment Checklist
 
-1. **Proxmox:** Add `Intel 6300ESB` Watchdog device to VM.
-2. **Network:** Verify `virtio` Multiqueue is active.
+1. **Proxmox:** Set up the host and VM per [docs/proxmox-deployment.md](docs/proxmox-deployment.md), including the `Intel 6300ESB` watchdog device.
+2. **Network:** Verify both SR-IOV VFs are visible in the guest (`lspci`, `ethtool`), or that `virtio` multiqueue is active on the fallback path.
 3. **Install:** See [README.md](README.md#quick-start) for installation instructions.
 4. **Bootstrap:** `sudo ober bootstrap` (installs HAProxy, ExaBGP, applies tuning)
 5. **Configure:** `sudo ober config` (interactive wizard)
