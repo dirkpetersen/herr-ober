@@ -42,7 +42,17 @@ CI (`.github/workflows/test.yml`, Python 3.12 + 3.13) runs `ruff check .`, **`ru
 
 ### Install path resolution
 
-`bootstrap.py`: if `sys.prefix != sys.base_prefix` (venv/pipx, the recommended setup), `install_path` defaults to `sys.prefix`. Otherwise `sudo ober bootstrap <path>` is required. In `config.py`, `OberConfig()`'s default `install_path` is `sys.prefix` in a venv and `<tempdir>/ober` otherwise (a fallback meant for tests). When a pipx venv is used, `venv_path` is saved separately (`_venv_path_override`) and `bin/`/`venv/` dirs are not created.
+`OberConfig()`'s default `install_path` (`_get_default_install_path()` in `ober/config.py`) resolves in this order:
+1. `OBER_INSTALL_PATH` env var.
+2. The pointer file `/etc/ober/install_path` (`INSTALL_POINTER_PATH`), written by bootstrap and removed by uninstall.
+3. `sys.prefix` when running in a venv.
+4. `<tempdir>/ober` (a fallback meant for tests).
+
+This is how every later command, including the ExaBGP-spawned health process, finds a custom install. An autouse fixture in `tests/conftest.py` redirects the pointer so tests never read the real `/etc/ober`.
+
+Bootstrap in a venv (pipx, the recommended setup) defaults to the existing pointer, then `sys.prefix`. Outside a venv, `sudo ober bootstrap <path>` is required. With a pipx venv, `venv_path` is saved separately (`_venv_path_override`) and the `bin/` and `venv/` dirs are not created.
+
+`install.sh` installs pipx globally (`PIPX_HOME=/opt/pipx`, `PIPX_BIN_DIR=/usr/local/bin`), because the systemd units use `ProtectHome=true` and can't see `/root`. Bootstrap falls back to `ProtectHome=read-only` when the install or venv path is under `/root` or `/home`.
 
 ### BGP mode health check
 
@@ -64,7 +74,7 @@ CI (`.github/workflows/test.yml`, Python 3.12 + 3.13) runs `ruff check .`, **`ru
 
 - Strict mypy: full type annotations, Google-style docstrings.
 - Exit codes 0/1. Root-only commands check `system.is_root` and `ctx.exit(1)`. `config --dry-run` works without root. Destructive ops (`uninstall`) confirm first.
-- Node/router/peer inputs accept Slurm hostlists (`hostlist` package; see `_parse_hostlist` in `commands/config.py` and `sync.py`).
+- Node/router/peer inputs accept Slurm hostlists. `sync.py` uses the `python-hostlist` package (import name `hostlist`). The PyPI package literally named `hostlist` is unrelated, so don't depend on it. `_parse_hostlist` in `commands/config.py` is its own regex and handles one `[a-b]` range per item.
 
 ## Testing
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ober bootstrap command - automated installation."""
 
+import contextlib
 import sys
 import venv
 from pathlib import Path
@@ -9,6 +10,7 @@ import click
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from ober import config as ober_config
 from ober.config import OberConfig
 from ober.system import OSFamily, SystemInfo, run_command
 
@@ -42,6 +44,9 @@ net.ipv4.tcp_wmem = 4096 65536 134217728
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
+# HAProxy binds VIPs that keepalived may not have assigned to this node yet
+net.ipv4.ip_nonlocal_bind = 1
+
 # Local Port Range
 net.ipv4.ip_local_port_range = 1024 65535
 
@@ -67,7 +72,7 @@ KillMode=mixed
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome={protect_home}
 ReadWritePaths=/run /var/log
 
 [Install]
@@ -90,7 +95,7 @@ RestartSec=1s
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome={protect_home}
 
 [Install]
 WantedBy=multi-user.target
@@ -115,7 +120,7 @@ RestartSec=1s
 # Security
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome={protect_home}
 ReadWritePaths=/run
 
 [Install]
@@ -158,7 +163,15 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
         # ober is running in a venv (e.g., pipx), use it for ExaBGP and configs too
         venv_path: Path = current_venv
         # For pipx installs, everything goes in the venv (unless custom path specified)
-        install_path = Path(path) if path else venv_path
+        if path:
+            install_path = Path(path).expanduser().resolve()
+        else:
+            existing = ober_config._read_install_pointer()
+            if existing is not None:
+                install_path = existing
+                console.print(f"[bold]Reusing existing install path:[/bold] {install_path}")
+            else:
+                install_path = venv_path
         console.print(f"[bold]Detected venv:[/bold] {venv_path}")
         console.print("ExaBGP and configs will be installed in the existing venv.")
     else:
@@ -173,7 +186,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
             console.print("  sudo ober bootstrap /opt/ober")
             ctx.exit(1)
 
-        install_path = Path(path)
+        install_path = Path(path).expanduser().resolve()
 
         venv_path = install_path / "venv"
         console.print(f"[bold]Installation path:[/bold] {install_path}")
@@ -200,6 +213,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
         # Step 1: Create directories
         task = progress.add_task("Creating directories...", total=None)
         config.ensure_directories()
+        _write_install_pointer(install_path)
         progress.update(task, completed=True, description="[green]Created directories[/green]")
 
         # Step 2: Apply kernel tuning
@@ -310,23 +324,54 @@ def _install_exabgp(venv_path: Path) -> None:
         run_command([str(python_path), "-m", "pip", "install", "exabgp"])
 
 
+def _is_under_home(path: Path) -> bool:
+    """Return True if path is inside /root or /home."""
+    candidates = {str(path)}
+    with contextlib.suppress(OSError, RuntimeError):
+        candidates.add(str(path.resolve()))
+    return any(
+        p == base or p.startswith(base + "/") for p in candidates for base in ("/root", "/home")
+    )
+
+
+def _write_install_pointer(install_path: Path) -> None:
+    """Record the install path so later commands (and ExaBGP) can find the config."""
+    pointer = ober_config.INSTALL_POINTER_PATH
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(f"{install_path}\n")
+
+
 def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
     """Create systemd service files."""
     systemd_path = Path("/etc/systemd/system")
 
+    protect_home = "true"
+    if _is_under_home(config.install_path) or _is_under_home(venv_path):
+        protect_home = "read-only"
+        console.print(
+            "[yellow]Warning:[/yellow] Ober is installed under /root or /home; "
+            "using ProtectHome=read-only. Reinstall globally (PIPX_HOME=/opt/pipx "
+            "PIPX_BIN_DIR=/usr/local/bin) to avoid this."
+        )
+
     # HAProxy service
-    http_service = HAPROXY_SERVICE.format(config_path=config.haproxy_config_path)
+    http_service = HAPROXY_SERVICE.format(
+        config_path=config.haproxy_config_path, protect_home=protect_home
+    )
     (systemd_path / "ober-http.service").write_text(http_service)
 
     # ExaBGP service
     bgp_service = EXABGP_SERVICE.format(
         venv_path=venv_path,
         config_path=config.bgp_config_path,
+        protect_home=protect_home,
     )
     (systemd_path / "ober-bgp.service").write_text(bgp_service)
 
     # Keepalived service
-    ka_service = KEEPALIVED_SERVICE.format(config_path=config.keepalived_config_path)
+    ka_service = KEEPALIVED_SERVICE.format(
+        config_path=config.keepalived_config_path, protect_home=protect_home
+    )
     (systemd_path / "ober-ha.service").write_text(ka_service)
 
     # Reload systemd
@@ -378,8 +423,7 @@ frontend stats
 #     option httpchk GET /
 #     server rgw1 127.0.0.1:7480 check
 """
-    config.haproxy_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.haproxy_config_path.write_text(haproxy_cfg)
+    _write_if_missing(config.haproxy_config_path, haproxy_cfg)
 
     # Create minimal ExaBGP config
     exabgp_cfg = f"""# Herr Ober ExaBGP Configuration
@@ -407,8 +451,7 @@ process announce-routes {{
 #     }}
 # }}
 """
-    config.bgp_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.bgp_config_path.write_text(exabgp_cfg)
+    _write_if_missing(config.bgp_config_path, exabgp_cfg)
 
     # Create minimal keepalived config
     keepalived_cfg = """# Herr Ober Keepalived Configuration
@@ -420,14 +463,32 @@ global_defs {
 
 # Configure with 'ober config'
 """
-    config.keepalived_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.keepalived_config_path.write_text(keepalived_cfg)
+    _write_if_missing(config.keepalived_config_path, keepalived_cfg)
 
-    # Save main config with venv_path
+    # Save main config with venv_path, keeping an existing config intact
+    if config.config_path.exists():
+        existing = OberConfig.load(config.config_path)
+        existing.install_path = config.install_path
+        existing._venv_path_override = venv_path
+        existing.save()
+        console.print(
+            f"[yellow]Note:[/yellow] Existing config kept at {config.config_path} "
+            "(run 'ober config' to regenerate)."
+        )
+        return
+
     config.bgp.local_address = local_ip
     config.bgp.router_id = local_ip
     config._venv_path_override = venv_path
     config.save()
+
+
+def _write_if_missing(path: Path, content: str) -> None:
+    """Write a generated config file unless it already exists."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return
+    path.write_text(content)
 
 
 def _configure_watchdog() -> None:

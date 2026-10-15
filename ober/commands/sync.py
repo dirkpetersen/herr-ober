@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ober sync command - update external system whitelists."""
 
+import logging
 import socket
 from typing import Any
 
@@ -27,7 +28,11 @@ def expand_hostlist(hostlist: str) -> list[str]:
         import hostlist as hl  # type: ignore[import-untyped]
 
         return list(hl.expand_hostlist(hostlist))
-    except ImportError:
+    except (ImportError, AttributeError) as e:
+        # AttributeError: a leftover old 'hostlist' package dir shadows python-hostlist
+        logging.getLogger(__name__).warning(
+            "hostlist unavailable or shadowed (%s); run 'pipx reinstall herr-ober'", e
+        )
         # Fallback: treat as comma-separated
         return [h.strip() for h in hostlist.split(",") if h.strip()]
 

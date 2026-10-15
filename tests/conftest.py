@@ -12,6 +12,16 @@ from click.testing import CliRunner
 from ober.config import OberConfig
 
 
+@pytest.fixture(autouse=True)
+def _isolate_install_pointer(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never touch the real /etc/ober pointer file or OBER_INSTALL_PATH."""
+    pointer = tmp_path_factory.mktemp("pointer") / "etc" / "ober" / "install_path"
+    monkeypatch.setattr("ober.config.INSTALL_POINTER_PATH", pointer)
+    monkeypatch.delenv("OBER_INSTALL_PATH", raising=False)
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     """Create a Click CLI test runner."""

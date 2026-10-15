@@ -75,7 +75,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     console.print("[bold yellow]Ober Uninstall[/bold yellow]")
     console.print()
     console.print("This will remove:")
-    console.print("  - Systemd services (ober-http, ober-bgp)")
+    console.print("  - Systemd services (ober-http, ober-bgp, ober-ha)")
     console.print(f"  - Installation directory: {config.install_path}")
     if has_local_venv:
         console.print(f"  - Python venv (with ExaBGP): {local_venv}")
@@ -103,7 +103,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
 
     # Step 1: Stop services
     console.print("Stopping services...")
-    for service_name in ["ober-bgp", "ober-http"]:
+    for service_name in ["ober-bgp", "ober-ha", "ober-http"]:
         service = ServiceInfo.from_service_name(service_name)
         if service.is_active:
             try:
@@ -118,7 +118,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     # Step 2: Remove systemd service files
     console.print("Removing systemd services...")
     systemd_path = Path("/etc/systemd/system")
-    for service_file in ["ober-http.service", "ober-bgp.service"]:
+    for service_file in ["ober-http.service", "ober-bgp.service", "ober-ha.service"]:
         service_path = systemd_path / service_file
         if service_path.exists():
             service_path.unlink()
@@ -156,6 +156,18 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
             shutil.rmtree(config.install_path)
             console.print(f"  [green]Removed {config.install_path}[/green]")
 
+    # Remove install-path pointer (unless config is being kept)
+    if not keep_config:
+        from ober import config as ober_config
+
+        pointer = ober_config.INSTALL_POINTER_PATH
+        if pointer.exists():
+            with contextlib.suppress(OSError):
+                pointer.unlink()
+                console.print(f"  [green]Removed {pointer}[/green]")
+            with contextlib.suppress(OSError):
+                pointer.parent.rmdir()  # only if empty
+
     # Step 6: Remove user secrets
     secrets_path = Path.home() / ".ober"
     if secrets_path.exists() and not keep_config:
@@ -179,9 +191,18 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
             console.print()
             console.print(f"Configuration preserved at: {config.config_path}")
         # Use subprocess directly to avoid issues after package removal
+        import os
         import subprocess
 
-        subprocess.run(["pipx", "uninstall", "herr-ober"], check=False)
+        env = dict(os.environ)
+        if (
+            pipx_venv is not None
+            and pipx_venv.parent.name == "venvs"
+            and not str(pipx_venv).startswith(("/root/", "/home/"))
+        ):
+            env["PIPX_HOME"] = str(pipx_venv.parent.parent)  # e.g. /opt/pipx
+            env["PIPX_BIN_DIR"] = "/usr/local/bin"
+        subprocess.run(["pipx", "uninstall", "herr-ober"], check=False, env=env)
         # Exit immediately - we can't continue after removing ourselves
         return
 

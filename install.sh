@@ -42,9 +42,34 @@ if ! command -v pipx &> /dev/null; then
     esac
 fi
 
-# Ensure pipx path is set up
-export PATH="$PATH:/root/.local/bin"
-pipx ensurepath &> /dev/null || true
+# Install globally, outside /root: the systemd units use ProtectHome=true, so a
+# venv under /root would be invisible to HAProxy/ExaBGP. (Env vars work on all
+# pipx versions; 'pipx install --global' needs pipx >= 1.5.)
+export PIPX_HOME=/opt/pipx
+export PIPX_BIN_DIR=/usr/local/bin
+export PATH="$PATH:/usr/local/bin"
+
+# Migration from v0.3.0, which installed under root's home (~/.local/pipx).
+LEGACY_VENV=/root/.local/pipx/venvs/herr-ober
+NEW_VENV=/opt/pipx/venvs/herr-ober
+
+# A stale /usr/local/bin/ober (symlink into the old venv or ~/.local/bin) would make
+# pipx refuse to replace it ("File exists ... Not modifying"), keeping the old version.
+if [ -e /usr/local/bin/ober ] || [ -L /usr/local/bin/ober ]; then
+    OBER_TARGET="$(readlink -f /usr/local/bin/ober || true)"
+    case "$OBER_TARGET" in
+        /opt/pipx/*) ;;
+        *)
+            echo "Removing stale /usr/local/bin/ober (points to '${OBER_TARGET:-nowhere}')"
+            rm -f /usr/local/bin/ober
+            ;;
+    esac
+fi
+
+LEGACY_NOTICE=0
+if [ -d "$LEGACY_VENV/etc" ]; then
+    LEGACY_NOTICE=1
+fi
 
 # Install herr-ober via pipx
 echo "Installing herr-ober..."
@@ -55,16 +80,33 @@ else
     pipx install herr-ober
 fi
 
-# Create symlink in /usr/local/bin
-OBER_BIN="/root/.local/bin/ober"
-SYMLINK="/usr/local/bin/ober"
+# Make later 'pipx upgrade herr-ober' in a new root shell find the global install
+cat > /etc/profile.d/herr-ober.sh <<'EOF'
+# Herr Ober: global pipx location (written by install.sh)
+export PIPX_HOME=/opt/pipx
+export PIPX_BIN_DIR=/usr/local/bin
+EOF
+chmod 644 /etc/profile.d/herr-ober.sh
 
-if [ -f "$OBER_BIN" ]; then
-    echo "Creating symlink at $SYMLINK..."
-    ln -sf "$OBER_BIN" "$SYMLINK"
-else
-    echo "Error: ober binary not found at $OBER_BIN"
-    exit 1
+OBER_TARGET="$(readlink -f /usr/local/bin/ober 2>/dev/null || true)"
+case "$OBER_TARGET" in
+    /opt/pipx/*) ;;
+    *)
+        echo "Error: /usr/local/bin/ober does not resolve into /opt/pipx (got '${OBER_TARGET:-missing}')"
+        echo "Remove it and re-run this installer."
+        exit 1
+        ;;
+esac
+
+if [ "$LEGACY_NOTICE" -eq 1 ]; then
+    echo ""
+    echo "NOTE: A configuration from a previous install was found at:"
+    echo "  $LEGACY_VENV/etc"
+    echo "It was NOT moved or deleted. Choose one:"
+    echo "  a) Keep using that location:"
+    echo "       sudo ober bootstrap $LEGACY_VENV"
+    echo "  b) Move to the new location:"
+    echo "       sudo cp -a $LEGACY_VENV/etc $NEW_VENV/etc && sudo ober bootstrap"
 fi
 
 # Verify installation
