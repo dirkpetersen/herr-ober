@@ -43,13 +43,17 @@ class SecurityConfig:
     allowlist_enabled: bool = True  # phase 1: internet VIPs are default-deny
     allowlist: list[str] = field(default_factory=list)  # institution CIDRs
     trusted_networks: list[str] = field(default_factory=list)  # never limited or banned
+    # Sources allowed on internal VIPs; [] = no restriction (pre-0.4 behavior)
+    internal_networks: list[str] = field(default_factory=list)
     deny_admin_api: bool = True  # block RGW /admin on internet VIPs
     deny_anonymous: bool = False  # block unsigned requests on internet VIPs
     autoban_enabled: bool = True
-    autoban_auth_failures: int = 50  # 401/403 responses per window before a ban
+    autoban_auth_failures: int = 50  # signed 401/403 (not HEAD/OPTIONS) per window
+    autoban_unsigned_failures: int = 500  # unsigned denies per window (shared NATs)
     autoban_window_s: int = 60
     autoban_ban_s: int = 3600
-    conn_limit_per_ip: int = 0  # concurrent connections per IP, 0 = off (opt-in)
+    conn_limit_per_ip: int = 2000  # concurrent connections per IP, 0 = off
+    internet_maxconn: int = 20000  # cap so Internet clients cannot starve internal VIPs
     timeout_client_s: int = 300
     timeout_server_s: int = 600  # long enough for CompleteMultipartUpload on huge objects
     log_target: str = ""  # "host:port" UDP syslog of ober watch; "" = log to stdout
@@ -62,6 +66,8 @@ class WatchConfig:
     syslog_listen: str = "0.0.0.0:5514"  # UDP, receives HAProxy JSON logs
     api_listen: str = "0.0.0.0:8405"  # HTTP, serves the blocklist to proxy nodes
     url: str = ""  # proxy nodes: where to pull the blocklist, e.g. http://watch01:8405
+    # Proxy node IPs/CIDRs allowed to send logs; [] = accept any (warned at startup)
+    syslog_allowed_sources: list[str] = field(default_factory=list)
     data_dir: str = ""  # "" = <install_path>/var/watch
     sync_interval_s: int = 30
     summary_interval_s: int = 300
@@ -99,7 +105,8 @@ class MDEConfig:
     api_base: str = "https://api.securitycenter.microsoft.com"
     min_severity: str = "high"  # findings at or above this become indicators
     action: str = "Block"  # "Block" or "Audit"
-    expiry_days: int = 7
+    expiry_days: int = 1  # keep close to the block TTL
+    max_active_indicators: int = 1000  # the 15,000 tenant quota is shared with the SOC
 
 
 def _section_from_dict(cls: type[Any], data: dict[str, Any] | None) -> Any:
