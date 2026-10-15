@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Blocklist synchronisation on proxy nodes (runs from a systemd timer)."""
 
+import ipaddress
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,11 +62,26 @@ def write_target_file(path: Path, targets: set[str]) -> None:
         raise
 
 
-def fetch_targets(base_url: str, token: str) -> set[str]:
+def _is_single_ip(target: str) -> bool:
+    try:
+        ipaddress.ip_address(target)
+    except ValueError:
+        return False
+    return True
+
+
+def fetch_targets(
+    base_url: str, token: str, is_exempt: Callable[[str], bool] | None = None
+) -> set[str]:
     """GET the active blocklist from ober watch and return normalised targets.
+
+    Defense in depth against a forged or compromised server: entries with source
+    ``auto`` are skipped (and logged) unless they are single IPs outside the exempt
+    networks (``is_exempt``). Manual entries are applied as given.
 
     Raises:
         requests.RequestException: if the service is unreachable or answers an error.
+        ValueError: if the response is not a JSON object with an ``entries`` list.
     """
     resp = requests.get(
         base_url.rstrip("/") + "/v1/blocklist",
@@ -72,12 +89,27 @@ def fetch_targets(base_url: str, token: str) -> set[str]:
         timeout=HTTP_TIMEOUT_S,
     )
     resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, dict) or not isinstance(data.get("entries", []), list):
+        raise ValueError("unexpected blocklist response")
     targets: set[str] = set()
-    for entry in resp.json().get("entries", []):
+    for entry in data.get("entries", []):
+        if not isinstance(entry, dict):
+            logger.warning("Ignoring malformed blocklist entry from server")
+            continue
         try:
-            targets.add(normalize_target(str(entry["target"])))
+            target = normalize_target(str(entry["target"]))
         except (KeyError, ValueError):
             logger.warning("Ignoring invalid blocklist entry from server")
+            continue
+        if entry.get("source", "auto") != "manual":
+            if not _is_single_ip(target):
+                logger.warning("Refusing auto block %s: not a single IP", target)
+                continue
+            if is_exempt is not None and is_exempt(target):
+                logger.warning("Refusing auto block %s: trusted or internal network", target)
+                continue
+        targets.add(target)
     return targets
 
 
@@ -90,7 +122,13 @@ def sync_blocklist(config: OberConfig, token: str) -> SyncResult:
     result = SyncResult()
     base = config.watch.url
     try:
-        desired = fetch_targets(base, token)
+        from ober.watch.rules import NetworkSet
+
+        exempt = NetworkSet(
+            [config.trusted_path],
+            [*config.security.trusted_networks, *config.security.internal_networks],
+        )
+        desired = fetch_targets(base, token, exempt.__contains__)
     except (requests.RequestException, ValueError) as exc:
         result.reachable = False
         result.warnings.append(f"ober watch unreachable, keeping current blocklist: {exc}")

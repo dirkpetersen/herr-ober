@@ -307,7 +307,7 @@ def test_mde_filter_and_payload(tmp_path: Path) -> None:
     assert ind["action"] == "Block" and ind["severity"] == "High"
     assert ind["title"] == "ober: auth_failure_burst"
     assert ind["generateAlert"] is True and ind["application"] == "Herr Ober"
-    assert ind["expirationTime"] == "2023-11-21T22:13:20Z"
+    assert ind["expirationTime"] == "2023-11-15T22:13:20Z"
     assert "60" in ind["description"]
 
 
@@ -329,10 +329,42 @@ def test_mde_dedup_persisted(tmp_path: Path) -> None:
     sink2.send_findings([finding()])
     assert session.post.call_count == 1
     # After expiry the IP is resubmitted.
-    later = now + 8 * 86400
+    later = now + 2 * 86400
     sink3 = make_mde(tmp_path, session, clock=lambda: later)
     sink3.send_findings([finding()])
     assert session.post.call_count == 2
+
+
+def test_mde_cap_nat64_retry_after_and_flush(tmp_path: Path) -> None:
+    assert not is_blockable_ip("64:ff9b::a00:1")
+    assert not is_blockable_ip("::10.0.0.1")
+    assert is_blockable_ip("64:ff9b::808:808")
+    session = MagicMock()
+    session.post.return_value = resp(200, {"value": []})
+    cfg = MDEConfig(enabled=True, tenant_id="t", client_id="c", max_active_indicators=1)
+    sink = MDESink(cfg, "s", tmp_path, session=session, token_provider=FakeToken())  # type: ignore[arg-type]
+    sink.send_findings([finding(), finding(client_ip="8.8.4.4")])
+    assert sink.skipped_cap == 1 and session.post.call_count == 1
+    # Retry-After is capped and pending is flushed by send_summaries.
+    session2 = MagicMock()
+    session2.post.side_effect = [
+        resp(429, headers={"Retry-After": "99999"}),
+        resp(200, {"value": []}),
+    ]
+    now = [1000.0]
+    s2 = MDESink(
+        MDEConfig(enabled=True, tenant_id="t", client_id="c"),
+        "s",
+        tmp_path / "b",
+        session=session2,
+        clock=lambda: now[0],
+        token_provider=FakeToken(),  # type: ignore[arg-type]
+    )
+    s2.send_findings([finding()])
+    assert s2.pending == 1 and s2._backoff_until == 1300.0
+    now[0] = 1301.0
+    s2.send_summaries([])
+    assert s2.pending == 0
 
 
 def test_mde_failed_indicator_not_marked_submitted(tmp_path: Path) -> None:

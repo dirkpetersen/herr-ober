@@ -203,3 +203,109 @@ def test_blocklist_thread_safety(temp_dir: Path) -> None:
     assert len(bl) == 400
     bl.flush()
     assert os.path.exists(temp_dir / "b.json")
+
+
+def _finding_for(ip: str) -> Finding:
+    return Finding(id="f", ts=1.0, rule="r", severity="high", client_ip=ip, action="block")
+
+
+def test_auto_block_rejects_cidr_and_garbage(temp_dir: Path) -> None:
+    bl = BlockList(temp_dir / "b.json")
+    for bad in ("10.0.0.0/8", "10.0.0.1/32", "1.2.3.0/24", "", "nope", "0.0.0.0/0"):
+        assert bl.add_from_finding(_finding_for(bad)) is None, bad
+    assert len(bl) == 0
+    entry = bl.add_from_finding(_finding_for("2001:DB8::1"))
+    assert entry is not None and entry.target == "2001:db8::1"
+    assert bl.add_manual("10.0.0.0/8", "ops").target == "10.0.0.0/8"
+    with pytest.raises(ValueError):
+        bl.add_manual("10.0.0.0/7")
+
+
+def test_offense_decay_after_ttl_max(temp_dir: Path) -> None:
+    now = [1000.0]
+    bl = BlockList(temp_dir / "b.json", ttl_s=100, ttl_max_s=1000, clock=lambda: now[0])
+    first = bl.add_from_finding(_finding_for("203.0.113.4"))
+    assert first is not None and first.offenses == 1
+    now[0] += 150  # block expired, still a recent offender
+    second = bl.add_from_finding(_finding_for("203.0.113.4"))
+    assert second is not None and second.offenses == 2
+    now[0] += 5000  # last offense older than ttl_max: start over
+    third = bl.add_from_finding(_finding_for("203.0.113.4"))
+    assert third is not None and third.offenses == 1
+    assert third.expires_at == now[0] + 100
+    # the decay state survives a reload
+    bl.save()
+    again = BlockList(temp_dir / "b.json", ttl_s=100, ttl_max_s=1000, clock=lambda: now[0])
+    assert again._last_offense["203.0.113.4"] == now[0]
+
+
+def test_save_does_not_hold_data_lock_during_io(temp_dir: Path) -> None:
+    bl = BlockList(temp_dir / "b.json")
+    bl.add_manual("203.0.113.1", "x")
+    seen = []
+    real_fsync = os.fsync
+
+    def probing_fsync(fd: int) -> None:
+        # another thread must be able to take the data lock while we fsync
+        import threading
+
+        got: list[bool] = []
+
+        def probe() -> None:
+            ok = bl._lock.acquire(timeout=1)
+            got.append(ok)
+            if ok:
+                bl._lock.release()
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        seen.append(got[0])
+        real_fsync(fd)
+
+    bl._dirty = True
+    from unittest.mock import patch
+
+    with patch("ober.watch.blocklist.os.fsync", probing_fsync):
+        bl.flush()
+    assert seen == [True]
+
+
+def test_summary_folds_failed_keys() -> None:
+    from ober.watch.models import FAILED_KEYS
+
+    agg = SummaryAggregator(60)
+    agg.add(rec(access_key="GOOD", status=200, ts=1000))
+    agg.add(rec(access_key="GOOD", status=403, ts=1001))
+    agg.add(rec(access_key="", status=403, ts=1001))
+    for i in range(50):
+        agg.add(rec(access_key=f"EVIL{i}", status=403, ts=1002, client_ip=f"192.0.2.{i}"))
+    rows = {s.access_key: s for s in agg.flush()}
+    assert set(rows) == {"GOOD", "", FAILED_KEYS}
+    assert rows[FAILED_KEYS].requests == 50 and rows[FAILED_KEYS].auth_failures == 50
+    assert rows[FAILED_KEYS].distinct_ips == 50
+    assert rows["GOOD"].requests == 2
+
+
+def test_store_file_modes_and_derived_retention(temp_dir: Path) -> None:
+    store = Store(temp_dir, raw_retention_days=2)
+    store.start()
+    store.write_finding(Finding(id="a", ts=1.0, rule="r", severity="low"))
+    store.write_raw(rec())
+    store.flush()
+    store.close()
+    for kind in ("raw", "findings"):
+        f = next((temp_dir / kind).glob("*.jsonl"))
+        assert (f.stat().st_mode & 0o777) == 0o640
+    old = dt.date.today() - dt.timedelta(days=7)  # raw retention 2 -> derived retention 6
+    recent = dt.date.today() - dt.timedelta(days=4)
+    for kind in ("findings", "summaries"):
+        (temp_dir / kind / f"{kind}-{old.isoformat()}.jsonl").write_text("{}\n")
+        (temp_dir / kind / f"{kind}-{recent.isoformat()}.jsonl").write_text("{}\n")
+    store = Store(temp_dir, raw_retention_days=2)
+    store.start()
+    store.close()
+    for kind in ("findings", "summaries"):
+        names = {p.name for p in (temp_dir / kind).glob("*.jsonl")}
+        assert f"{kind}-{old.isoformat()}.jsonl" not in names
+        assert f"{kind}-{recent.isoformat()}.jsonl" in names

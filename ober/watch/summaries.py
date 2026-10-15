@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-access-key activity summaries, emitted when a window closes."""
 
-from ober.watch.models import KeySummary, LogRecord
+from ober.watch.models import FAILED_KEYS, KeySummary, LogRecord
 
 OVERFLOW_KEY = "(overflow)"
 SET_CAP = 10_000
@@ -17,6 +17,7 @@ class _Acc:
         "bytes_out",
         "auth_failures",
         "errors_5xx",
+        "ok",
         "internet",
         "ips",
         "buckets",
@@ -29,6 +30,7 @@ class _Acc:
         self.bytes_out = 0
         self.auth_failures = 0
         self.errors_5xx = 0
+        self.ok = 0  # requests with status < 400
         self.internet = 0
         self.ips: set[str] = set()
         self.buckets: set[str] = set()
@@ -69,6 +71,8 @@ class SummaryAggregator:
         acc.requests += 1
         acc.bytes_in += rec.bytes_in
         acc.bytes_out += rec.bytes_out
+        if rec.status < 400:
+            acc.ok += 1
         if rec.status == 401 or rec.status == 403:
             acc.auth_failures += 1
         elif rec.status >= 500:
@@ -99,6 +103,29 @@ class SummaryAggregator:
 
     def _close(self) -> list[KeySummary]:
         start = self._start if self._start is not None else 0.0
+        kept: dict[str, _Acc] = {}
+        folded: _Acc | None = None
+        for key, a in self._accs.items():
+            # Keys that never succeeded are mostly attacker-chosen: fold them into one
+            # row. "" (unsigned) and the overflow row are already single rows.
+            if a.ok or key in ("", OVERFLOW_KEY):
+                kept[key] = a
+                continue
+            if folded is None:
+                folded = _Acc()
+            folded.requests += a.requests
+            folded.bytes_in += a.bytes_in
+            folded.bytes_out += a.bytes_out
+            folded.auth_failures += a.auth_failures
+            folded.errors_5xx += a.errors_5xx
+            folded.internet += a.internet
+            for source, target in ((a.ips, folded.ips), (a.buckets, folded.buckets)):
+                if len(target) < self._set_cap:
+                    target.update(source)
+            if len(folded.nodes) < NODE_CAP:
+                folded.nodes.update(a.nodes)
+        if folded is not None:
+            kept[FAILED_KEYS] = folded
         out = [
             KeySummary(
                 window_start=start,
@@ -112,9 +139,9 @@ class SummaryAggregator:
                 distinct_ips=len(a.ips),
                 distinct_buckets=len(a.buckets),
                 internet_requests=a.internet,
-                nodes=sorted(a.nodes),
+                nodes=sorted(a.nodes)[:NODE_CAP],
             )
-            for key, a in self._accs.items()
+            for key, a in kept.items()
         ]
         self._accs = {}
         return out

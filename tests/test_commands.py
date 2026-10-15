@@ -2119,3 +2119,72 @@ def temp_dir() -> Path:
 def cli_runner() -> CliRunner:
     """Create a CLI runner."""
     return CliRunner()
+
+
+class TestWatchLifecycle:
+    """ober stop / uninstall also handle the security-monitoring units."""
+
+    def test_stop_stops_blocklist_timer(self, cli_runner: CliRunner) -> None:
+        with (
+            patch("ober.cli.SystemInfo") as mock_system,
+            patch("ober.commands.service.ServiceInfo.from_service_name") as mock_svc,
+            patch("ober.commands.service.run_command") as mock_run,
+            patch("ober.commands.service.time.sleep"),
+        ):
+            mock_system.return_value = MagicMock(is_root=True)
+            mock_svc.return_value = MagicMock(is_active=False)
+            for args in (["stop"], ["stop", "--force"]):
+                mock_run.reset_mock()
+                cli_runner.invoke(main, args)
+                calls = [c.args[0] for c in mock_run.call_args_list]
+                assert ["systemctl", "stop", "ober-blocklist.timer"] in calls
+
+    def test_uninstall_removes_watch_units(self, cli_runner: CliRunner, temp_dir: Path) -> None:
+        stopped: list[str] = []
+        disabled: list[str] = []
+        removed: list[str] = []
+
+        def fake_run(cmd: list[str], **_kw: object) -> MagicMock:
+            if cmd[:2] == ["systemctl", "stop"]:
+                stopped.append(cmd[2])
+            elif cmd[:2] == ["systemctl", "disable"]:
+                disabled.append(cmd[2])
+            return MagicMock()
+
+        real_unlink = Path.unlink
+
+        def fake_unlink(self: Path, *a: object, **k: object) -> None:
+            if str(self).startswith("/etc/systemd/system/"):
+                removed.append(self.name)
+                return
+            real_unlink(self, *a, **k)  # type: ignore[arg-type]
+
+        real_exists = Path.exists
+
+        def fake_exists(self: Path, *a: object, **k: object) -> bool:
+            if str(self).startswith("/etc/systemd/system/"):
+                return True
+            return real_exists(self, *a, **k)  # type: ignore[arg-type]
+
+        with (
+            patch("ober.cli.SystemInfo") as mock_system,
+            patch("ober.commands.uninstall.OberConfig.load") as mock_config,
+            patch("ober.commands.uninstall.ServiceInfo.from_service_name") as mock_svc,
+            patch("ober.commands.uninstall.run_command", side_effect=fake_run),
+            patch("ober.commands.uninstall._remove_vip_interface"),
+            patch.object(Path, "exists", fake_exists),
+            patch.object(Path, "unlink", fake_unlink),
+        ):
+            mock_system.return_value = MagicMock(is_root=True)
+            config_mock = MagicMock()
+            config_mock.install_path = temp_dir / "inst"
+            config_mock.config_path = temp_dir / "inst" / "etc" / "ober.yaml"
+            mock_config.return_value = config_mock
+            mock_svc.side_effect = lambda name: MagicMock(
+                name=name, is_active=True, is_enabled=True
+            )
+            # from_service_name receives the name; record it for the stop/disable calls
+            cli_runner.invoke(main, ["uninstall", "--yes", "--keep-config"])
+
+        for unit in ("ober-watch.service", "ober-blocklist.service", "ober-blocklist.timer"):
+            assert unit in stopped and unit in disabled and unit in removed

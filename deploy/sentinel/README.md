@@ -7,7 +7,7 @@ per-access-key summaries are sent to Sentinel; raw logs never are.
 |------|---------|
 | `tables.json` | ARM template: custom tables `OberFindings_CL`, `OberKeySummary_CL` |
 | `dcr.json` | ARM template: Direct data collection rule (no DCE required); outputs the immutable ID |
-| `analytics-rules.json` | ARM template: five scheduled analytics rules |
+| `analytics-rules.json` | ARM template: six scheduled analytics rules |
 
 Variables used below (set them first):
 
@@ -176,7 +176,8 @@ mde:
   api_base: https://api.securitycenter.microsoft.com
   min_severity: high
   action: Block        # or Audit while evaluating
-  expiry_days: 7
+  expiry_days: 1       # keep close to the block TTL
+  max_active_indicators: 1000  # excess indicators are skipped (the 15,000 quota is shared)
 ```
 
 Requirements and limits (see sources):

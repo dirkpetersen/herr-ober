@@ -56,6 +56,8 @@ class BlockList:
         self._lock = threading.RLock()
         self._entries: dict[str, BlockEntry] = {}
         self._history: dict[str, int] = {}
+        self._last_offense: dict[str, float] = {}
+        self._io_lock = threading.Lock()
         self._dirty = False
         self.load()
 
@@ -71,6 +73,14 @@ class BlockList:
                     entry = BlockEntry(**item)
                     entries[entry.target] = entry
                 history = {str(k): int(v) for k, v in data.get("history", {}).items()}
+                loaded_at = self._clock()
+                last = {
+                    str(k): float(v)
+                    for k, v in data.get("last_offense", {}).items()
+                    if str(k) in history
+                }
+                for key in history:
+                    last.setdefault(key, loaded_at)  # state from before decay existed
             except FileNotFoundError:
                 return
             except (OSError, ValueError, TypeError, AttributeError):
@@ -78,28 +88,41 @@ class BlockList:
                 return
             self._entries = entries
             self._history = history
+            self._last_offense = last
 
     def save(self) -> None:
-        """Atomically persist state (tmp file + rename)."""
+        """Atomically persist state (tmp file + rename).
+
+        The state is snapshotted under the data lock; the slow write and fsync run
+        under a separate lock so they never block readers or writers of the list.
+        """
         with self._lock:
             payload = {
                 "entries": [e.to_dict() for e in self._entries.values()],
-                "history": self._history,
+                "history": dict(self._history),
+                "last_offense": dict(self._last_offense),
             }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name(self.path.name + ".tmp")
-            with open(tmp, "w") as fh:
-                json.dump(payload, fh)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self.path)
             self._dirty = False
+        try:
+            with self._io_lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_name(self.path.name + ".tmp")
+                with open(tmp, "w") as fh:
+                    json.dump(payload, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, self.path)
+        except BaseException:
+            with self._lock:
+                self._dirty = True
+            raise
 
     def flush(self) -> None:
         """Persist only if something changed since the last save."""
         with self._lock:
-            if self._dirty:
-                self.save()
+            dirty = self._dirty
+        if dirty:
+            self.save()
 
     # -- mutation ----------------------------------------------------------
 
@@ -120,23 +143,31 @@ class BlockList:
     def add_from_finding(self, finding: Finding) -> BlockEntry | None:
         """Block the finding's client IP. Returns the new entry, or None if not added.
 
+        Only single IP addresses are accepted: a finding is derived from unauthenticated
+        log data and must never be able to block a network. If the IP's last offense is
+        older than ``ttl_max_s`` the repeat count starts over at 1.
+
         An already-active block is left unchanged (requests may still be in flight
         until proxies sync, which must not count as a repeat offense).
         """
         try:
-            target = normalize_target(finding.client_ip)
+            target = str(ipaddress.ip_address(finding.client_ip.strip()))
         except ValueError:
             return None
         with self._lock:
             self._purge_locked()
             if target in self._entries:
                 return None
-            offenses = self._history.get(target, 0) + 1
+            now = self._clock()
+            previous = self._history.get(target, 0)
+            if previous and now - self._last_offense.get(target, now) > self.ttl_max_s:
+                previous = 0
+            offenses = previous + 1
             ttl = min(self.ttl_s * (2 ** min(offenses - 1, 30)), self.ttl_max_s)
             entry = BlockEntry(
                 target=target,
                 reason=f"{finding.rule}: {finding.detail}"[:256],
-                expires_at=self._clock() + ttl,
+                expires_at=now + ttl,
                 source="auto",
                 finding_id=finding.id,
                 offenses=offenses,
@@ -144,8 +175,11 @@ class BlockList:
             self._entries[target] = entry
             self._history.pop(target, None)
             self._history[target] = offenses
+            self._last_offense[target] = now
             while len(self._history) > HISTORY_MAX:
-                del self._history[next(iter(self._history))]
+                oldest = next(iter(self._history))
+                del self._history[oldest]
+                self._last_offense.pop(oldest, None)
             self._dirty = True
             return entry
 
@@ -166,8 +200,8 @@ class BlockList:
                 offenses=self._entries[norm].offenses if norm in self._entries else 1,
             )
             self._entries[norm] = entry
-            self.save()
-            return entry
+        self.save()
+        return entry
 
     def remove(self, target: str) -> bool:
         """Remove a block (and forget its offense history). Returns True if it existed."""
@@ -175,9 +209,10 @@ class BlockList:
         with self._lock:
             existed = self._entries.pop(norm, None) is not None
             self._history.pop(norm, None)
-            if existed:
-                self.save()
-            return existed
+            self._last_offense.pop(norm, None)
+        if existed:
+            self.save()
+        return existed
 
     def active(self) -> list[BlockEntry]:
         """Return current (non-expired) entries."""

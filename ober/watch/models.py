@@ -39,6 +39,10 @@ SEVERITIES: tuple[str, ...] = ("low", "medium", "high")
 # so Sentinel can tell "no traffic" from "ober watch or ingestion is down".
 HEARTBEAT_KEY = "(heartbeat)"
 
+# KeySummary.access_key of the row that folds every key with zero successful requests in
+# the window, so attacker-chosen keys cannot create unbounded Sentinel rows.
+FAILED_KEYS = "(failed-keys)"
+
 
 def severity_rank(severity: str) -> int:
     """Return the order of a severity (low=0 < medium=1 < high=2), -1 if unknown."""

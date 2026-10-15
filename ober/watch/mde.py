@@ -39,6 +39,7 @@ BATCH_SIZE = 500
 MAX_CALLS_PER_MINUTE = 25
 MAX_CALLS_PER_HOUR = 1000
 MAX_PENDING = 5000
+MAX_RETRY_AFTER_S = 300.0
 HTTP_TIMEOUT: tuple[float, float] = (5.0, 60.0)
 DEFAULT_BACKOFF_S = 60.0
 SEVERITY_MAP = {"high": "High", "medium": "Medium", "low": "Low"}
@@ -55,7 +56,21 @@ def is_blockable_ip(value: str) -> bool:
         ip = ipaddress.ip_address(value)
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4(ip)
+        if embedded is not None:
+            return embedded.is_global and not embedded.is_multicast
     return ip.is_global and not ip.is_multicast
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """Return the IPv4 address embedded via NAT64 or IPv4-compatible (``::a.b.c.d``)."""
+    if ip in _NAT64 or (ip.packed[:12] == b"\x00" * 12 and int(ip) > 1):
+        return ipaddress.IPv4Address(ip.packed[12:])
+    return None
 
 
 class RateLimiter:
@@ -121,6 +136,7 @@ class MDESink:
         self._submitted: dict[str, float] = self._load_state()
         self._pending: dict[str, Finding] = {}
         self._backoff_until = 0.0
+        self.skipped_cap = 0
 
     # -- public API -------------------------------------------------------
 
@@ -133,13 +149,21 @@ class MDESink:
         except Exception:  # noqa: BLE001 - sinks must never raise
             logger.exception("MDE sink error")
 
-    def send_summaries(self, summaries: list[KeySummary]) -> None:
-        """No-op: MDE only receives indicators."""
+    def send_summaries(self, summaries: list[KeySummary]) -> None:  # noqa: ARG002
+        """Retry pending indicators (called every summary interval); never raises."""
+        try:
+            with self._lock:
+                if self._pending:
+                    self._flush()
+        except Exception:  # noqa: BLE001
+            logger.exception("MDE sink error")
 
     def close(self) -> None:
         """Persist state and close the HTTP session."""
         try:
             with self._lock:
+                if self._pending:
+                    self._flush()
                 self._save_state()
             self._session.close()
         except Exception:  # noqa: BLE001
@@ -166,6 +190,16 @@ class MDESink:
             if not self.eligible(f):
                 continue
             if self._submitted.get(f.client_ip, 0.0) > now or f.client_ip in self._pending:
+                continue
+            active = sum(1 for v in self._submitted.values() if v > now)
+            if active + len(self._pending) >= self._cfg.max_active_indicators:
+                self.skipped_cap += 1
+                logger.warning(
+                    "MDE max_active_indicators (%d) reached; skipping %s (%d skipped)",
+                    self._cfg.max_active_indicators,
+                    f.client_ip,
+                    self.skipped_cap,
+                )
                 continue
             if len(self._pending) >= MAX_PENDING:
                 logger.warning("MDE pending queue full; dropping %s", f.client_ip)
@@ -240,6 +274,7 @@ class MDESink:
             wait = DEFAULT_BACKOFF_S
             with contextlib.suppress(ValueError):
                 wait = float(resp.headers.get("Retry-After", wait))
+            wait = max(0.0, min(wait, MAX_RETRY_AFTER_S))
             self._backoff_until = self._clock() + wait
             logger.warning("MDE returned HTTP %d; retrying in %.0fs", code, wait)
             return None

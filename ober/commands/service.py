@@ -166,6 +166,12 @@ def stop(ctx: click.Context, force: bool) -> None:
         except Exception as e:
             console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-ha: {e}")
 
+    # Stop blocklist sync so it does not touch a stopped HAProxy
+    try:
+        run_command(["systemctl", "stop", "ober-blocklist.timer"], check=False)
+    except Exception as e:
+        console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-blocklist.timer: {e}")
+
     console.print()
     console.print("[bold green]Services stopped![/bold green]")
 

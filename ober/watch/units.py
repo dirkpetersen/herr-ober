@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """systemd unit templates for ober watch and blocklist sync."""
 
+import logging
+import os
 import sys
 from pathlib import Path
 
 from ober.config import OberConfig
 
+logger = logging.getLogger(__name__)
 
-def render_watch_service(config: OberConfig, ober_bin: str, protect_home: str = "true") -> str:
-    """Return the text of ``ober-watch.service`` (analysis host)."""
+# Secrets live in ~/.ober/login of the user running the units (root), so ProtectHome must
+# stay read-only: "true" would hide /root and the daemon could not read its tokens.
+PROTECT_HOME = "read-only"
+
+
+def render_watch_service(config: OberConfig, ober_bin: str) -> str:
+    """Return the text of ``ober-watch.service`` (analysis host).
+
+    ProtectHome is fixed to PROTECT_HOME.
+    """
     data_dir = config.watch_data_dir
     return f"""[Unit]
 Description=Ober Watch (S3 log analysis)
@@ -28,7 +39,7 @@ LimitNOFILE=65536
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome={protect_home}
+ProtectHome={PROTECT_HOME}
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -46,8 +57,12 @@ WantedBy=multi-user.target
 """
 
 
-def render_blocklist_service(config: OberConfig, ober_bin: str, protect_home: str = "true") -> str:
-    """Return the text of ``ober-blocklist.service`` (oneshot, proxy nodes)."""
+def render_blocklist_service(config: OberConfig, ober_bin: str) -> str:
+    """Return the text of ``ober-blocklist.service`` (oneshot, proxy nodes).
+
+    ProtectHome is fixed to PROTECT_HOME.
+    The runtime directory is optional (``-``) so the unit starts before HAProxy created it.
+    """
     acl_dir = config.blocklist_path.parent
     sock_dir = config.admin_socket_path.parent
     return f"""[Unit]
@@ -62,7 +77,7 @@ Nice=10
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome={protect_home}
+ProtectHome={PROTECT_HOME}
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelTunables=yes
@@ -73,7 +88,7 @@ RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
-ReadWritePaths={acl_dir} {sock_dir}
+ReadWritePaths=-{sock_dir} {acl_dir}
 """
 
 
@@ -98,7 +113,7 @@ def write_units(
     directory: Path,
     role: str = "all",
     ober_bin: str | None = None,
-    protect_home: str = "true",
+    protect_home: str = "",  # noqa: ARG001
 ) -> list[Path]:
     """Write unit files into ``directory`` and return the written paths.
 
@@ -108,8 +123,8 @@ def write_units(
         role: ``"watch"`` (analysis host), ``"proxy"`` (blocklist sync) or ``"all"``.
         ober_bin: Absolute path of the ``ober`` executable; defaults to the one next
             to the running interpreter.
-        protect_home: systemd ``ProtectHome=`` value; bootstrap passes ``read-only``
-            when ober is installed under /root or /home.
+        protect_home: Ignored. Units always use ``ProtectHome=read-only`` because the
+            secrets are read from ``~/.ober/login``; kept so existing callers work.
     """
     if role not in ("watch", "proxy", "all"):
         raise ValueError(f"unknown role {role!r}")
@@ -117,10 +132,17 @@ def write_units(
     directory.mkdir(parents=True, exist_ok=True)
     files: dict[str, str] = {}
     if role in ("watch", "all"):
-        files["ober-watch.service"] = render_watch_service(config, binary, protect_home)
+        files["ober-watch.service"] = render_watch_service(config, binary)
     if role in ("proxy", "all"):
-        files["ober-blocklist.service"] = render_blocklist_service(config, binary, protect_home)
+        files["ober-blocklist.service"] = render_blocklist_service(config, binary)
         files["ober-blocklist.timer"] = render_blocklist_timer(config)
+    if role in ("watch", "all"):
+        # ReadWritePaths= must exist or the unit fails to start (status=226/NAMESPACE)
+        try:
+            config.watch_data_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(config.watch_data_dir, 0o750)
+        except OSError as exc:
+            logger.warning("Could not create %s: %s", config.watch_data_dir, exc)
     written = []
     for name, text in files.items():
         path = directory / name

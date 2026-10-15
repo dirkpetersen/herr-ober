@@ -8,6 +8,7 @@ can block (disk, network sinks) runs on worker threads behind bounded queues.
 import asyncio
 import contextlib
 import importlib
+import ipaddress
 import logging
 import queue
 import signal
@@ -104,14 +105,48 @@ class SinkWorker:
                 logger.exception("Closing sink %s failed", type(sink).__name__)
 
 
+def kernel_udp_drops(port: int) -> int | None:
+    """Datagrams the kernel dropped on UDP sockets bound to ``port`` (Linux), else None."""
+    if port <= 0:
+        return None
+    total = 0
+    found = False
+    for name in ("udp", "udp6"):
+        try:
+            with open(f"/proc/net/{name}") as fh:
+                lines = fh.read().splitlines()[1:]
+        except OSError:
+            continue
+        found = True
+        for line in lines:
+            fields = line.split()
+            try:
+                if int(fields[1].rsplit(":", 1)[1], 16) == port:
+                    total += int(fields[-1])
+            except (IndexError, ValueError):
+                continue
+    return total if found else None
+
+
+def parse_sources(items: list[str]) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """Parse the syslog source allowlist once; invalid entries are logged and skipped."""
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for item in items:
+        try:
+            nets.append(ipaddress.ip_network(item.strip(), strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid syslog_allowed_sources entry %r", item[:64])
+    return nets
+
+
 class _Protocol(asyncio.DatagramProtocol):
     """asyncio UDP protocol delegating to the daemon."""
 
     def __init__(self, daemon: "WatchDaemon") -> None:
         self.daemon = daemon
 
-    def datagram_received(self, data: bytes, addr: Any) -> None:  # noqa: ARG002
-        self.daemon.handle_datagram(data)
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        self.daemon.handle_datagram(data, addr[0] if addr else None)
 
 
 class WatchDaemon:
@@ -135,6 +170,9 @@ class WatchDaemon:
         self.sinks = SinkWorker([])
         self.findings = 0
         self.blocks = 0
+        self.rejected_sources = 0
+        self._sources = parse_sources(w.syslog_allowed_sources)
+        self._source_ok: dict[str, bool] = {}
         self.api: WatchAPI | None = None
         self.syslog_port = 0
         self.started_at = 0.0
@@ -145,8 +183,36 @@ class WatchDaemon:
 
     # -- hot path ----------------------------------------------------------
 
-    def handle_datagram(self, data: bytes) -> None:
-        """Process one datagram. Must stay O(1) and never block."""
+    def _source_allowed(self, source: str) -> bool:
+        """Check the sender address against ``syslog_allowed_sources`` (cached)."""
+        cached = self._source_ok.get(source)
+        if cached is not None:
+            return cached
+        try:
+            addr = ipaddress.ip_address(source.split("%", 1)[0])
+            if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+                addr = addr.ipv4_mapped
+            ok = any(addr.version == net.version and addr in net for net in self._sources)
+        except ValueError:
+            ok = False
+        if len(self._source_ok) >= 4096:
+            self._source_ok.clear()
+        self._source_ok[source] = ok
+        return ok
+
+    def handle_datagram(self, data: bytes, source: str | None = None) -> None:
+        """Process one datagram. Must stay O(1) and never block.
+
+        UDP syslog is unauthenticated, so when ``syslog_allowed_sources`` is configured a
+        datagram from any other sender address is dropped and counted.
+        """
+        if (
+            source is not None
+            and self.config.watch.syslog_allowed_sources
+            and not self._source_allowed(source)
+        ):
+            self.rejected_sources += 1
+            return
         rec = self.parser.parse(data)
         if rec is None:
             return
@@ -181,6 +247,8 @@ class WatchDaemon:
             "received": self.parser.parsed + self.parser.malformed,
             "parsed": self.parser.parsed,
             "malformed": self.parser.malformed,
+            "rejected_sources": self.rejected_sources,
+            "udp_kernel_drops": kernel_udp_drops(self.syslog_port),
             "dropped": self.store.dropped_total + self.sinks.dropped,
             "store_dropped": dict(self.store.dropped),
             "sink_dropped": self.sinks.dropped,
@@ -199,10 +267,24 @@ class WatchDaemon:
         self.store.start()
         self.sinks = SinkWorker(_load_sinks(self.config, self.secrets))
         self.sinks.start()
+        if not self.config.watch.syslog_allowed_sources:
+            logger.warning(
+                "watch.syslog_allowed_sources is empty: accepting syslog from ANY sender. "
+                "UDP is unauthenticated, so anyone who can reach udp/%s can forge logs. "
+                "Set it to the proxy node addresses.",
+                self.config.watch.syslog_listen,
+            )
+        elif not self._sources:
+            logger.error("watch.syslog_allowed_sources has no valid entry: all syslog rejected")
         token = self.secrets.get("OBER_WATCH_TOKEN", "")
-        if not token:
+        admin_token = self.secrets.get("OBER_WATCH_ADMIN_TOKEN", "")
+        if not token and not admin_token:
             logger.warning("OBER_WATCH_TOKEN not set: blocklist API will reject all requests")
-        self.api = WatchAPI(self.config.watch.api_listen, self.blocklist, token, self.stats)
+        if not admin_token:
+            logger.warning("OBER_WATCH_ADMIN_TOKEN not set: blocklist writes are disabled")
+        self.api = WatchAPI(
+            self.config.watch.api_listen, self.blocklist, token, self.stats, admin_token
+        )
         self.api.start()
 
         host, port = split_listen(self.config.watch.syslog_listen)
@@ -224,20 +306,29 @@ class WatchDaemon:
     async def _tick_loop(self) -> None:
         while True:
             await asyncio.sleep(1.0)
-            self.tick()
+            self.tick(flush=False)
+            # fsync can take long: keep it off the event loop that receives datagrams
+            await asyncio.get_running_loop().run_in_executor(None, self._flush_blocklist)
 
-    def tick(self) -> None:
-        """Periodic housekeeping: close idle summary windows, persist the blocklist."""
+    def _flush_blocklist(self) -> None:
+        try:
+            self.blocklist.flush()
+        except OSError:
+            logger.exception("Could not persist blocklist")
+
+    def tick(self, flush: bool = True) -> None:
+        """Periodic housekeeping: close idle summary windows, persist the blocklist.
+
+        The event loop passes ``flush=False`` and flushes in an executor instead.
+        """
         now = time.time()
         closed = self.summaries.tick(now)
         if closed:
             self._emit_summaries(closed)
         self._heartbeat(now)
         self.blocklist.purge_expired()
-        try:
-            self.blocklist.flush()
-        except OSError:
-            logger.exception("Could not persist blocklist")
+        if flush:
+            self._flush_blocklist()
 
     def _heartbeat(self, now: float) -> None:
         """Emit one heartbeat summary per interval, even when no traffic arrives."""

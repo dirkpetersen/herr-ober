@@ -5,6 +5,7 @@ client picks different loopback *source* addresses so ban/blocklist scenarios ca
 each other.
 """
 
+import contextlib
 import http.client
 import http.server
 import json
@@ -79,6 +80,7 @@ class Backend(http.server.ThreadingHTTPServer):
                         {
                             "path": self.path,
                             "headers": {k.lower(): v for k, v in self.headers.items()},
+                            "xff": self.headers.get_all("X-Forwarded-For") or [],
                         }
                     )
                 status = 403 if self.path.startswith("/forbidden") else 200
@@ -162,7 +164,7 @@ class Proxy:
         self,
         method: str = "GET",
         path: str = "/",
-        headers: dict[str, str] | None = None,
+        headers: dict[str, str] | list[tuple[str, str]] | None = None,
         src: str = "127.0.0.50",
         host: str = HOST,
         dest: str = INTERNET_IP,
@@ -178,7 +180,8 @@ class Proxy:
             )
         conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
         conn.putheader("Host", host)
-        for key, value in (headers or {}).items():
+        items = headers.items() if isinstance(headers, dict) else (headers or [])
+        for key, value in items:
             conn.putheader(key, value)
         if body is not None:
             conn.putheader("Content-Length", str(len(body)))
@@ -211,8 +214,9 @@ def can_connect(proxy: Proxy, src: str, dest: str = INTERNET_IP) -> bool:
         return False
 
 
-@pytest.fixture(scope="module")
-def proxy() -> Iterator[Proxy]:
+@contextlib.contextmanager
+def launch(**security: Any) -> Iterator[Proxy]:
+    """Start backend, syslog sink and a real HAProxy for one SecurityConfig variant."""
     root = Path(tempfile.mkdtemp(prefix="obl"))
     backend = Backend()
     threading.Thread(target=backend.serve_forever, daemon=True).start()
@@ -241,16 +245,18 @@ def proxy() -> Iterator[Proxy]:
         ]
         config.certs = CertConfig(path=str(pem))
         config.stats_port = free_port()
-        config.security = SecurityConfig(
-            s3_hostnames=[HOST],
-            allowlist=["127.0.0.0/24"],  # 127.0.1.x is outside: default deny
-            trusted_networks=["127.0.2.0/24"],  # outside the allowlist, never banned
-            deny_anonymous=True,
-            autoban_auth_failures=3,
-            autoban_window_s=2,
-            autoban_ban_s=60,
-            log_target=f"127.0.0.1:{sink.port}",
-        )
+        settings: dict[str, Any] = {
+            "s3_hostnames": [HOST],
+            "allowlist": ["127.0.0.0/24"],  # 127.0.1.x is outside: default deny
+            "trusted_networks": ["127.0.2.0/24"],  # outside the allowlist, never banned
+            "deny_anonymous": True,
+            "autoban_auth_failures": 3,
+            "autoban_unsigned_failures": 10,
+            "autoban_window_s": 2,
+            "autoban_ban_s": 60,
+            "log_target": f"127.0.0.1:{sink.port}",
+        }
+        config.security = SecurityConfig(**{**settings, **security})
         port = free_port()
         sock = root / "h.sock"
         _write_security_lists(config)
@@ -267,21 +273,20 @@ def proxy() -> Iterator[Proxy]:
         p.backend = backend
         try:
             deadline = time.time() + 15
+            last: object = None
             while time.time() < deadline:
                 if proc.poll() is not None:
                     out = proc.stdout.read().decode() if proc.stdout else ""
                     raise RuntimeError(f"haproxy exited: {out}")
                 try:
-                    if (
-                        p.status("GET", "/ready", {"Authorization": SIGV4}, src="127.0.2.250")
-                        == 200
-                    ):
+                    last = p.status("GET", "/ready", {"Authorization": SIGV4}, src="127.0.2.250")
+                    if last == 200:
                         break
-                except (OSError, http.client.HTTPException):
-                    pass
+                except (OSError, http.client.HTTPException) as exc:
+                    last = exc
                 time.sleep(0.2)
             else:
-                raise RuntimeError("haproxy backend never became healthy")
+                raise RuntimeError(f"haproxy backend never became healthy: {last!r}")
             yield p
         finally:
             proc.terminate()
@@ -297,6 +302,19 @@ def proxy() -> Iterator[Proxy]:
         backend.server_close()
         sink.close()
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def proxy() -> Iterator[Proxy]:
+    with launch() as p:
+        yield p
+
+
+@pytest.fixture(scope="module")
+def proxy2() -> Iterator[Proxy]:
+    """No S3 hostnames, tiny per-IP connection limit, internal VIP limited to 127.0.3.0/24."""
+    with launch(s3_hostnames=[], conn_limit_per_ip=3, internal_networks=["127.0.3.0/24"]) as p:
+        yield p
 
 
 def check_record(record: dict[str, Any]) -> None:
@@ -389,9 +407,20 @@ def test_presigned_url(proxy: Proxy) -> None:
 
 def test_presigned_v2_url(proxy: Proxy) -> None:
     rec = one_log(
-        proxy, "127.0.0.15", path=f"/pre2/{OBJECT_KEY}?AWSAccessKeyId=AK&Signature={SIGV2_SIG}"
+        proxy, "127.0.0.15", path=f"/pre2/{OBJECT_KEY}?AWSAccessKeyId=AKV2PRE&Signature={SIGV2_SIG}"
     )
     assert rec["presigned"] is True and rec["_status"] == 200
+    assert rec["access_key"] == "AKV2PRE"
+
+
+def test_sigv4a_header(proxy: Proxy) -> None:
+    auth = (
+        "AWS4-ECDSA-P256-SHA256 Credential=AKIDV4A/20240101/s3/aws4_request, "
+        f"SignedHeaders=host;x-amz-region-set, Signature={SIGNATURE}"
+    )
+    rec = one_log(proxy, "127.0.0.116", path=f"/mr/{OBJECT_KEY}", headers={"Authorization": auth})
+    assert rec["access_key"] == "AKIDV4A" and rec["_status"] == 200
+    assert rec["bucket"] == "mr"
 
 
 def test_vhost_style_bucket(proxy: Proxy) -> None:
@@ -423,7 +452,11 @@ def test_unsigned_allowed_on_internal_frontend(proxy: Proxy) -> None:
     rec = one_log(proxy, "127.0.0.19", dest=INTERNAL_IP, host="whatever.internal", path="/pub/k")
     assert rec["_status"] == 200
     assert rec["frontend"] == "s3_internal"
-    assert rec["bucket"] == "pub"  # host is not a configured s3 hostname -> path style
+    assert rec["bucket"] == ""  # Host is neither an s3 hostname nor a VIP: key is not a bucket
+    rec = one_log(proxy, "127.0.0.150", dest=INTERNAL_IP, host=INTERNAL_IP, path="/pub/k")
+    assert rec["bucket"] == "pub"  # Host = VIP address: path style
+    rec = one_log(proxy, "127.0.0.151", dest=INTERNAL_IP, host=f"{HOST}:8443", path="/pub2/k")
+    assert rec["bucket"] == "pub2"  # configured hostname (port stripped): path style
 
 
 def test_internal_frontend_vhost_and_keys(proxy: Proxy) -> None:
@@ -451,6 +484,16 @@ def test_admin_api_denied_on_internet_only(proxy: Proxy) -> None:
     assert (
         proxy.status("GET", "/administrators/k", {"Authorization": SIGV4}, src="127.0.0.21") == 200
     )
+    # path normalisation variants: one source each (a deny burst from one IP would ban it)
+    for i, path in enumerate(
+        ["//admin/user", "/./admin/user", "/%2fadmin", "/%2e/admin", "///.//admin", "/ADMIN/x"]
+    ):
+        got = proxy.status("GET", path, {"Authorization": SIGV4}, src=f"127.0.0.{100 + i}")
+        assert got == 403, path
+    # ... while look-alike buckets still work
+    for i, path in enumerate(["/administrators/x", "/admin-backup/x", "/a/admin", "/x/./admin"]):
+        got = proxy.status("GET", path, {"Authorization": SIGV4}, src=f"127.0.0.{106 + i}")
+        assert got == 200, path
     # internal VIP is not restricted
     assert (
         proxy.status(
@@ -596,9 +639,107 @@ def test_autoban_after_backend_403s(proxy: Proxy) -> None:
     assert can_connect(proxy, "127.0.0.41")
     # the ban is an expiry timestamp in gpt0, kept after the rate decayed
     table = proxy.admin("show table s3_internet")
-    line = next(ln for ln in table.splitlines() if f"key={src} " in ln)
+    line = next(ln for ln in table.splitlines() if f"key=::ffff:{src} " in ln)
     expiry = int(re.search(r"gpt0=(\d+)", line).group(1))  # type: ignore[union-attr]
     assert time.time() < expiry <= time.time() + proxy.config.security.autoban_ban_s
+
+
+def gpc(proxy: Proxy, src: str, idx: int) -> int:
+    table = proxy.admin("show table s3_internet")
+    line = next(ln for ln in table.splitlines() if f"key=::ffff:{src} " in ln)
+    m = re.search(rf"gpc{idx}=(\d+)", line)
+    assert m, line
+    return int(m.group(1))
+
+
+def test_head_403_burst_does_not_ban(proxy: Proxy) -> None:
+    # rclone/aws-cli with write-only keys: HEAD on a missing key -> 403, once per file
+    src = "127.0.0.110"
+    for _ in range(12):
+        assert proxy.status("HEAD", "/forbidden/x", {"Authorization": SIGV4}, src=src) == 403
+        assert proxy.status("OPTIONS", "/forbidden/x", {"Authorization": SIGV4}, src=src) == 403
+    assert can_connect(proxy, src)
+    assert gpc(proxy, src, 0) == 0 and gpc(proxy, src, 1) == 0
+
+
+def test_signed_get_403_burst_counts_and_bans(proxy: Proxy) -> None:
+    src = "127.0.0.117"
+    for _ in range(8):
+        try:
+            proxy.status("GET", "/forbidden/x", {"Authorization": SIGV4}, src=src)
+        except (OSError, http.client.HTTPException):
+            break
+    assert not can_connect(proxy, src)
+
+
+def test_unsigned_denies_use_separate_higher_limit(proxy: Proxy) -> None:
+    # limit is 10 per window for unsigned (500 by default); signed limit is 3
+    src = "127.0.0.111"
+    for _ in range(6):
+        assert proxy.status("GET", "/pub/k", src=src) == 403  # deny_anonymous policy deny
+    assert can_connect(proxy, src)
+    assert gpc(proxy, src, 1) == 6 and gpc(proxy, src, 0) == 0
+    # a backend 403 for an unsigned request counts on the unsigned counter too
+    src = "127.0.0.112"
+    for _ in range(4):
+        assert proxy.status("GET", "/forbidden/x", {"Authorization": "bogus"}, src=src) == 403
+    assert can_connect(proxy, src)
+    assert gpc(proxy, src, 0) == 0 and gpc(proxy, src, 1) == 4
+    # far above the unsigned limit: banned
+    src = "127.0.0.118"
+    for _ in range(30):
+        try:
+            proxy.status("GET", "/pub/k", src=src)
+        except (OSError, http.client.HTTPException):
+            break
+    assert not can_connect(proxy, src)
+
+
+def test_multiple_authorization_headers_denied(proxy: Proxy) -> None:
+    proxy.backend.seen.clear()
+    two = [("Authorization", SIGV4), ("Authorization", "AWS AKIDOTHER:c2ln")]
+    assert proxy.status("GET", "/b/dup", two, src="127.0.0.113") == 403
+    assert not proxy.backend.seen
+    # a single header with commas inside (SigV4) is not "multiple"
+    assert proxy.status("GET", "/b/one", {"Authorization": SIGV4}, src="127.0.0.113") == 200
+    # internal VIP is not restricted
+    assert proxy.status("GET", "/b/dup", two, src="127.0.0.113", dest=INTERNAL_IP) == 200
+
+
+def test_forwarding_headers_not_client_controlled_on_internet(proxy: Proxy) -> None:
+    proxy.backend.seen.clear()
+    spoof = {
+        "Authorization": SIGV4,
+        "X-Forwarded-For": "6.6.6.6",
+        "Forwarded": "for=6.6.6.6",
+        "X-Real-IP": "6.6.6.6",
+    }
+    src = "127.0.0.114"
+    assert proxy.status("GET", "/b/spoof", spoof, src=src) == 200
+    seen = next(r for r in proxy.backend.seen if r["path"] == "/b/spoof")
+    assert seen["xff"] == [src]  # only the address HAProxy observed
+    assert "forwarded" not in seen["headers"] and "x-real-ip" not in seen["headers"]
+    assert seen["headers"]["authorization"] == SIGV4  # signed headers untouched
+    # internal VIP keeps append behaviour
+    assert proxy.status("GET", "/b/spoof2", spoof, src=src, dest=INTERNAL_IP) == 200
+    seen = next(r for r in proxy.backend.seen if r["path"] == "/b/spoof2")
+    assert seen["xff"][0] == "6.6.6.6" and seen["xff"][-1] == src
+
+
+def test_stats_not_served_on_internet_vip(proxy: Proxy) -> None:
+    def fetch(dest: str, path: str) -> int:
+        c = http.client.HTTPConnection(dest, proxy.config.stats_port, timeout=5)
+        try:
+            c.request("GET", path)
+            return c.getresponse().status
+        finally:
+            c.close()
+
+    assert fetch(INTERNAL_IP, "/health") == 200
+    assert fetch(INTERNAL_IP, "/metrics") == 200
+    for path in ("/health", "/metrics", "/stats"):
+        with pytest.raises((OSError, http.client.HTTPException)):
+            fetch(INTERNET_IP, path)
 
 
 def test_policy_denies_count_towards_ban(proxy: Proxy) -> None:
@@ -623,6 +764,83 @@ def test_successes_do_not_ban(proxy: Proxy) -> None:
     for _ in range(30):
         assert proxy.status("GET", "/b/k", {"Authorization": SIGV4}, src=src) == 200
     assert can_connect(proxy, src)
+
+
+# -- second proxy: no hostnames, tiny connection limit, restricted internal VIP -------------------
+
+
+def test_bucket_not_logged_for_unlisted_host(proxy2: Proxy) -> None:
+    # S3 hostnames are not configured: a DNS name must not turn the object key into a bucket
+    rec = one_log(
+        proxy2,
+        "127.0.0.120",
+        host="dns.example.net",
+        path="/patient-1234/genome.bam",
+        headers={"Authorization": SIGV4},
+    )
+    assert rec["_status"] == 200 and rec["bucket"] == ""
+    # Host = VIP address keeps path-style buckets
+    rec = one_log(
+        proxy2,
+        "127.0.0.122",
+        host=f"{INTERNET_IP}:8443",
+        path="/patient-1234/genome.bam",
+        headers={"Authorization": SIGV4},
+    )
+    assert rec["bucket"] == "patient-1234"
+
+
+def test_bucket_not_logged_for_unlisted_host_with_hostnames(proxy: Proxy) -> None:
+    rec = one_log(
+        proxy,
+        "127.0.0.121",
+        host="dns.example.net",
+        path="/patient-1234/genome.bam",
+        headers={"Authorization": SIGV4},
+    )
+    assert rec["_status"] == 403 and rec["bucket"] == ""
+
+
+def test_conn_limit_per_ip(proxy2: Proxy) -> None:
+    held: list[socket.socket] = []
+    try:
+        for _ in range(3):  # limit is 3 concurrent connections
+            held.append(
+                socket.create_connection(
+                    (INTERNET_IP, proxy2.port), source_address=("127.0.0.130", 0)
+                )
+            )
+        time.sleep(0.3)
+        assert not can_connect(proxy2, "127.0.0.130")  # the 4th is rejected
+        assert can_connect(proxy2, "127.0.0.131")  # other IPs unaffected
+    finally:
+        for sk in held:
+            sk.close()
+    deadline = time.time() + 5
+    while not can_connect(proxy2, "127.0.0.130"):
+        assert time.time() < deadline, "slots were never released"
+        time.sleep(0.1)
+    # trusted networks are not tracked, so never limited
+    held = []
+    try:
+        for _ in range(6):
+            held.append(
+                socket.create_connection(
+                    (INTERNET_IP, proxy2.port), source_address=("127.0.2.132", 0)
+                )
+            )
+        time.sleep(0.3)
+        assert can_connect(proxy2, "127.0.2.132")
+    finally:
+        for sk in held:
+            sk.close()
+
+
+def test_internal_vip_restricted_to_internal_networks(proxy2: Proxy) -> None:
+    assert not can_connect(proxy2, "127.0.0.140", dest=INTERNAL_IP)  # not internal, not trusted
+    assert can_connect(proxy2, "127.0.3.140", dest=INTERNAL_IP)  # internal_networks
+    assert can_connect(proxy2, "127.0.2.140", dest=INTERNAL_IP)  # trusted
+    assert can_connect(proxy2, "127.0.0.140")  # internet VIP is governed by the allowlist
 
 
 # -- redaction (runs last: inspects every datagram received) --------------------------------

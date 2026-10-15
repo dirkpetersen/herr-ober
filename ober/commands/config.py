@@ -1080,8 +1080,20 @@ def _print_config_summary(config: OberConfig) -> None:
     console.print(f"  Stats Port: {config.stats_port}")
 
 
-def _apply_configuration(config: OberConfig) -> None:
-    """Apply the configuration to the system."""
+def _apply_configuration(
+    config: OberConfig,
+    systemd_dir: Path = Path("/etc/systemd/system"),
+    run_dir: Path = Path("/run/ober"),
+    is_root: bool | None = None,
+) -> None:
+    """Apply the configuration to the system.
+
+    Args:
+        config: Configuration to apply.
+        systemd_dir: Where unit files and drop-ins live (injectable for tests).
+        run_dir: Runtime directory of the HAProxy admin socket (injectable for tests).
+        is_root: Override root detection; systemd/run-dir changes happen only as root.
+    """
     # Save main config
     config.save()
 
@@ -1096,6 +1108,37 @@ def _apply_configuration(config: OberConfig) -> None:
         _configure_vip_interface(config)
     else:
         _generate_keepalived_config(config)
+
+    if os.geteuid() == 0 if is_root is None else is_root:
+        _ensure_runtime_dir(config, systemd_dir, run_dir)
+
+
+_RUNTIME_DROPIN = """[Service]
+RuntimeDirectory=ober
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+"""
+
+
+def _ensure_runtime_dir(config: OberConfig, systemd_dir: Path, run_dir: Path) -> None:
+    """Make the HAProxy admin socket directory exist on nodes bootstrapped before 0.4.
+
+    ``ober upgrade`` never rewrites unit files, so an existing ``ober-http.service`` lacks
+    ``RuntimeDirectory=ober`` and HAProxy would fail on ``stats socket /run/ober/...``. A
+    drop-in adds it without touching the unit; watch/blocklist units are (re)written too.
+    """
+    from ober.system import run_command
+    from ober.watch.units import write_units
+
+    dropin_dir = systemd_dir / "ober-http.service.d"
+    dropin_dir.mkdir(parents=True, exist_ok=True)
+    (dropin_dir / "10-ober-runtime.conf").write_text(_RUNTIME_DROPIN)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.chmod(0o700)
+
+    write_units(config, systemd_dir, role="all")
+    run_command(["systemctl", "daemon-reload"], check=False)
 
 
 _HOSTNAME_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
@@ -1162,10 +1205,14 @@ def _conn_log_var_lines() -> list[str]:
     return [f"    tcp-request connection set-var(sess.o_{n}) {i}" for n, i in _LOG_VARS_INIT]
 
 
-def _s3_request_lines(hostnames: list[str]) -> list[str]:
+def _s3_request_lines(
+    hostnames: list[str], vip_hosts: list[str], strip_forwarded: bool = False
+) -> list[str]:
     """http-request rules that extract the redacted log fields and add proxy headers.
 
     Nothing here rewrites Host, the path or any header the client may have signed.
+    With ``strip_forwarded`` (untrusted clients) client-supplied forwarding headers are
+    removed first so the backend only sees the address HAProxy observed.
     """
     lines = [
         "    # Redacted log fields (reset per request: keep-alive connections reuse sess vars)"
@@ -1177,9 +1224,16 @@ def _s3_request_lines(hostnames: list[str]) -> list[str]:
     lines += [
         f"    http-request set-var(sess.o_host) req.fhdr(host),field(1,:),lower,{cap(255)}",
         f"    http-request set-var(sess.o_ua) req.fhdr(user-agent),{cap(256)}",
-        # Path-style bucket: first path segment only (never the key or query string).
-        f"    http-request set-var(sess.o_bucket) path,field(2,/),{cap(128)}",
     ]
+    # Path-style bucket: first path segment only (never the key or query string), and only
+    # when Host is one of our names or VIP addresses. Otherwise the first segment may be an
+    # object key of some unrelated request (e.g. a DNS name pointing at us) and is not logged.
+    path_hosts = sorted({*hostnames, *vip_hosts})
+    if path_hosts:
+        lines.append(
+            f"    http-request set-var(sess.o_bucket) path,field(2,/),{cap(128)} "
+            f"if {{ var(sess.o_host) -m str {' '.join(path_hosts)} }}"
+        )
     # Virtual-host bucket: prefix of <bucket>.<s3 hostname>; longest suffix wins (last).
     for name in sorted(hostnames, key=len):
         dotted = name.replace(".", "[.]")
@@ -1189,43 +1243,68 @@ def _s3_request_lines(hostnames: list[str]) -> list[str]:
             f"if {{ var(sess.o_host) -m end .{name} }}"
         )
     lines += [
-        # Access key ID, most specific wins: presign query < SigV2 < SigV4 header. Each
+        # Access key ID, most specific wins: presign query < SigV2 < SigV4/4A header. Each
         # extraction is guarded and cut at the first '/' or ':' so the signature is never kept.
         f"    http-request set-var(sess.o_akey) url_param(X-Amz-Credential),url_dec,field(1,/),"
         f"{cap(128)}",
+        f"    http-request set-var(sess.o_akey) url_param(AWSAccessKeyId),url_dec,{cap(128)} "
+        "if { url_param(AWSAccessKeyId) -m found }",
         f"    http-request set-var(sess.o_akey) req.fhdr(authorization),word(2,' '),field(1,:),"
         f"{cap(128)} if {{ req.fhdr(authorization) -m reg ^AWS\\ [^:\\ ]+: }}",
         f"    http-request set-var(sess.o_akey) req.fhdr(authorization),word(2,' '),field(2,'='),"
         f"field(1,/),{cap(128)} "
-        "if { req.fhdr(authorization) -m reg ^AWS4-HMAC-SHA256\\ Credential=[^/,\\ ]+/ }",
+        "if { req.fhdr(authorization) -m reg "
+        "^AWS4-(HMAC-SHA256|ECDSA-P256-SHA256)\\ Credential=[^/,\\ ]+/ }",
         # Presigned flag only; the signature value itself is never logged.
         "    http-request set-var(sess.o_presigned) always_true "
         "if { url_param(X-Amz-Signature) -m found } || { url_param(Signature) -m found }",
+    ]
+    if strip_forwarded:
+        lines += [
+            "    http-request del-header X-Forwarded-For",
+            "    http-request del-header Forwarded",
+            "    http-request del-header X-Real-IP",
+        ]
+    lines += [
         "    option forwardfor",
         "    http-request set-header X-Forwarded-Proto https",
     ]
     return lines
 
 
+def _internal_path(config: OberConfig) -> Path:
+    """Sources allowed on internal VIPs (``config.py`` of the data model is not extended)."""
+    return config.install_path / "etc" / "haproxy" / "internal.lst"
+
+
 def _s3_frontend_internal(
-    config: OberConfig, binds: str, backend: str, hostnames: list[str]
+    config: OberConfig, binds: str, backend: str, hostnames: list[str], vip_hosts: list[str]
 ) -> list[str]:
     """S3 frontend for VIPs with exposure "internal" (trusted clients only)."""
-    return [
+    lines = [
         "# S3 frontend for internal VIPs",
         "frontend s3_internal",
         f"    bind {binds} ssl crt {config.certs.path} alpn http/1.1",
         f"    tcp-request connection reject if {{ src -f {config.blocklist_path} }}",
+    ]
+    if config.security.internal_networks:
+        # Empty internal_networks = no restriction (pre-0.4 behavior)
+        lines.append(
+            f"    tcp-request connection reject unless {{ src -f {_internal_path(config)} }} "
+            f"or {{ src -f {config.trusted_path} }}"
+        )
+    lines += [
         *_conn_log_var_lines(),
-        *_s3_request_lines(hostnames),
+        *_s3_request_lines(hostnames, vip_hosts),
         f'    log-format "{_haproxy_log_format("s3_internal")}"',
         f"    default_backend {backend}",
         "",
     ]
+    return lines
 
 
 def _s3_frontend_internet(
-    config: OberConfig, binds: str, backend: str, hostnames: list[str]
+    config: OberConfig, binds: str, backend: str, hostnames: list[str], vip_hosts: list[str]
 ) -> list[str]:
     """S3 frontend for VIPs with exposure "internet": cheap early rejects, then ACLs."""
     sec = config.security
@@ -1234,6 +1313,8 @@ def _s3_frontend_internet(
         "# S3 frontend for internet-facing VIPs (hardened)",
         "frontend s3_internet",
         f"    bind {binds} ssl crt {config.certs.path} alpn http/1.1",
+        # Cap so Internet clients cannot starve the internal VIPs of the global maxconn
+        f"    maxconn {sec.internet_maxconn}",
     ]
 
     track = sec.autoban_enabled or sec.conn_limit_per_ip > 0
@@ -1243,11 +1324,12 @@ def _s3_frontend_internet(
         if sec.conn_limit_per_ip > 0:
             store.append("conn_cur")
         if sec.autoban_enabled:
-            store += ["gpc(1)", f"gpc_rate(1,{sec.autoban_window_s}s)", "gpt(1)"]
+            store += ["gpc(2)", f"gpc_rate(2,{sec.autoban_window_s}s)", "gpt(1)"]
             expire = sec.autoban_ban_s + sec.autoban_window_s
         lines += [
-            "    # Per-IP counters: conn_cur, 401/403 count + rate, gpt0 = ban expiry (epoch s)",
-            f"    stick-table type ip size 1m expire {expire}s store {','.join(store)}",
+            "    # Per-IP counters: conn_cur; gpc0 = signed failures, gpc1 = unsigned failures",
+            "    # (count + rate each); gpt0 = ban expiry (epoch s). ipv6 keys hold IPv4 as ::ffff:a.b.c.d",
+            f"    stick-table type ipv6 size 1m expire {expire}s store {','.join(store)}",
         ]
 
     lines.append("    # 1. Cheap rejects before the TLS handshake")
@@ -1277,7 +1359,7 @@ def _s3_frontend_internet(
             # Keep-alive connections of a banned IP are cut at the next request.
             "    http-request reject if { sc_get_gpt(0,0),sub(txn.now) gt 0 }",
         ]
-    lines += _s3_request_lines(hostnames)
+    lines += _s3_request_lines(hostnames, vip_hosts, strip_forwarded=True)
 
     lines.append("    # 3. Policy ACLs (Host/path/signed headers are never rewritten)")
     if hostnames:
@@ -1291,8 +1373,9 @@ def _s3_frontend_internet(
     ]
     if sec.deny_admin_api:
         lines += [
-            "    http-request set-var(txn.deny) int(1) if { path,url_dec -m str /admin } "
-            "|| { path,url_dec -m beg /admin/ }",
+            # One anchored regex on the decoded path: //admin, /./admin and /%2fadmin too
+            "    http-request set-var(txn.deny) int(1) "
+            "if { path,url_dec -i -m reg ^/+([.]/+)*admin(/|$) }",
         ]
     if sec.deny_anonymous:
         lines += [
@@ -1300,21 +1383,38 @@ def _s3_frontend_internet(
             "!{ url_param(X-Amz-Signature) -m found } !{ url_param(Signature) -m found } "
             "!{ method OPTIONS }",
         ]
+    # Several Authorization headers: which one RGW honours is ambiguous. fhdr_cnt counts header
+    # lines (hdr_cnt would also split the commas inside a SigV4 value).
+    lines.append(
+        "    http-request set-var(txn.deny) int(1) if { req.fhdr_cnt(authorization) gt 1 }"
+    )
     violation = "{ var(txn.deny) -m found }"
+    signed = "{ var(sess.o_akey),length gt 0 }"
     if sec.autoban_enabled:
         lines += [
-            f"    http-request sc-inc-gpc(0,0) if {violation}",
+            "    # Policy denies count as signed (gpc0) or unsigned (gpc1) by the request",
+            f"    http-request sc-inc-gpc(0,0) if {violation} {signed}",
+            f"    http-request sc-inc-gpc(1,0) if {violation} !{signed}",
             f"    http-request sc-set-gpt(0,0) date({sec.autoban_ban_s}) "
-            f"if {violation} {{ sc_gpc_rate(0,0) gt {sec.autoban_auth_failures} }}",
+            f"if {violation} {signed} {{ sc_gpc_rate(0,0) gt {sec.autoban_auth_failures} }}",
+            f"    http-request sc-set-gpt(0,0) date({sec.autoban_ban_s}) "
+            f"if {violation} !{signed} {{ sc_gpc_rate(1,0) gt {sec.autoban_unsigned_failures} }}",
         ]
     lines.append(f"    http-request deny deny_status 403 if {violation}")
 
     if sec.autoban_enabled:
+        denied = "{ status 401 403 }"
+        probe = "!{ method HEAD OPTIONS }"
         lines += [
-            "    # 4. Auto-ban: backend 401/403 responses count; over the limit sets the ban",
-            "    http-response sc-inc-gpc(0,0) if { status 401 403 }",
+            "    # 4. Auto-ban on backend 401/403. Signed requests (not HEAD/OPTIONS, which",
+            "    # legitimately 403) count against autoban_auth_failures; unsigned ones against",
+            "    # the much higher autoban_unsigned_failures (many users behind one NAT).",
+            f"    http-response sc-inc-gpc(0,0) if {denied} {signed} {probe}",
+            f"    http-response sc-inc-gpc(1,0) if {denied} !{signed}",
             f"    http-response sc-set-gpt(0,0) date({sec.autoban_ban_s}) "
-            f"if {{ status 401 403 }} {{ sc_gpc_rate(0,0) gt {sec.autoban_auth_failures} }}",
+            f"if {denied} {signed} {probe} {{ sc_gpc_rate(0,0) gt {sec.autoban_auth_failures} }}",
+            f"    http-response sc-set-gpt(0,0) date({sec.autoban_ban_s}) "
+            f"if {denied} !{signed} {{ sc_gpc_rate(1,0) gt {sec.autoban_unsigned_failures} }}",
         ]
 
     lines += [
@@ -1325,19 +1425,39 @@ def _s3_frontend_internet(
     return lines
 
 
-def _write_security_lists(config: OberConfig) -> None:
-    """Write the HAProxy ``-f`` files for the internet frontend.
+def _valid_networks(entries: list[str], label: str) -> list[str]:
+    """Keep syntactically valid IPs/CIDRs; warn about the rest.
 
-    allowlist/trusted are rewritten from config (always, so the files exist even when
-    empty). The blocklist is only created when missing: ober watch manages it at runtime.
+    A typo in an allowlist must not stop HAProxy from starting (it refuses to load
+    a ``-f`` file with a bad line), so invalid entries are skipped, not written.
+    """
+    valid: list[str] = []
+    for raw in entries:
+        entry = raw.strip()
+        if not entry:
+            continue
+        try:
+            ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            console.print(f"[yellow]Warning: skipping invalid {label} entry {entry!r}[/yellow]")
+            continue
+        valid.append(entry)
+    return valid
+
+
+def _write_security_lists(config: OberConfig) -> None:
+    """Write the HAProxy ``-f`` files for the S3 frontends.
+
+    allowlist/trusted/internal are rewritten from config (always, so the files exist even
+    when empty). The blocklist is only created when missing: ober watch manages it at runtime.
     """
     config.allowlist_path.parent.mkdir(parents=True, exist_ok=True)
-    for path, entries in (
-        (config.allowlist_path, config.security.allowlist),
-        (config.trusted_path, config.security.trusted_networks),
+    for path, entries, label in (
+        (config.allowlist_path, config.security.allowlist, "allowlist"),
+        (config.trusted_path, config.security.trusted_networks, "trusted network"),
+        (_internal_path(config), config.security.internal_networks, "internal network"),
     ):
-        lines = [e.strip() for e in entries if e.strip()]
-        path.write_text("".join(f"{line}\n" for line in lines))
+        path.write_text("".join(f"{line}\n" for line in _valid_networks(entries, label)))
     if not config.blocklist_path.exists():
         config.blocklist_path.write_text("")
 
@@ -1361,6 +1481,19 @@ def _generate_haproxy_config(
     else:
         log_line = "    log stdout format raw local0 info"
     hostnames = _validated_hostnames(sec.s3_hostnames)
+
+    internet = [v for v in config.vips if v.exposure == "internet"]
+    internal = [v for v in config.vips if v.exposure != "internet"]
+    # stats/metrics/health have no auth: never answer on an Internet-exposed VIP address
+    stats_guard = (
+        [
+            "    tcp-request connection reject if { dst "
+            + " ".join(_vip_host(v.address) for v in internet)
+            + " }"
+        ]
+        if internet
+        else []
+    )
 
     cfg_lines = [
         "# Herr Ober HAProxy Configuration",
@@ -1394,6 +1527,7 @@ def _generate_haproxy_config(
         "frontend stats",
         f"    bind *:{config.stats_port}",
         "    no log",
+        *stats_guard,
         "    stats enable",
         "    stats uri /stats",
         "    stats refresh 10s",
@@ -1406,14 +1540,14 @@ def _generate_haproxy_config(
     # refuses to start if default_backend references a missing backend section)
     if config.vips and config.certs.path and config.backends:
         backend_name = config.backends[0].name
-        internal = [v for v in config.vips if v.exposure != "internet"]
-        internet = [v for v in config.vips if v.exposure == "internet"]
         if internal:
-            binds = " ".join(f"{_vip_host(v.address)}:{https_port}" for v in internal)
-            cfg_lines += _s3_frontend_internal(config, binds, backend_name, hostnames)
+            hosts = [_vip_host(v.address) for v in internal]
+            binds = " ".join(f"{h}:{https_port}" for h in hosts)
+            cfg_lines += _s3_frontend_internal(config, binds, backend_name, hostnames, hosts)
         if internet:
-            binds = " ".join(f"{_vip_host(v.address)}:{https_port}" for v in internet)
-            cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames)
+            hosts = [_vip_host(v.address) for v in internet]
+            binds = " ".join(f"{h}:{https_port}" for h in hosts)
+            cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames, hosts)
 
     # Backends
     for backend in config.backends:

@@ -7,8 +7,12 @@ This module sits on the hot path: no regular expressions, no per-record
 allocations beyond the JSON decode and the record itself.
 """
 
+import functools
+import ipaddress
 import json
 import math
+import time
+from collections.abc import Callable
 from typing import Any
 
 from ober.watch.models import LogRecord
@@ -20,6 +24,16 @@ MAX_IP = 64  # longest textual IPv6 is 45 characters
 
 _TRUE_STRINGS = frozenset({"true", "True", "TRUE", "1", "yes"})
 _TRAILING = b"\x00\r\n\t "
+MAX_TS_SKEW_S = 86400  # timestamps further from now than this are replaced by now
+
+
+@functools.lru_cache(maxsize=65536)
+def _normalize_ip(value: str) -> str:
+    """Canonical form of a single IP address; raises ValueError for anything else.
+
+    Cached: client IPs repeat heavily, and this runs once per log line.
+    """
+    return str(ipaddress.ip_address(value))
 
 
 def _str(value: Any, cap: int) -> str:
@@ -50,8 +64,13 @@ def _bool(value: Any) -> bool:
     return bool(value)
 
 
-def parse_datagram(data: bytes) -> LogRecord | None:
-    """Parse one syslog datagram into a record, or None if malformed."""
+def parse_datagram(data: bytes, now: float | None = None) -> LogRecord | None:
+    """Parse one syslog datagram into a record, or None if malformed.
+
+    ``client_ip`` must be a single IP address (it is normalized); anything else, such as a
+    CIDR forged over unauthenticated UDP, makes the datagram malformed. A ``ts`` more than
+    a day away from ``now`` (default: the wall clock) is replaced by ``now``.
+    """
     start = data.find(b"{")
     if start < 0:
         return None
@@ -65,6 +84,10 @@ def parse_datagram(data: bytes) -> LogRecord | None:
         ts = float(obj["ts"])
         if not math.isfinite(ts) or ts <= 0:
             return None
+        current = time.time() if now is None else now
+        if abs(ts - current) > MAX_TS_SKEW_S:
+            ts = current
+        client_ip = _normalize_ip(_str(obj["client_ip"], MAX_IP).strip())
         status = int(obj["status"])
         if status < 0:
             status = 0  # HAProxy logs -1 for aborted requests (e.g. a banned connection)
@@ -74,7 +97,7 @@ def parse_datagram(data: bytes) -> LogRecord | None:
             ts=ts,
             node=_str(obj["node"], MAX_SHORT),
             frontend=_str(obj["frontend"], MAX_SHORT),
-            client_ip=_str(obj["client_ip"], MAX_IP),
+            client_ip=client_ip,
             method=_str(obj["method"], 32),
             host=_str(obj["host"], MAX_SHORT),
             bucket=_str(obj["bucket"], MAX_BUCKET),
@@ -94,13 +117,14 @@ def parse_datagram(data: bytes) -> LogRecord | None:
 class LogParser:
     """Stateful wrapper around :func:`parse_datagram` that counts outcomes."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
         self.parsed = 0
         self.malformed = 0
 
     def parse(self, data: bytes) -> LogRecord | None:
         """Parse a datagram; malformed input is counted and returns None."""
-        record = parse_datagram(data)
+        record = parse_datagram(data, self._clock())
         if record is None:
             self.malformed += 1
         else:

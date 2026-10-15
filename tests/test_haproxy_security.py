@@ -203,23 +203,29 @@ def test_internet_rule_order(tmp_path: Path, cert_pem: Path, short_sock: Path) -
         return text.index(needle)
 
     order = [
-        "stick-table type ip size 1m expire 355s store conn_cur,gpc(1),gpc_rate(1,22s),gpt(1)",
+        "maxconn 20000",
+        "stick-table type ipv6 size 1m expire 355s store conn_cur,gpc(2),gpc_rate(2,22s),gpt(1)",
         f"reject if {{ src -f {config.blocklist_path} }}",
         f"reject unless {{ src -f {config.allowlist_path} }} or {{ src -f {config.trusted_path} }}",
         f"track-sc0 src unless {{ src -f {config.trusted_path} }}",
         "tcp-request connection reject if { sc_get_gpt(0,0),sub(sess.now) gt 0 }",
         "tcp-request connection reject if { sc_conn_cur(0) gt 7 }",
         "http-request reject if { sc_get_gpt(0,0),sub(txn.now) gt 0 }",
+        "http-request del-header X-Forwarded-For",
         "option forwardfor",
         "acl s3_host var(sess.o_host) -m end .s3.example.org",
         "method GET HEAD PUT POST DELETE OPTIONS",
-        "/admin",
+        "admin(/|$)",
         "req.hdr_cnt(authorization) eq 0",
-        "sc-inc-gpc(0,0)",
+        "req.fhdr_cnt(authorization) gt 1",
+        "http-request sc-inc-gpc(0,0)",
+        "http-request sc-inc-gpc(1,0)",
         "http-request sc-set-gpt(0,0) date(333)",
         "http-request deny deny_status 403",
-        "http-response sc-inc-gpc(0,0) if { status 401 403 }",
-        "http-response sc-set-gpt(0,0) date(333) if { status 401 403 } { sc_gpc_rate(0,0) gt 11 }",
+        "http-response sc-inc-gpc(0,0) if { status 401 403 } { var(sess.o_akey),length gt 0 } "
+        "!{ method HEAD OPTIONS }",
+        "http-response sc-inc-gpc(1,0) if { status 401 403 } !{ var(sess.o_akey),length gt 0 }",
+        "http-response sc-set-gpt(0,0) date(333) if { status 401 403 }",
         "log-format",
     ]
     positions = [pos(o) for o in order]
@@ -229,7 +235,10 @@ def test_internet_rule_order(tmp_path: Path, cert_pem: Path, short_sock: Path) -
     # SigV4: nothing rewrites the Host header, the path or the Authorization header
     for forbidden in ("set-header host", "set-path", "set-uri", "replace-", "set-query"):
         assert forbidden not in text.lower()
-    assert "del-header" not in text
+    # only the client-controlled forwarding headers are removed
+    assert re.findall(r"del-header (\S+)", text) == ["X-Forwarded-For", "Forwarded", "X-Real-IP"]
+    assert text.index("del-header X-Real-IP") < text.index("option forwardfor")
+    assert "sc_gpc_rate(0,0) gt 11" in text and "sc_gpc_rate(1,0) gt 500" in text
 
 
 def test_internet_flags_toggle_sections(tmp_path: Path, cert_pem: Path, short_sock: Path) -> None:
@@ -245,7 +254,8 @@ def test_internet_flags_toggle_sections(tmp_path: Path, cert_pem: Path, short_so
     text = section(generate(config, short_sock), "s3_internet")
     assert "allowlist.lst" not in text
     assert "stick-table" not in text and "track-sc0" not in text
-    assert "/admin" not in text
+    assert "admin(/|$)" not in text
+    assert "maxconn 20000" in text
     assert "sc-inc-gpc" not in text
     assert "authorization) eq 0" not in text  # deny_anonymous default off
     assert "acl s3_host" not in text  # no hostnames configured
@@ -255,7 +265,7 @@ def test_internet_flags_toggle_sections(tmp_path: Path, cert_pem: Path, short_so
 def test_conn_limit_only_table(tmp_path: Path, cert_pem: Path, short_sock: Path) -> None:
     config = make_config(tmp_path, cert_pem, "internet", autoban_enabled=False, conn_limit_per_ip=9)
     text = section(generate(config, short_sock), "s3_internet")
-    assert "store conn_cur" in text and "gpc" not in text
+    assert "store conn_cur" in text and "gpc(" not in text
     assert "sc_conn_cur(0) gt 9" in text
 
 
@@ -310,15 +320,119 @@ def test_apply_writes_lists_and_keeps_blocklist(tmp_path: Path, cert_pem: Path) 
     assert config.trusted_path.exists()
 
 
-def _apply_configuration_for_test(config: OberConfig) -> None:
-    """Run the real _apply_configuration; its other generators need BGP mode only."""
+def _apply_configuration_for_test(config: OberConfig, root: bool = False) -> list[list[str]]:
+    """Run the real _apply_configuration; its other generators need BGP mode only.
+
+    Never touches /etc or /run: systemd and run dirs live under the install path.
+    """
     from unittest.mock import patch
 
+    calls: list[list[str]] = []
     with (
         patch("ober.commands.config._generate_exabgp_config"),
         patch("ober.commands.config._configure_vip_interface"),
+        patch("ober.system.run_command", side_effect=lambda cmd, **_: calls.append(cmd)),
     ):
-        _apply_configuration(config)
+        _apply_configuration(
+            config,
+            systemd_dir=config.install_path / "systemd",
+            run_dir=config.install_path / "run" / "ober",
+            is_root=root,
+        )
+    return calls
+
+
+def test_apply_prepares_runtime_dir_as_root(tmp_path: Path, cert_pem: Path) -> None:
+    config = make_config(tmp_path, cert_pem)
+    calls = _apply_configuration_for_test(config, root=True)
+    dropin = tmp_path / "systemd" / "ober-http.service.d" / "10-ober-runtime.conf"
+    assert dropin.read_text().splitlines() == [
+        "[Service]",
+        "RuntimeDirectory=ober",
+        "RuntimeDirectoryMode=0700",
+        "RuntimeDirectoryPreserve=yes",
+    ]
+    run_dir = tmp_path / "run" / "ober"
+    assert run_dir.is_dir() and run_dir.stat().st_mode & 0o777 == 0o700
+    assert ["systemctl", "daemon-reload"] in calls
+    # watch / blocklist-sync units are regenerated next to the drop-in
+    assert any(f.suffix == ".service" for f in (tmp_path / "systemd").iterdir())
+
+
+def test_apply_does_not_touch_system_when_not_root(tmp_path: Path, cert_pem: Path) -> None:
+    config = make_config(tmp_path, cert_pem)
+    calls = _apply_configuration_for_test(config, root=False)
+    assert calls == []
+    assert not (tmp_path / "systemd").exists() and not (tmp_path / "run").exists()
+
+
+def test_bootstrap_unit_preserves_runtime_dir() -> None:
+    from ober.commands.bootstrap import HAPROXY_SERVICE
+
+    assert "RuntimeDirectory=ober" in HAPROXY_SERVICE
+    assert "RuntimeDirectoryPreserve=yes" in HAPROXY_SERVICE
+
+
+def test_invalid_network_entries_are_skipped(
+    tmp_path: Path, cert_pem: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = make_config(
+        tmp_path,
+        cert_pem,
+        allowlist=["192.0.2.0/24", "192.0.2.0/33", "not-an-ip", " 198.51.100.7 ", "2001:db8::/32"],
+        trusted_networks=["10.0.0.0/8", "10.0.0.0/8x"],
+        internal_networks=["172.16.0.0/12", "300.1.1.1", "10.1.2.3/8"],  # host bits are fine
+    )
+    _write_security_lists(config)
+    assert config.allowlist_path.read_text() == "192.0.2.0/24\n198.51.100.7\n2001:db8::/32\n"
+    assert config.trusted_path.read_text() == "10.0.0.0/8\n"
+    internal = config.install_path / "etc" / "haproxy" / "internal.lst"
+    assert internal.read_text() == "172.16.0.0/12\n10.1.2.3/8\n"
+    out = capsys.readouterr().out
+    for bad in ("192.0.2.0/33", "not-an-ip", "10.0.0.0/8x", "300.1.1.1"):
+        assert bad in out
+    if HAPROXY:
+        generate(config, config.install_path / "h.sock")
+        haproxy_check(config)
+
+
+def test_internal_networks_restrict_internal_frontend(
+    tmp_path: Path, cert_pem: Path, short_sock: Path
+) -> None:
+    config = make_config(tmp_path, cert_pem, "mixed", internal_networks=["10.0.0.0/8"])
+    text = generate(config, short_sock)
+    internal = section(text, "s3_internal")
+    lst = config.install_path / "etc" / "haproxy" / "internal.lst"
+    assert (
+        f"tcp-request connection reject unless {{ src -f {lst} }} or "
+        f"{{ src -f {config.trusted_path} }}"
+    ) in internal
+    assert internal.index("blocklist.lst") < internal.index("internal.lst")
+    assert "internal.lst" not in section(text, "s3_internet")
+    assert "del-header" not in internal  # internal VIP keeps append behaviour
+    # empty = no restriction
+    config.security.internal_networks = []
+    assert "internal.lst" not in section(generate(config, short_sock), "s3_internal")
+
+
+def test_stats_frontend_rejects_internet_vip_destinations(
+    tmp_path: Path, cert_pem: Path, short_sock: Path
+) -> None:
+    config = make_config(tmp_path, cert_pem, "mixed")
+    text = generate(config, short_sock)
+    assert "tcp-request connection reject if { dst 10.0.100.2 }" in section(text, "stats")
+    config.vips = [v for v in config.vips if v.exposure != "internet"]
+    assert "dst" not in section(generate(config, short_sock), "stats")
+
+
+def test_bucket_only_for_known_hosts(tmp_path: Path, cert_pem: Path, short_sock: Path) -> None:
+    config = make_config(tmp_path, cert_pem, "internet", s3_hostnames=["s3.example.org"])
+    text = section(generate(config, short_sock), "s3_internet")
+    assert "if { var(sess.o_host) -m str 10.0.100.1 s3.example.org }" in text
+    assert "path,field(2,/),bytes(0,128),regsub([^[:print:]],?,g) if" in text  # always guarded
+    config.security.s3_hostnames = []
+    text = section(generate(config, short_sock), "s3_internet")
+    assert "-m str 10.0.100.1 }" in text
 
 
 def test_no_backend_no_frontends(tmp_path: Path, cert_pem: Path, short_sock: Path) -> None:
@@ -359,6 +473,7 @@ def test_haproxy_accepts_every_flag_combination(
                     shape,
                     s3_hostnames=hosts,
                     conn_limit_per_ip=limit,
+                    internal_networks=["10.0.0.0/8"] if limit else [],
                     log_target=target,
                     allowlist=["192.0.2.0/24"],
                     **dict(zip(flags, values, strict=True)),

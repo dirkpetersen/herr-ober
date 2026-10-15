@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BODY = 4096
 MAX_TTL_S = 10 * 365 * 86400
+REQUEST_TIMEOUT_S = 10  # idle or slow connections are dropped, freeing the handler thread
 
 
 def split_listen(listen: str) -> tuple[str, int]:
@@ -33,9 +34,20 @@ class WatchAPI:
         blocklist: BlockList,
         token: str,
         stats: Callable[[], dict[str, Any]],
+        admin_token: str = "",
     ) -> None:
+        """Create the server.
+
+        Args:
+            listen: ``host:port`` to bind.
+            blocklist: The blocklist served and modified.
+            token: Read token (GET /v1/blocklist); the admin token is accepted too.
+            stats: Callable returning the /v1/health body.
+            admin_token: Required for POST and DELETE; if empty, writes answer 403.
+        """
         self.blocklist = blocklist
         self._token = token
+        self._admin_token = admin_token
         self._stats = stats
         host, port = split_listen(listen)
         self._httpd = ThreadingHTTPServer((host, port), self._make_handler())
@@ -61,10 +73,16 @@ class WatchAPI:
             self._thread.join(5)
         self._httpd.server_close()
 
-    def _authorized(self, header: str | None) -> bool:
-        if not self._token or not header or not header.startswith("Bearer "):
+    @staticmethod
+    def _matches(header: str | None, token: str) -> bool:
+        if not token or not header or not header.startswith("Bearer "):
             return False
-        return hmac.compare_digest(header[7:].encode(), self._token.encode())
+        return hmac.compare_digest(header[7:].encode(), token.encode())
+
+    def _authorized(self, header: str | None, admin: bool = False) -> bool:
+        if self._matches(header, self._admin_token):
+            return True
+        return not admin and self._matches(header, self._token)
 
     def _make_handler(self) -> type[BaseHTTPRequestHandler]:
         api = self
@@ -72,6 +90,7 @@ class WatchAPI:
         class Handler(BaseHTTPRequestHandler):
             server_version = "ober-watch"
             sys_version = ""
+            timeout = REQUEST_TIMEOUT_S
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
                 logger.debug("api: " + format, *args)
@@ -84,8 +103,11 @@ class WatchAPI:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def _auth(self) -> bool:
-                if api._authorized(self.headers.get("Authorization")):
+            def _auth(self, admin: bool = False) -> bool:
+                if admin and not api._admin_token:
+                    self._send(403, {"error": "writes disabled: OBER_WATCH_ADMIN_TOKEN not set"})
+                    return False
+                if api._authorized(self.headers.get("Authorization"), admin):
                     return True
                 self._send(401, {"error": "unauthorized"})
                 return False
@@ -105,7 +127,7 @@ class WatchAPI:
                 if self.path.split("?", 1)[0] != "/v1/blocklist":
                     self._send(404, {"error": "not found"})
                     return
-                if not self._auth():
+                if not self._auth(admin=True):
                     return
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
@@ -117,6 +139,8 @@ class WatchAPI:
                     target = body["target"]
                     reason = body.get("reason", "")
                     ttl = body.get("ttl_s")
+                    if body.get("source", "manual") != "manual":
+                        raise ValueError("only manual entries can be added through the API")
                     if not isinstance(target, str) or not isinstance(reason, str):
                         raise ValueError("target and reason must be strings")
                     if ttl is not None and (type(ttl) is not int or ttl < 0 or ttl > MAX_TTL_S):
@@ -133,7 +157,7 @@ class WatchAPI:
                 if not path.startswith(prefix):
                     self._send(404, {"error": "not found"})
                     return
-                if not self._auth():
+                if not self._auth(admin=True):
                     return
                 try:
                     target = normalize_target(unquote(path[len(prefix) :]))

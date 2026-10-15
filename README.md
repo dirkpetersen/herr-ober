@@ -181,7 +181,19 @@ See [architecture.md](https://github.com/dirkpetersen/herr-ober/blob/main/archit
 
 For internet-exposed S3 endpoints, `ober watch` analyzes HAProxy logs off the data path, can
 push proxy-side blocklists, and forwards findings (never raw logs) to Microsoft Sentinel and,
-optionally, Defender for Endpoint. See **[docs/security-monitoring.md](docs/security-monitoring.md)**
+optionally, Defender for Endpoint.
+
+Key points: `trusted_networks` are exempt from all automatic blocking and limits (put a
+shared campus NAT range in both `allowlist` and `trusted_networks`); auto-ban counts only
+signed 401/403 responses, unsigned failures use a separate higher threshold
+(`autoban_unsigned_failures`); automatic blocks apply only to single IPs seen on Internet
+VIPs. List the proxy nodes in `watch.syslog_allowed_sources`, bind `ober watch` to a
+management network and firewall 5514/udp and 8405/tcp (UDP syslog is unauthenticated).
+`OBER_WATCH_TOKEN` grants read access, `OBER_WATCH_ADMIN_TOKEN` is needed for blocklist
+add/remove. Upgrading from earlier versions: the frontend `s3_front` became `s3_internal` /
+`s3_internet` (update dashboards), and `ober config` installs a systemd drop-in for
+`/run/ober`. Known limits: stick tables are per node (with ECMP the effective threshold is
+N times the limit) and rejected connections are not logged. See **[docs/security-monitoring.md](docs/security-monitoring.md)**
 and **[deploy/sentinel/README.md](deploy/sentinel/README.md)**.
 
 ---

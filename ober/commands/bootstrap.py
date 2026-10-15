@@ -71,6 +71,8 @@ KillMode=mixed
 # /run/ober holds the admin socket used by 'ober blocklist sync'
 RuntimeDirectory=ober
 RuntimeDirectoryMode=0700
+# keep it while HAProxy is stopped: blocklist sync still updates the file
+RuntimeDirectoryPreserve=yes
 
 # Security
 NoNewPrivileges=true

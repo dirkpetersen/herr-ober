@@ -151,3 +151,84 @@ def test_cli_local_blocklist_commands(config: OberConfig) -> None:
         assert runner.invoke(main, ["blocklist", "add", "nonsense"]).exit_code == 1
         assert runner.invoke(main, ["blocklist", "remove", "198.51.100.1"]).exit_code == 0
         assert runner.invoke(main, ["blocklist", "remove", "198.51.100.1"]).exit_code == 1
+
+
+class _Resp:
+    def __init__(self, body: object) -> None:
+        self.body = body
+
+    def raise_for_status(self) -> None: ...
+
+    def json(self) -> object:
+        return self.body
+
+
+def _fetch(body: object, exempt: object = None) -> set[str]:
+    from ober.watch.sync import fetch_targets
+
+    with patch("ober.watch.sync.requests.get", return_value=_Resp(body)):
+        return fetch_targets("http://x", "t", exempt)  # type: ignore[arg-type]
+
+
+def test_fetch_handles_non_object_json() -> None:
+    for body in ([1, 2], "x", None, 5, {"entries": "nope"}):
+        with pytest.raises(ValueError):
+            _fetch(body)
+    assert _fetch({"entries": ["junk", 5, None, {"target": "1.2.3.4"}]}) == {"1.2.3.4"}
+
+
+def test_fetch_refuses_bad_auto_entries(config: OberConfig) -> None:
+    from ober.watch.rules import NetworkSet
+
+    config.trusted_path.write_text("198.51.100.0/24\n")
+    exempt = NetworkSet([config.trusted_path], ["10.0.0.0/8"], 0)
+    body = {
+        "entries": [
+            {"target": "10.0.0.0/8", "source": "auto"},  # forged CIDR
+            {"target": "203.0.113.0/24"},  # source defaults to auto
+            {"target": "10.1.2.3", "source": "auto"},  # internal network
+            {"target": "198.51.100.5", "source": "auto"},  # trusted file
+            {"target": "203.0.113.9", "source": "auto"},  # fine
+            {"target": "203.0.113.0/24", "source": "manual"},  # manual: as given
+            {"target": "10.5.0.0/16", "source": "manual"},
+        ]
+    }
+    assert _fetch(body, exempt.__contains__) == {"203.0.113.9", "203.0.113.0/24", "10.5.0.0/16"}
+
+
+@pytest.mark.usefixtures("haproxy")
+def test_sync_uses_config_exempt_networks(config: OberConfig) -> None:
+    config.security.internal_networks = ["10.0.0.0/8"]
+    body = {"entries": [{"target": "10.1.1.1", "source": "auto"}, {"target": "1.1.1.1"}]}
+    with patch("ober.watch.sync.requests.get", return_value=_Resp(body)):
+        res = sync_blocklist(config, "t")
+    assert res.added == ["1.1.1.1"]
+
+
+def test_cli_blocklist_writes_use_admin_token(config: OberConfig) -> None:
+    runner = CliRunner()
+    secrets = {"OBER_WATCH_TOKEN": "read", "OBER_WATCH_ADMIN_TOKEN": "admin"}
+    seen: dict[str, str] = {}
+
+    def capture(name: str) -> object:
+        def fn(*_a: object, **kw: object) -> _Resp:
+            seen[name] = kw["headers"]["Authorization"]  # type: ignore[index]
+            return _Resp({"entries": []})
+
+        return fn
+
+    with (
+        patch("ober.commands.watch.OberConfig.load", return_value=config),
+        patch("ober.commands.watch.load_secrets", return_value=secrets),
+        patch("ober.commands.watch.requests.get", capture("get")),
+        patch("ober.commands.watch.requests.post", capture("post")),
+        patch("ober.commands.watch.requests.delete", capture("delete")),
+    ):
+        runner.invoke(main, ["blocklist", "list"])
+        runner.invoke(main, ["blocklist", "add", "198.51.100.1"])
+        runner.invoke(main, ["blocklist", "remove", "198.51.100.1"])
+    assert seen == {
+        "get": "Bearer read",
+        "post": "Bearer admin",
+        "delete": "Bearer admin",
+    }

@@ -13,19 +13,20 @@ from ober.watch.blocklist import BlockList
 from ober.watch.server import WatchAPI
 
 TOKEN = "s3cret-token"
+ADMIN = "adm1n-token"
 
 
 @pytest.fixture
 def api(temp_dir: Path) -> Iterator[WatchAPI]:
     bl = BlockList(temp_dir / "b.json")
-    srv = WatchAPI("127.0.0.1:0", bl, TOKEN, lambda: {"received": 3, "malformed": 1})
+    srv = WatchAPI("127.0.0.1:0", bl, TOKEN, lambda: {"received": 3, "malformed": 1}, ADMIN)
     srv.start()
     yield srv
     srv.stop()
 
 
 def call(
-    api: WatchAPI, method: str, path: str, body: Any = None, token: str | None = TOKEN
+    api: WatchAPI, method: str, path: str, body: Any = None, token: str | None = ADMIN
 ) -> tuple[int, dict[str, Any]]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"http://127.0.0.1:{api.port}{path}", data=data, method=method)
@@ -47,6 +48,40 @@ def test_auth_required(api: WatchAPI, token: str | None) -> None:
     assert call(api, "GET", "/v1/blocklist", token=token)[0] == 401
     assert call(api, "POST", "/v1/blocklist", {"target": "1.2.3.4"}, token=token)[0] == 401
     assert call(api, "DELETE", "/v1/blocklist/1.2.3.4", token=token)[0] == 401
+
+
+def test_read_token_reads_but_cannot_write(api: WatchAPI) -> None:
+    assert call(api, "GET", "/v1/blocklist", token=TOKEN)[0] == 200
+    assert call(api, "GET", "/v1/blocklist", token=ADMIN)[0] == 200
+    assert call(api, "POST", "/v1/blocklist", {"target": "1.2.3.4"}, token=TOKEN)[0] == 401
+    assert call(api, "DELETE", "/v1/blocklist/1.2.3.4", token=TOKEN)[0] == 401
+
+
+def test_writes_disabled_without_admin_token(temp_dir: Path) -> None:
+    srv = WatchAPI("127.0.0.1:0", BlockList(temp_dir / "b.json"), TOKEN, dict)
+    srv.start()
+    try:
+        assert call(srv, "GET", "/v1/blocklist", token=TOKEN)[0] == 200
+        assert call(srv, "POST", "/v1/blocklist", {"target": "1.2.3.4"}, token=TOKEN)[0] == 403
+        assert call(srv, "DELETE", "/v1/blocklist/1.2.3.4", token=TOKEN)[0] == 403
+    finally:
+        srv.stop()
+
+
+def test_api_cannot_add_auto_entries(api: WatchAPI) -> None:
+    assert call(api, "POST", "/v1/blocklist", {"target": "1.2.3.4", "source": "auto"})[0] == 400
+    assert call(api, "POST", "/v1/blocklist", {"target": "1.0.0.0/7"})[0] == 400
+    assert call(api, "POST", "/v1/blocklist", {"target": "1.0.0.0/8"})[0] == 200
+    entries = call(api, "GET", "/v1/blocklist")[1]["entries"]
+    assert [e["source"] for e in entries] == ["manual"]
+
+
+def test_idle_connection_is_dropped(api: WatchAPI) -> None:
+    from ober.watch import server
+
+    # the handler class carries the socket timeout that frees idle threads
+    assert 0 < server.REQUEST_TIMEOUT_S <= 10
+    assert api._httpd.RequestHandlerClass.timeout == server.REQUEST_TIMEOUT_S  # type: ignore[attr-defined]
 
 
 def test_empty_server_token_rejects_everything(temp_dir: Path) -> None:

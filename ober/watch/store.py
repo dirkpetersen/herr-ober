@@ -11,6 +11,7 @@ import datetime as dt
 import gzip
 import json
 import logging
+import os
 import queue
 import shutil
 import threading
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 KINDS = ("raw", "findings", "summaries")
 _BATCH_MAX = 5000
+FILE_MODE = 0o640
+DERIVED_RETENTION_FACTOR = 3  # findings/summaries are kept 3x longer than raw logs
 _STOP = ("stop", None)
 
 
@@ -154,7 +157,8 @@ class Store:
         if handle is None:
             path = self.data_dir / kind / f"{kind}-{self._day}.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
-            handle = open(path, "a", encoding="utf-8")  # noqa: SIM115
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, FILE_MODE)
+            handle = open(fd, "a", encoding="utf-8")  # noqa: SIM115
             self._handles[kind] = handle
         return handle
 
@@ -199,6 +203,7 @@ class Store:
                 try:
                     with open(path, "rb") as src, gzip.open(tmp, "wb") as dst:
                         shutil.copyfileobj(src, dst)
+                    os.chmod(tmp, FILE_MODE)
                     tmp.replace(path.with_name(path.name + ".gz"))
                     path.unlink()
                 except OSError:
@@ -206,6 +211,22 @@ class Store:
                     tmp.unlink(missing_ok=True)
             cutoff = today - dt.timedelta(days=self.raw_retention_days)
             for path in raw_dir.glob("raw-*.jsonl.gz"):
+                day = _file_day(path.name)
+                if day is not None and day < cutoff:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        logger.exception("Failed to delete %s", path)
+            self._purge_derived(today)
+
+    def _purge_derived(self, today: dt.date) -> None:
+        """Delete findings and summaries files older than the derived retention."""
+        cutoff = today - dt.timedelta(days=self.raw_retention_days * DERIVED_RETENTION_FACTOR)
+        for kind in ("findings", "summaries"):
+            directory = self.data_dir / kind
+            if not directory.is_dir():
+                continue
+            for path in directory.glob(f"{kind}-*.jsonl*"):
                 day = _file_day(path.name)
                 if day is not None and day < cutoff:
                     try:

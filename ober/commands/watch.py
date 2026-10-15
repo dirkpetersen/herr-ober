@@ -34,8 +34,13 @@ def _local_api_url(config: OberConfig) -> str:
     return f"http://{host}:{port}"
 
 
-def _headers() -> dict[str, str]:
-    token = load_secrets().get("OBER_WATCH_TOKEN", "")
+def _headers(admin: bool = False) -> dict[str, str]:
+    """Bearer header: the read token, or the admin token for writes."""
+    secrets = load_secrets()
+    key = "OBER_WATCH_ADMIN_TOKEN" if admin else "OBER_WATCH_TOKEN"
+    token = secrets.get(key, "")
+    if not token and not admin:
+        token = secrets.get("OBER_WATCH_ADMIN_TOKEN", "")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -210,7 +215,10 @@ def blocklist_add(ctx: click.Context, target: str, reason: str, ttl: int | None)
         body = {"target": target, "reason": reason, "ttl_s": ttl}
         try:
             resp = requests.post(
-                f"{base}/v1/blocklist", json=body, headers=_headers(), timeout=API_TIMEOUT_S
+                f"{base}/v1/blocklist",
+                json=body,
+                headers=_headers(admin=True),
+                timeout=API_TIMEOUT_S,
             )
             resp.raise_for_status()
         except requests.RequestException as exc:
@@ -240,7 +248,7 @@ def blocklist_remove(ctx: click.Context, target: str) -> None:
         try:
             resp = requests.delete(
                 f"{base}/v1/blocklist/{quote(target, safe='')}",
-                headers=_headers(),
+                headers=_headers(admin=True),
                 timeout=API_TIMEOUT_S,
             )
             if resp.status_code == 404:
