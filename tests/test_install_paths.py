@@ -102,7 +102,8 @@ class TestProtectHome:
             patch.object(bs, "run_command"),
         ):
             bs._create_systemd_services(config, venv)
-        return {f.name: f.read_text() for f in sysd.iterdir()}
+        # Services only: timers have no ProtectHome
+        return {f.name: f.read_text() for f in sysd.iterdir() if f.suffix == ".service"}
 
     def test_home_venv_read_only(self, temp_dir: Path) -> None:
         units = self._units(
@@ -110,7 +111,7 @@ class TestProtectHome:
             Path("/root/.local/pipx/venvs/herr-ober"),
             temp_dir,
         )
-        assert len(units) == 3
+        assert len(units) == 5  # http, bgp, ha, watch, blocklist
         for text in units.values():
             assert "ProtectHome=read-only" in text
             assert "ProtectHome=true" not in text

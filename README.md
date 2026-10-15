@@ -177,6 +177,15 @@ See [architecture.md](https://github.com/dirkpetersen/herr-ober/blob/main/archit
 
 ---
 
+## Security Monitoring
+
+For internet-exposed S3 endpoints, `ober watch` analyzes HAProxy logs off the data path, can
+push proxy-side blocklists, and forwards findings (never raw logs) to Microsoft Sentinel and,
+optionally, Defender for Endpoint. See **[docs/security-monitoring.md](docs/security-monitoring.md)**
+and **[deploy/sentinel/README.md](deploy/sentinel/README.md)**.
+
+---
+
 ## Development
 
 ```bash

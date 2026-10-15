@@ -75,6 +75,14 @@ def start(ctx: click.Context) -> None:
         else:
             console.print("[yellow]Skipping ober-ha (not configured)[/yellow]")
 
+    # Pull the blocklist from ober watch, if one is configured (failure is not fatal)
+    if config.watch.url:
+        try:
+            run_command(["systemctl", "enable", "--now", "ober-blocklist.timer"])
+            console.print("[green]Started ober-blocklist.timer (blocklist sync)[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Failed to start blocklist sync: {e}")
+
     console.print()
     console.print("[bold green]Services started![/bold green]")
     console.print("Run 'ober status' to check service health")

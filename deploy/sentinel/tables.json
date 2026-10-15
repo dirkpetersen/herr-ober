@@ -1,0 +1,159 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Herr Ober custom tables OberFindings_CL and OberKeySummary_CL."
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Existing Log Analytics workspace (same resource group)."
+      }
+    },
+    "retentionInDays": {
+      "type": "int",
+      "defaultValue": 90,
+      "minValue": 4,
+      "maxValue": 730
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/tables",
+      "apiVersion": "2022-10-01",
+      "name": "[format('{0}/OberFindings_CL', parameters('workspaceName'))]",
+      "properties": {
+        "plan": "Analytics",
+        "retentionInDays": "[parameters('retentionInDays')]",
+        "schema": {
+          "name": "OberFindings_CL",
+          "columns": [
+            {
+              "name": "TimeGenerated",
+              "type": "datetime"
+            },
+            {
+              "name": "finding_id",
+              "type": "string"
+            },
+            {
+              "name": "ts",
+              "type": "real"
+            },
+            {
+              "name": "rule",
+              "type": "string"
+            },
+            {
+              "name": "severity",
+              "type": "string"
+            },
+            {
+              "name": "client_ip",
+              "type": "string"
+            },
+            {
+              "name": "access_key",
+              "type": "string"
+            },
+            {
+              "name": "bucket",
+              "type": "string"
+            },
+            {
+              "name": "node",
+              "type": "string"
+            },
+            {
+              "name": "count",
+              "type": "long"
+            },
+            {
+              "name": "window_s",
+              "type": "long"
+            },
+            {
+              "name": "detail",
+              "type": "string"
+            },
+            {
+              "name": "action",
+              "type": "string"
+            },
+            {
+              "name": "layer",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/tables",
+      "apiVersion": "2022-10-01",
+      "name": "[format('{0}/OberKeySummary_CL', parameters('workspaceName'))]",
+      "properties": {
+        "plan": "Analytics",
+        "retentionInDays": "[parameters('retentionInDays')]",
+        "schema": {
+          "name": "OberKeySummary_CL",
+          "columns": [
+            {
+              "name": "TimeGenerated",
+              "type": "datetime"
+            },
+            {
+              "name": "window_start",
+              "type": "real"
+            },
+            {
+              "name": "window_s",
+              "type": "long"
+            },
+            {
+              "name": "access_key",
+              "type": "string"
+            },
+            {
+              "name": "requests",
+              "type": "long"
+            },
+            {
+              "name": "bytes_in",
+              "type": "long"
+            },
+            {
+              "name": "bytes_out",
+              "type": "long"
+            },
+            {
+              "name": "auth_failures",
+              "type": "long"
+            },
+            {
+              "name": "errors_5xx",
+              "type": "long"
+            },
+            {
+              "name": "distinct_ips",
+              "type": "long"
+            },
+            {
+              "name": "distinct_buckets",
+              "type": "long"
+            },
+            {
+              "name": "internet_requests",
+              "type": "long"
+            },
+            {
+              "name": "nodes",
+              "type": "dynamic"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

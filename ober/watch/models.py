@@ -35,6 +35,10 @@ LOG_FIELDS: tuple[str, ...] = (
 
 SEVERITIES: tuple[str, ...] = ("low", "medium", "high")
 
+# KeySummary.access_key of the per-interval heartbeat row ober watch always sends,
+# so Sentinel can tell "no traffic" from "ober watch or ingestion is down".
+HEARTBEAT_KEY = "(heartbeat)"
+
 
 def severity_rank(severity: str) -> int:
     """Return the order of a severity (low=0 < medium=1 < high=2), -1 if unknown."""

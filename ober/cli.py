@@ -136,6 +136,7 @@ from ober.commands.sync import sync  # noqa: E402
 from ober.commands.test import test  # noqa: E402
 from ober.commands.uninstall import uninstall  # noqa: E402
 from ober.commands.upgrade import upgrade  # noqa: E402
+from ober.commands.watch import blocklist, watch  # noqa: E402
 
 # Register commands
 main.add_command(bootstrap)
@@ -151,6 +152,8 @@ main.add_command(sync)
 main.add_command(test)
 main.add_command(uninstall)
 main.add_command(upgrade)
+main.add_command(watch)
+main.add_command(blocklist)
 
 
 if __name__ == "__main__":

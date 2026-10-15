@@ -68,6 +68,9 @@ ExecReload=/bin/kill -USR2 $MAINPID
 Restart=always
 RestartSec=1s
 KillMode=mixed
+# /run/ober holds the admin socket used by 'ober blocklist sync'
+RuntimeDirectory=ober
+RuntimeDirectoryMode=0700
 
 # Security
 NoNewPrivileges=true
@@ -374,6 +377,11 @@ def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
     )
     (systemd_path / "ober-ha.service").write_text(ka_service)
 
+    # ober watch (analysis host) and blocklist sync (proxy nodes); enabled on demand
+    from ober.watch.units import write_units
+
+    write_units(config, systemd_path, role="all", protect_home=protect_home)
+
     # Reload systemd
     run_command(["systemctl", "daemon-reload"])
 
@@ -390,7 +398,6 @@ def _create_config_templates(config: OberConfig, system: SystemInfo, venv_path: 
 global
     log stdout format raw local0 info
     maxconn 100000
-    tune.ssl.default-dh-param 2048
 
 defaults
     mode http

@@ -1,0 +1,311 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Scheduled analytics rules for Herr Ober. Sentinel must be enabled on the workspace."
+  },
+  "parameters": {
+    "workspaceName": {
+      "type": "string"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2024-09-01",
+      "name": "[guid(resourceGroup().id, 'herr-ober-high-severity')]",
+      "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Herr Ober: high-severity finding",
+        "description": "Any high-severity finding raised by ober watch (L1 rules).",
+        "severity": "High",
+        "enabled": true,
+        "query": "OberFindings_CL\n| where ingestion_time() > ago(5m)\n| where severity == \"high\"\n| project TimeGenerated, finding_id, rule, severity, client_ip, access_key, bucket, node, window_s, detail, action",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT1H",
+        "tactics": [
+          "InitialAccess",
+          "CredentialAccess"
+        ],
+        "techniques": [],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "client_ip"
+              }
+            ]
+          },
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "node"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "access_key": "access_key",
+          "bucket": "bucket",
+          "rule": "rule"
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2024-09-01",
+      "name": "[guid(resourceGroup().id, 'herr-ober-ip-multi-node')]",
+      "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Herr Ober: same IP flagged on multiple proxy nodes within 1h",
+        "description": "One client IP produced findings on two or more proxy nodes within an hour (scanning or distributed attack).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "OberFindings_CL\n| where isnotempty(client_ip)\n| summarize TimeGenerated = max(TimeGenerated), first_seen = min(TimeGenerated),\n            nodes = make_set(node), node_count = dcount(node), rules = make_set(rule),\n            rule = take_any(rule), access_key = take_any(access_key), bucket = take_any(bucket),\n            findings = count() by client_ip\n| where node_count > 1\n| extend node_1 = tostring(nodes[0]), node_2 = tostring(nodes[1]), node_3 = tostring(nodes[2])",
+        "queryFrequency": "PT15M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT1H",
+        "tactics": [
+          "Reconnaissance",
+          "CredentialAccess"
+        ],
+        "techniques": [],
+        "entityMappings": [
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              {
+                "identifier": "Address",
+                "columnName": "client_ip"
+              }
+            ]
+          },
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "node_1"
+              }
+            ]
+          },
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "node_2"
+              }
+            ]
+          },
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "node_3"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "access_key": "access_key",
+          "bucket": "bucket",
+          "rule": "rule"
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2024-09-01",
+      "name": "[guid(resourceGroup().id, 'herr-ober-key-many-ips')]",
+      "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Herr Ober: access key used from more than 20 IPs in one window",
+        "description": "A single S3 access key was used from more than 20 distinct client IPs in one summary window (credential sharing or leak).",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "OberKeySummary_CL\n| where ingestion_time() > ago(5m)\n| where isnotempty(access_key) and access_key != \"(heartbeat)\" and distinct_ips > 20\n| extend rule = \"key_many_ips\", node = tostring(nodes[0])\n| project TimeGenerated, access_key, distinct_ips, requests, auth_failures, internet_requests, window_s, nodes, node, rule",
+        "queryFrequency": "PT5M",
+        "queryPeriod": "PT1H",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT1H",
+        "tactics": [
+          "CredentialAccess"
+        ],
+        "techniques": [],
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "node"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "access_key": "access_key",
+          "rule": "rule"
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2024-09-01",
+      "name": "[guid(resourceGroup().id, 'herr-ober-egress-spike')]",
+      "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Herr Ober: egress spike per access key",
+        "description": "Bytes out in the last hour exceed 5x the key's 14-day hourly average and 50 GiB.",
+        "severity": "High",
+        "enabled": true,
+        "query": "let baseline_hours = 14d / 1h - 1;\nlet baseline = OberKeySummary_CL\n| where TimeGenerated between (ago(14d) .. ago(1h))\n| where isnotempty(access_key) and access_key != \"(heartbeat)\"\n| summarize baseline_bytes = sum(bytes_out) by access_key\n| extend avg_hourly_bytes = todouble(baseline_bytes) / baseline_hours;\nOberKeySummary_CL\n| where TimeGenerated > ago(1h)\n| where isnotempty(access_key) and access_key != \"(heartbeat)\"\n| summarize TimeGenerated = max(TimeGenerated), bytes_out_1h = sum(bytes_out),\n            distinct_ips = max(distinct_ips), node_lists = make_list(nodes) by access_key\n| join kind=leftouter baseline on access_key\n| extend avg_hourly_bytes = coalesce(avg_hourly_bytes, 0.0)\n| where bytes_out_1h > 50.0 * 1024 * 1024 * 1024 and bytes_out_1h > 5 * avg_hourly_bytes\n| extend rule = \"egress_spike\", node = tostring(node_lists[0][0])\n| project TimeGenerated, access_key, bytes_out_1h, avg_hourly_bytes, distinct_ips, node, rule",
+        "queryFrequency": "PT30M",
+        "queryPeriod": "P14D",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT1H",
+        "tactics": [
+          "Exfiltration"
+        ],
+        "techniques": [],
+        "entityMappings": [
+          {
+            "entityType": "Host",
+            "fieldMappings": [
+              {
+                "identifier": "HostName",
+                "columnName": "node"
+              }
+            ]
+          }
+        ],
+        "customDetails": {
+          "access_key": "access_key",
+          "rule": "rule"
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.SecurityInsights/alertRules",
+      "apiVersion": "2024-09-01",
+      "name": "[guid(resourceGroup().id, 'herr-ober-summary-health')]",
+      "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+      "kind": "Scheduled",
+      "properties": {
+        "displayName": "Herr Ober: no key summaries received for 30 minutes",
+        "description": "No OberKeySummary_CL rows (not even the (heartbeat) row ober watch sends every interval) arrived for 30 minutes: ober watch or the ingestion path is down.",
+        "severity": "Medium",
+        "enabled": true,
+        "query": "OberKeySummary_CL\n| where TimeGenerated > ago(30m)\n| summarize rows = count()\n| where rows == 0\n| extend TimeGenerated = now(), rule = \"summary_health\"\n",
+        "queryFrequency": "PT10M",
+        "queryPeriod": "PT30M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionEnabled": false,
+        "suppressionDuration": "PT1H",
+        "tactics": [],
+        "techniques": [],
+        "entityMappings": [],
+        "customDetails": {
+          "rule": "rule"
+        },
+        "eventGroupingSettings": {
+          "aggregationKind": "AlertPerResult"
+        },
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": false,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities",
+            "groupByEntities": [],
+            "groupByAlertDetails": [],
+            "groupByCustomDetails": []
+          }
+        }
+      }
+    }
+  ]
+}
