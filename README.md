@@ -45,10 +45,22 @@ sudo ober bootstrap
 ```bash
 sudo su -
 apt install -y pipx
-pipx ensurepath
-source ~/.bashrc
+# Install globally (outside /root): the systemd units use ProtectHome=true
+export PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
 pipx install herr-ober
 ober bootstrap
+```
+
+The one-liner also writes `/etc/profile.d/herr-ober.sh`, which exports `PIPX_HOME` and
+`PIPX_BIN_DIR`, so a later `pipx upgrade herr-ober` in a new root shell finds the global install.
+
+**Upgrading from v0.3.0 or earlier:** re-run the one-liner. The old install lived under
+`/root/.local/pipx`; the installer prints how to keep it
+(`sudo ober bootstrap /root/.local/pipx/venvs/herr-ober`) or copy its `etc/` to
+`/opt/pipx/venvs/herr-ober/etc`. Because the `hostlist` dependency was replaced by
+`python-hostlist`, reinstall into a clean venv so a stale `hostlist` package cannot break `ober sync`:
+```bash
+PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx reinstall herr-ober
 ```
 
 ### 3. Configure

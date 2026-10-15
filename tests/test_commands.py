@@ -129,6 +129,14 @@ class TestSyncFunctions:
         result = expand_hostlist("node[01-03]")
         assert "node01" in result or result == ["node[01-03]"]
 
+    def test_expand_hostlist_shadowed_module_falls_back(self) -> None:
+        """A stale 'hostlist' package without expand_hostlist must not crash."""
+        import sys
+        import types
+
+        with patch.dict(sys.modules, {"hostlist": types.ModuleType("hostlist")}):
+            assert expand_hostlist("a, b") == ["a", "b"]
+
     def test_resolve_host_ip(self) -> None:
         """Test resolve_host with IP address."""
         result = resolve_host("10.0.0.1")

@@ -64,10 +64,41 @@ class KeepalivedConfig:
     advert_int: int = 1  # VRRP advertisement interval (seconds)
 
 
+INSTALL_POINTER_PATH = Path("/etc/ober/install_path")
+
+
+def _read_install_pointer() -> Path | None:
+    """Read the install path recorded by ``ober bootstrap``, if any."""
+    try:
+        text = INSTALL_POINTER_PATH.read_text().rstrip("\r\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.strip():
+        return None
+    path = Path(text).expanduser()
+    # Ignore relative pointers and pointers to directories that no longer exist
+    if not path.is_absolute() or not path.is_dir():
+        return None
+    return path
+
+
 def _get_default_install_path() -> Path:
-    """Get default install path - current venv if in one, otherwise temp dir."""
+    """Resolve the install path.
+
+    Order: ``OBER_INSTALL_PATH`` env var, the pointer file written by bootstrap
+    (``INSTALL_POINTER_PATH``), ``sys.prefix`` when in a venv, then a temp dir.
+    """
+    import os
     import sys
     import tempfile
+
+    env = os.environ.get("OBER_INSTALL_PATH", "").strip()
+    if env:
+        return Path(env)
+
+    pointer = _read_install_pointer()
+    if pointer is not None:
+        return pointer
 
     # If running in a venv (e.g., pipx), use the venv path
     if sys.prefix != sys.base_prefix:
