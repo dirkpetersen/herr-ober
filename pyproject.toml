@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herr-ober"
-version = "0.3.0"
+version = "0.3.1"
 description = "High-performance S3 ingress controller for Ceph RGW clusters using HAProxy and ExaBGP"
 readme = "README.md"
 license = {text = "MIT"}
