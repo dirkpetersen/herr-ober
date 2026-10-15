@@ -20,6 +20,7 @@ Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress co
 ## Documentation
 
 For deep internals, kernel tuning, and failure recovery logic, see **[architecture.md](https://github.com/dirkpetersen/herr-ober/blob/main/architecture.md)**.
+For Proxmox host and VM setup (SR-IOV, hugepages, CPU priority, BIOS), see **[docs/proxmox-deployment.md](docs/proxmox-deployment.md)**.
 
 ---
 
@@ -27,11 +28,14 @@ For deep internals, kernel tuning, and failure recovery logic, see **[architectu
 
 ### 1. Proxmox VM Prerequisites
 
-Before installing, ensure the VM is configured for 50GB/s throughput:
+Before installing, configure the VM for high throughput:
 
-- **CPU:** Type `host` (AES-NI passthrough)
-- **Network:** `VirtIO` with Multiqueue enabled (Queues = vCPUs)
-- **Hardware Watchdog:** Add device `Intel 6300ESB` → Action: `Reset`
+- **CPU:** type `host` (passes AES-NI/VAES through to HAProxy's TLS code).
+- **Network:** SR-IOV VFs passed through to the VM. VirtIO with multiqueue (queues = vCPUs) is a fallback that tops out at tens of Gbit/s.
+- **Memory:** fixed size, ballooning off, 1G hugepages.
+- **Hardware watchdog:** add device `Intel 6300ESB` with action `Reset`.
+
+For host BIOS and kernel settings, a full VM config and a verification checklist, see **[docs/proxmox-deployment.md](docs/proxmox-deployment.md)**.
 
 ### 2. Install
 
