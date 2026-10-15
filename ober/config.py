@@ -2,7 +2,7 @@
 """Configuration management for Ober."""
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,87 @@ class VIPConfig:
 
     address: str = ""
     interface: str = "lo-vip"
+    exposure: str = "internal"  # "internal" (unchanged behavior) or "internet" (hardened)
+
+
+@dataclass
+class SecurityConfig:
+    """Hardening for VIPs with exposure "internet" (HAProxy data path).
+
+    Every control here must be native HAProxy with per-request cost only (no
+    per-byte cost, no network round trip per request).
+    """
+
+    s3_hostnames: list[str] = field(default_factory=list)  # e.g. ["s3.example.org"]
+    allowlist_enabled: bool = True  # phase 1: internet VIPs are default-deny
+    allowlist: list[str] = field(default_factory=list)  # institution CIDRs
+    trusted_networks: list[str] = field(default_factory=list)  # never limited or banned
+    deny_admin_api: bool = True  # block RGW /admin on internet VIPs
+    deny_anonymous: bool = False  # block unsigned requests on internet VIPs
+    autoban_enabled: bool = True
+    autoban_auth_failures: int = 50  # 401/403 responses per window before a ban
+    autoban_window_s: int = 60
+    autoban_ban_s: int = 3600
+    conn_limit_per_ip: int = 0  # concurrent connections per IP, 0 = off (opt-in)
+    timeout_client_s: int = 300
+    timeout_server_s: int = 600  # long enough for CompleteMultipartUpload on huge objects
+    log_target: str = ""  # "host:port" UDP syslog of ober watch; "" = log to stdout
+
+
+@dataclass
+class WatchConfig:
+    """ober watch (analysis host) and blocklist sync (proxy nodes)."""
+
+    syslog_listen: str = "0.0.0.0:5514"  # UDP, receives HAProxy JSON logs
+    api_listen: str = "0.0.0.0:8405"  # HTTP, serves the blocklist to proxy nodes
+    url: str = ""  # proxy nodes: where to pull the blocklist, e.g. http://watch01:8405
+    data_dir: str = ""  # "" = <install_path>/var/watch
+    sync_interval_s: int = 30
+    summary_interval_s: int = 300
+    raw_log_retention_days: int = 30
+    block_ttl_s: int = 3600  # first auto-block; doubles for repeat offenders
+    block_ttl_max_s: int = 604800
+
+
+@dataclass
+class SentinelConfig:
+    """Microsoft Sentinel via the Azure Monitor Logs Ingestion API.
+
+    The client secret is stored in ~/.ober/login as SENTINEL_CLIENT_SECRET.
+    """
+
+    enabled: bool = False
+    tenant_id: str = ""
+    client_id: str = ""
+    dce_endpoint: str = ""  # https://<dce>.<region>.ingest.monitor.azure.com
+    dcr_immutable_id: str = ""  # dcr-...
+    findings_stream: str = "Custom-OberFindings_CL"
+    summary_stream: str = "Custom-OberKeySummary_CL"
+
+
+@dataclass
+class MDEConfig:
+    """Microsoft Defender for Endpoint indicators (off by default).
+
+    The client secret is stored in ~/.ober/login as MDE_CLIENT_SECRET.
+    """
+
+    enabled: bool = False
+    tenant_id: str = ""
+    client_id: str = ""
+    api_base: str = "https://api.securitycenter.microsoft.com"
+    min_severity: str = "high"  # findings at or above this become indicators
+    action: str = "Block"  # "Block" or "Audit"
+    expiry_days: int = 7
+
+
+def _section_from_dict(cls: type[Any], data: dict[str, Any] | None) -> Any:
+    """Build a config dataclass from a dict, ignoring unknown keys."""
+    from dataclasses import fields
+
+    data = data or {}
+    names = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in names})
 
 
 @dataclass
@@ -121,6 +202,10 @@ class OberConfig:
     certs: CertConfig = field(default_factory=CertConfig)
     log_retention_days: int = 7
     stats_port: int = 8404
+    security: SecurityConfig = field(default_factory=SecurityConfig)
+    watch: WatchConfig = field(default_factory=WatchConfig)
+    sentinel: SentinelConfig = field(default_factory=SentinelConfig)
+    mde: MDEConfig = field(default_factory=MDEConfig)
     _venv_path_override: Path | None = field(default=None, repr=False)
 
     @property
@@ -159,6 +244,33 @@ class OberConfig:
     def whitelist_path(self) -> Path:
         """Path to HTTP whitelist file."""
         return self.install_path / "etc" / "haproxy" / "whitelist.lst"
+
+    @property
+    def allowlist_path(self) -> Path:
+        """Institution CIDRs allowed on internet VIPs (one per line)."""
+        return self.install_path / "etc" / "haproxy" / "allowlist.lst"
+
+    @property
+    def trusted_path(self) -> Path:
+        """Trusted networks, never rate limited or auto-banned (one per line)."""
+        return self.install_path / "etc" / "haproxy" / "trusted.lst"
+
+    @property
+    def blocklist_path(self) -> Path:
+        """Blocked IPs/CIDRs; also the ACL id used with the HAProxy runtime API."""
+        return self.install_path / "etc" / "haproxy" / "blocklist.lst"
+
+    @property
+    def admin_socket_path(self) -> Path:
+        """HAProxy admin socket (local only, root only)."""
+        return Path("/run/ober/haproxy.sock")
+
+    @property
+    def watch_data_dir(self) -> Path:
+        """Data directory of ober watch (raw logs, findings, blocklist state)."""
+        if self.watch.data_dir:
+            return Path(self.watch.data_dir).expanduser()
+        return self.install_path / "var" / "watch"
 
     @classmethod
     def load(cls, path: Path | None = None) -> "OberConfig":
@@ -218,6 +330,7 @@ class OberConfig:
                 VIPConfig(
                     address=v.get("address", ""),
                     interface=v.get("interface", "lo-vip"),
+                    exposure=v.get("exposure", "internal"),
                 )
                 for v in data["vips"]
             ]
@@ -247,6 +360,11 @@ class OberConfig:
 
         self.log_retention_days = data.get("log_retention_days", 7)
         self.stats_port = data.get("stats_port", 8404)
+
+        self.security = _section_from_dict(SecurityConfig, data.get("security"))
+        self.watch = _section_from_dict(WatchConfig, data.get("watch"))
+        self.sentinel = _section_from_dict(SentinelConfig, data.get("sentinel"))
+        self.mde = _section_from_dict(MDEConfig, data.get("mde"))
 
         # Load venv_path if specified (for pipx installations)
         if "venv_path" in data:
@@ -281,7 +399,10 @@ class OberConfig:
                 "use_multicast": self.keepalived.use_multicast,
                 "advert_int": self.keepalived.advert_int,
             },
-            "vips": [{"address": v.address, "interface": v.interface} for v in self.vips],
+            "vips": [
+                {"address": v.address, "interface": v.interface, "exposure": v.exposure}
+                for v in self.vips
+            ],
             "backends": [
                 {
                     "name": b.name,
@@ -302,6 +423,10 @@ class OberConfig:
             },
             "log_retention_days": self.log_retention_days,
             "stats_port": self.stats_port,
+            "security": asdict(self.security),
+            "watch": asdict(self.watch),
+            "sentinel": asdict(self.sentinel),
+            "mde": asdict(self.mde),
         }
 
         # Save venv_path if it differs from default (e.g., pipx venv)
