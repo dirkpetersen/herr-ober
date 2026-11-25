@@ -20,8 +20,8 @@ class HAProxyRuntime:
         self.socket_path = str(socket_path)
         self.timeout = timeout
 
-    def send(self, command: str) -> str:
-        """Send one command and return the full response text.
+    def send(self, command: str, payload: str | None = None) -> str:
+        """Send one command (with an optional ``<<`` payload) and return the response text.
 
         Raises:
             SocketUnavailableError: if the socket cannot be reached.
@@ -33,7 +33,10 @@ class HAProxyRuntime:
                 sock.connect(self.socket_path)
             except OSError as exc:
                 raise SocketUnavailableError(f"{self.socket_path}: {exc}") from exc
-            sock.sendall(command.strip().encode() + b"\n")
+            data = command.strip()
+            if payload is not None:  # multi-line argument, ended by an empty line
+                data += " <<\n" + payload.strip() + "\n"
+            sock.sendall(data.encode() + b"\n")
             chunks: list[bytes] = []
             while True:
                 chunk = sock.recv(65536)

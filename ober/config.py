@@ -507,7 +507,7 @@ def _split(data: dict[str, Any], local: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def write_atomic(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str, mode: int = 0o644) -> None:
     """Write a file with tmp-plus-rename, so readers never see a partial file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
@@ -516,7 +516,7 @@ def write_atomic(path: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())  # a crash must not leave an empty file after the rename
-        os.chmod(tmp, 0o644)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):

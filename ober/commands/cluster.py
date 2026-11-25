@@ -45,6 +45,30 @@ def _ssh(node: str, timeout: int) -> list[str]:
     return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}", "--", node]
 
 
+def run_on_other_nodes(ctx: click.Context, remote: str, stdin: str | None = None) -> None:
+    """Run ``remote`` over SSH on every other node; all are tried, a failure exits 1."""
+    config = OberConfig.load()
+    others = [n for n in cluster_nodes(config) if not _is_local(n, config)]
+    if not others:
+        console.print("[red]Error:[/red] No other nodes. Set 'nodes:' in ober.yaml.")
+        ctx.exit(1)
+    failed = []
+    for node in others:
+        try:
+            proc = subprocess.run(
+                [*_ssh(node, 10), remote], input=stdin, capture_output=True, text=True, timeout=120
+            )
+            out, rc = proc.stdout + proc.stderr, proc.returncode
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out, rc = str(e), 1
+        click.echo(f"{node}: {out.strip()}")
+        if rc != 0:
+            failed.append(node)
+    if failed:
+        console.print(f"[red]Failed on:[/red] {escape(', '.join(failed))}")
+        ctx.exit(1)
+
+
 def _remote_status(node: str, timeout: int) -> dict[str, Any]:
     """Run ``ober --json status`` on ``node`` over SSH. Raises RuntimeError with the reason."""
     cmd = [*_ssh(node, timeout), REMOTE_STATUS]

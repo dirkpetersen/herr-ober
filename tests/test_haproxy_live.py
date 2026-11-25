@@ -908,3 +908,32 @@ def test_drain_survives_reload(monkeypatch: pytest.MonkeyPatch) -> None:
         finally:
             new.terminate()
             new.wait(timeout=5)
+
+
+def test_cert_hot_swap_without_reload() -> None:
+    from ober.commands.cert import hot_swap
+    from ober.watch.runtime import HAProxyRuntime
+
+    with launch() as p:
+        root = Path(p.config.certs.path).parent
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+                "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", str(root / "k2.pem"),
+                "-out", str(root / "c2.pem"), "-days", "2", "-subj", "/CN=swapped",
+            ],
+            check=True,
+            capture_output=True,
+        )  # fmt: skip
+        new_cert = (root / "c2.pem").read_text()
+        assert hot_swap(HAProxyRuntime(p.sock), p.config.certs.path, new_cert + (root / "k2.pem").read_text()) is None  # fmt: skip
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with (
+            socket.create_connection(
+                (INTERNET_IP, p.port), source_address=("127.0.0.28", 0)
+            ) as raw,
+            ctx.wrap_socket(raw) as tls,
+        ):
+            assert tls.getpeercert(binary_form=True) == ssl.PEM_cert_to_DER_cert(new_cert)
