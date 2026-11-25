@@ -434,3 +434,25 @@ def test_save_is_atomic(tmp_path: Path) -> None:
         config.save()
     assert config.config_path.read_text() == before
     assert [p.name for p in config.config_path.parent.iterdir()] == ["ober.yaml"]
+
+
+def test_security_int_ranges(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(
+        "security: {timeout_client_s: 0, timeout_server_s: 90000, autoban_window_s: 0,"
+        " autoban_ban_s: 0, internet_maxconn: 0, conn_limit_per_ip: -1,"
+        " autoban_auth_failures: -1, autoban_unsigned_failures: -1}\n"
+    )
+    errors, _ = OberConfig.load(path).validate()
+    text = "\n".join(errors)
+    for key in (
+        "timeout_client_s: must be 1-86400",
+        "timeout_server_s: must be 1-86400",
+        "autoban_window_s: must be >= 1",
+        "autoban_ban_s: must be >= 1",
+        "internet_maxconn: must be >= 1",
+        "conn_limit_per_ip: must be >= 0",
+        "autoban_auth_failures: must be >= 0",
+        "autoban_unsigned_failures: must be >= 0",
+    ):
+        assert f"security.{key}" in text, key

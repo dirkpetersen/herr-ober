@@ -674,6 +674,19 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
         )
 
     sec = cfg.security
+    for key, low, high in (
+        ("timeout_client_s", 1, 86400),
+        ("timeout_server_s", 1, 86400),
+        ("autoban_window_s", 1, 2**31 - 1),
+        ("autoban_ban_s", 1, 2**31 - 1),
+        ("internet_maxconn", 1, 2**31 - 1),
+        ("conn_limit_per_ip", 0, 2**31 - 1),
+        ("autoban_auth_failures", 0, 2**31 - 1),
+        ("autoban_unsigned_failures", 0, 2**31 - 1),
+    ):
+        value = getattr(sec, key)
+        what = f"must be {low}-{high}" if high == 86400 else f"must be >= {low}"
+        need(_in_range(value, low, high), f"security.{key}", what, value)
     for key in ("allowlist", "trusted_networks", "internal_networks"):
         each(f"security.{key}", getattr(sec, key), _is_network, "must be an IP or CIDR")
     need(
