@@ -87,7 +87,7 @@ The full user guide is in `docs/security-monitoring.md`. Work is split so the da
 
 - Strict mypy: full type annotations, Google-style docstrings.
 - Exit codes 0/1. Root-only commands check `system.is_root` and `ctx.exit(1)`. `config --dry-run` works without root. Destructive ops (`uninstall`) confirm first.
-- Node/router/peer inputs accept Slurm hostlists. `sync.py` uses the `python-hostlist` package (import name `hostlist`). The PyPI package literally named `hostlist` is unrelated, so don't depend on it. `_parse_hostlist` in `commands/config.py` is its own regex and handles one `[a-b]` range per item.
+- Slurm hostlists are accepted only by `ober sync` (`--routers`, `--frontend-http`, `--backend-http`) and by the wizard's keepalived peers prompt. The wizard's BGP neighbors, VIPs and backend servers are split on commas, so they take no hostlists. `sync.py` uses the `python-hostlist` package (import name `hostlist`). The PyPI package literally named `hostlist` is unrelated, so don't depend on it. `_parse_hostlist` in `commands/config.py` is its own regex and handles one `[a-b]` range per item.
 
 ## Testing
 
