@@ -135,6 +135,7 @@ ober bootstrap [path]     # Install and set up everything (--firewall: enable uf
 ober config [--dry-run]   # Interactive configuration wizard (choose BGP or Keepalived mode)
 ober config --non-interactive  # Validate ober.yaml and render all configs, no prompts
 ober status               # Show current state (--json for scripting)
+ober metrics [--output F] # Node state for Prometheus (deploy/prometheus/alerts.yml)
 ober cluster status       # All nodes over SSH: VIP placement, drift (set nodes: in ober.yaml)
 ober apply [-f FILE|-]    # Apply ober.yaml: diff, check, reload, health gate, auto roll back
 ober push                 # ober apply on the other nodes, one at a time; stops at a failure
@@ -189,6 +190,21 @@ sudo ober cluster status     # VIP placement and config drift over all nodes
 `bgp.local_address`, and stops at the first node that fails its check or health gate. That node
 puts its old files back. Certificates are not copied. The SSH user needs a key without a prompt
 and `sudo -n ober` on each node.
+
+### Metrics and alerts
+
+HAProxy serves request and backend metrics on `:8404/metrics`. `ober metrics` adds what HAProxy
+does not know: VIP announced or VRRP MASTER, VIP present, maintenance, backend servers UP,
+certificate expiry, the config hash and the versions. Write it for the node_exporter textfile
+collector every minute, for example from root's crontab:
+
+```
+* * * * * /usr/local/bin/ober metrics --output /var/lib/node_exporter/textfile/ober.prom
+```
+
+`deploy/prometheus/alerts.yml` has the alert rules: a VIP on no node or MASTER on two nodes,
+a node healthy but not announcing, backends down, certificate under 21 days, and config or
+version drift between nodes. Test them with `promtool test rules deploy/prometheus/alerts_test.yml`.
 
 `ober sync` is deprecated: the files it wrote were never read. Use `bgp.neighbors` or
 `keepalived.peers`, `security.internal_networks` or `security.allowlist`, and

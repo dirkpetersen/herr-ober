@@ -1,0 +1,35 @@
+# promtool test rules deploy/prometheus/alerts_test.yml
+rule_files: [alerts.yml]
+evaluation_interval: 30s
+tests:
+  - interval: 30s
+    input_series:
+      - series: 'ober_vrrp_master{instance="a",vip="10.1.0.1"}'
+        values: "1x10"
+      - series: 'ober_vrrp_master{instance="b",vip="10.1.0.1"}'
+        values: "1x10"
+      - series: 'ober_vrrp_master{instance="a",vip="10.1.0.2"}'
+        values: "0x10"
+      - series: 'ober_vrrp_master{instance="b",vip="10.1.0.2"}'
+        values: "0x10"
+      - series: 'ober_config_info{instance="a",hash="abc"}'
+        values: "1x40"
+      - series: 'ober_config_info{instance="b",hash="def"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: OberVipSplitBrain
+        exp_alerts:
+          - exp_labels: {severity: critical, vip: 10.1.0.1}
+            exp_annotations: {summary: "VIP 10.1.0.1 is VRRP MASTER on 2 nodes"}
+      - eval_time: 2m
+        alertname: OberVipNoMaster
+        exp_alerts:
+          - exp_labels: {severity: critical, vip: 10.1.0.2}
+            exp_annotations: {summary: "VIP 10.1.0.2 is held (VRRP MASTER) by no node"}
+      - eval_time: 16m
+        alertname: OberConfigDrift
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "haproxy.cfg differs between nodes; run 'ober cluster status' and 'ober push'"
