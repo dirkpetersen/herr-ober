@@ -99,3 +99,16 @@ def test_bootstrap_firewall_is_opt_in(temp_dir: Path, flag: bool) -> None:
 def test_conntrack_sysctls() -> None:
     assert "net.netfilter.nf_conntrack_max = 1048576" in bs.KERNEL_TUNING
     assert "nf_conntrack_tcp_timeout_time_wait" in bs.KERNEL_TUNING
+
+
+def test_rerun_never_overwrites_an_invalid_config(temp_dir: Path) -> None:
+    """A YAML error must not turn into a file full of defaults on bootstrap re-run."""
+    from ober.config import OberConfig
+
+    config = OberConfig(install_path=temp_dir)
+    config.ensure_directories()
+    config.config_path.write_text("ha_mode: keepalived\n  broken: [\n")
+    system = MagicMock()
+    system.get_local_ip.return_value = "10.1.1.1"
+    bs._create_config_templates(config, system, temp_dir / "venv")
+    assert config.config_path.read_text() == "ha_mode: keepalived\n  broken: [\n"

@@ -500,6 +500,13 @@ global_defs {
     # Save main config with venv_path, keeping an existing config intact
     if config.config_path.exists():
         existing = OberConfig.load(config.config_path)
+        if existing.validate()[0]:
+            # Saving would replace the unreadable parts with defaults
+            console.print(
+                f"[yellow]Warning:[/yellow] {config.config_path} is not valid and was not "
+                "updated. Fix it, then re-run bootstrap ('ober config --dry-run' lists the errors)."
+            )
+            return
         existing.install_path = config.install_path
         existing._venv_path_override = venv_path
         existing.save()
