@@ -122,7 +122,8 @@ def test_all_nodes_runs_everywhere_and_reports_failures(temp_dir: Path) -> None:
         patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
         patch("ober.commands.backend.OberConfig.load", return_value=config),
         patch("ober.commands.backend.HAProxyRuntime", return_value=runtime),
-        patch("ober.commands.backend.subprocess.run", side_effect=fake_run),
+        patch("ober.commands.cluster.OberConfig.load", return_value=config),
+        patch("ober.commands.cluster.subprocess.run", side_effect=fake_run),
     ):
         result = CliRunner().invoke(main, ["backend", "drain", "rgw1:7480", "--all-nodes"])
     assert result.exit_code == 1, result.output

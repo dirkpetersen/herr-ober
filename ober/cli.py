@@ -131,6 +131,7 @@ def main(ctx: Context, json_output: bool, quiet: bool, verbose: bool) -> None:
 from ober.commands.apply import apply, rollback  # noqa: E402
 from ober.commands.backend import backend  # noqa: E402
 from ober.commands.bootstrap import bootstrap  # noqa: E402
+from ober.commands.cert import cert  # noqa: E402
 from ober.commands.cluster import cluster, push  # noqa: E402
 from ober.commands.config import config  # noqa: E402
 from ober.commands.doctor import doctor  # noqa: E402
@@ -151,6 +152,7 @@ main.add_command(apply)
 main.add_command(backend)
 main.add_command(rollback)
 main.add_command(bootstrap)
+main.add_command(cert)
 main.add_command(cluster)
 main.add_command(push)
 main.add_command(config)
