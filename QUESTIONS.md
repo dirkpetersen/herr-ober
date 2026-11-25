@@ -69,4 +69,6 @@ These were not in the list above. Each one is the default the work used.
 - **`ober status --check`** exits 0/1/2 (OK/WARN/CRIT), an intended exception to the 0/1 rule.
   A route that is not announced is WARN, not CRIT, because it can be maintenance.
 - **ECMP and drain:** without resilient hashing on the router, a withdraw still resets
-  in-flight flows. The drain only protects connections the router keeps sending to the node.
+  in-flight flows, and a VRRP move does the same in keepalived mode. The drain only protects
+  connections that still reach the node. The default `drain_timeout` stays 30 s (wave 2: revisit
+  with resilient hashing on the router, and count old workers after a reload).

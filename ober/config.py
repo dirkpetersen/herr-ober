@@ -440,6 +440,7 @@ class OberConfig:
             self.install_path / "etc" / "bgp",
             self.install_path / "etc" / "keepalived",
             self.install_path / "etc" / "certs",
+            self.health_state_path.parent,  # must exist: the HA units list it in ReadWritePaths
         ]
         # Only create bin and venv dirs if not using an external venv (e.g., pipx)
         if self._venv_path_override is None:

@@ -227,6 +227,31 @@ class TestStopDrain:
         # VIP never moved: waited the full rotation timeout, then went on
         assert sleep.call_count == service.ROTATION_TIMEOUT
 
+    def test_empty_vrrp_state_is_not_out_of_rotation(self, temp_dir: Path) -> None:
+        from ober.commands import service
+
+        config = self._config(temp_dir, "keepalived")
+        assert service._out_of_rotation(config) is False  # no state file yet
+        config.vrrp_state_path.parent.mkdir(parents=True)
+        config.vrrp_state_path.write_text('{"VI_1": "BACKUP"}')
+        assert service._out_of_rotation(config) is True
+
+    def test_interrupted_drain_turns_maintenance_off(self, temp_dir: Path) -> None:
+        from ober.commands import service
+
+        config = self._config(temp_dir, "bgp")
+        with (
+            patch.object(service, "_wait_out_and_drain", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            service._drain(config, ha_active=True)
+        assert not is_maintenance(config.maintenance_path)
+
+    def test_empty_flag_file_is_off(self, temp_dir: Path) -> None:
+        flag = temp_dir / "maintenance"
+        flag.write_text("")
+        assert not is_maintenance(flag)
+
     def test_stop_clears_only_its_own_maintenance(
         self, cli_runner: CliRunner, temp_dir: Path
     ) -> None:

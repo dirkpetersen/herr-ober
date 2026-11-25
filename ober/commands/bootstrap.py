@@ -118,6 +118,8 @@ RestartSec=1s
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome={protect_home}
+# The health process writes the announced routes here (read by ober status and ober stop)
+ReadWritePaths=-{state_dir}
 
 [Install]
 # ober-http.service: when systemd restarts a crashed HAProxy, this unit starts again too
@@ -144,7 +146,8 @@ RestartSec=1s
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome={protect_home}
-ReadWritePaths=/run
+# /run for the PID file; state_dir for the VRRP state that the notify hook writes
+ReadWritePaths=/run -{state_dir}
 
 [Install]
 # ober-http.service: when systemd restarts a crashed HAProxy, this unit starts again too
@@ -419,9 +422,12 @@ def _create_systemd_services(
             venv_path=venv_path,
             config_path=config.bgp_config_path,
             protect_home=protect_home,
+            state_dir=config.health_state_path.parent,
         ),
         "ober-ha.service": KEEPALIVED_SERVICE.format(
-            config_path=config.keepalived_config_path, protect_home=protect_home
+            config_path=config.keepalived_config_path,
+            protect_home=protect_home,
+            state_dir=config.vrrp_state_path.parent,
         ),
     }
     changed = []

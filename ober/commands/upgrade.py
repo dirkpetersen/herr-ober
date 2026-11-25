@@ -134,6 +134,7 @@ def upgrade(ctx: click.Context, check_only: bool) -> None:
 
 def _rerender_units(config: OberConfig) -> None:
     """Rewrite the systemd units from the current templates (nodes bootstrapped earlier)."""
+    config.ensure_directories()  # older installs lack var/run, which the units now list
     changed = _create_systemd_services(config, config.venv_path)
     unit = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
     if ServiceInfo.from_service_name(unit).is_enabled:

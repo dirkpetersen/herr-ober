@@ -28,9 +28,12 @@ VRRP_STATES = ("MASTER", "BACKUP", "FAULT")
 
 
 def is_maintenance(path: Path) -> bool:
-    """Return True when the flag file exists and does not hold "0"."""
+    """Return True when the flag file holds something other than "0" or nothing.
+
+    An empty file (possible after a crash) counts as off, as keepalived reads it as 0.
+    """
     try:
-        return path.read_text().strip() != "0"
+        return path.read_text().strip() not in ("", "0")
     except FileNotFoundError:
         return False
 
@@ -47,6 +50,8 @@ def write_atomic(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # a crash must not leave an empty file after the rename
         os.chmod(tmp, 0o644)
         os.replace(tmp, path)
     except BaseException:
@@ -87,7 +92,8 @@ def record_vrrp_state(state_file: Path, kind: str, name: str, state: str) -> Non
 def maintenance() -> None:
     """Take this node out of rotation (BGP withdraw or VRRP priority drop).
 
-    Existing connections keep being served. New connections go to other nodes.
+    New connections go to other nodes. HAProxy keeps running, but once the router (BGP)
+    or the peer (keepalived) has moved the traffic, open connections to this node break.
     """
 
 
@@ -106,7 +112,7 @@ def maintenance_on(ctx: click.Context) -> None:
     config = OberConfig.load()
     set_maintenance(config.maintenance_path, True)
     console.print("[yellow]Maintenance ON[/yellow]: this node leaves rotation.")
-    console.print("Existing connections are still served. Run 'ober maintenance off' to return.")
+    console.print("New connections go to other nodes. Run 'ober maintenance off' to return.")
 
 
 @maintenance.command("off")

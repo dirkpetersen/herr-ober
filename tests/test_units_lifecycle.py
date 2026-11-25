@@ -215,3 +215,16 @@ def test_exabgp_check_offers_install_when_missing(temp_dir: Path) -> None:
     ):
         result = up._check_exabgp_update(config)
     assert result["update_available"] is True
+
+
+def test_ha_units_can_write_the_state_dir(temp_dir: Path) -> None:
+    units = _units(temp_dir)
+    # ProtectSystem=strict: without this the health/notify state files are never written
+    assert "ReadWritePaths=-/opt/ober/var/run" in units["ober-bgp.service"].splitlines()
+    assert "ReadWritePaths=/run -/opt/ober/var/run" in units["ober-ha.service"].splitlines()
+
+
+def test_restart_keepalived_checks_before_haproxy_reload() -> None:
+    result, calls = _invoke(["restart"], ha_mode="keepalived", check_rc=1)
+    assert result.exit_code == 1
+    assert ["systemctl", "reload", "ober-http"] not in calls

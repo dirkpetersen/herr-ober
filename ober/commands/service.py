@@ -30,7 +30,8 @@ def _out_of_rotation(config: OberConfig) -> bool:
     """True when this node announces no route (BGP) or owns no VIP (keepalived)."""
     if config.ha_mode == "bgp":
         return read_json(config.health_state_path).get("announced") == []
-    return "MASTER" not in read_json(config.vrrp_state_path).values()
+    states = read_json(config.vrrp_state_path)
+    return bool(states) and "MASTER" not in states.values()
 
 
 def _curr_conns(runtime: HAProxyRuntime) -> int:
@@ -49,6 +50,16 @@ def _drain(config: OberConfig, ha_active: bool) -> bool:
     """
     was_on = is_maintenance(config.maintenance_path)
     set_maintenance(config.maintenance_path, True)
+    try:
+        _wait_out_and_drain(config, ha_active)
+    except BaseException:  # Ctrl-C: do not leave the node out of rotation by accident
+        if not was_on:
+            set_maintenance(config.maintenance_path, False)
+        raise
+    return not was_on
+
+
+def _wait_out_and_drain(config: OberConfig, ha_active: bool) -> None:
     if ha_active:
         console.print("Maintenance on, waiting for this node to leave rotation...")
         if _wait_until(lambda: _out_of_rotation(config), ROTATION_TIMEOUT):
@@ -75,7 +86,6 @@ def _drain(config: OberConfig, ha_active: bool) -> bool:
             console.print(f"[yellow]Warning:[/yellow] {left} connections still open, stopping")
     except (OSError, ValueError) as e:
         console.print(f"[yellow]Warning:[/yellow] cannot read connections ({e}), not draining")
-    return not was_on
 
 
 @click.command()
@@ -104,6 +114,11 @@ def start(ctx: click.Context) -> None:
         ctx.exit(1)
 
     console.print("Starting Ober services...")
+    if is_maintenance(config.maintenance_path):
+        console.print(
+            "[yellow]Warning:[/yellow] maintenance mode is on, this node stays out of "
+            "rotation. Run 'ober maintenance off' to bring it back."
+        )
 
     # Disable the other mode's unit first: its ober-http.service.wants link would start it too
     other = "ober-ha" if config.ha_mode == "bgp" else "ober-bgp"
@@ -195,41 +210,42 @@ def stop(ctx: click.Context, force: bool) -> None:
         ha_active = bgp_service.is_active if config.ha_mode == "bgp" else ka_service.is_active
         clear_maintenance = _drain(config, ha_active)
 
-    # Stop HAProxy
-    if http_service.is_active:
-        try:
-            run_command(["systemctl", "stop", "ober-http"])
-            console.print("[green]Stopped ober-http (HAProxy)[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to stop ober-http:[/red] {e}")
-            ctx.exit(1)
-    else:
-        console.print("[dim]ober-http was not running[/dim]")
-
-    # Stop HA services if not already stopped
-    if bgp_service.is_active:
-        try:
-            run_command(["systemctl", "stop", "ober-bgp"])
-            console.print("[green]Stopped ober-bgp[/green]")
-        except Exception as e:
-            console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-bgp: {e}")
-
-    if ka_service.is_active:
-        try:
-            run_command(["systemctl", "stop", "ober-ha"])
-            console.print("[green]Stopped ober-ha[/green]")
-        except Exception as e:
-            console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-ha: {e}")
-
-    # Stop blocklist sync so it does not touch a stopped HAProxy
     try:
-        run_command(["systemctl", "stop", "ober-blocklist.timer"], check=False)
-    except Exception as e:
-        console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-blocklist.timer: {e}")
+        # Stop HAProxy
+        if http_service.is_active:
+            try:
+                run_command(["systemctl", "stop", "ober-http"])
+                console.print("[green]Stopped ober-http (HAProxy)[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to stop ober-http:[/red] {e}")
+                ctx.exit(1)
+        else:
+            console.print("[dim]ober-http was not running[/dim]")
 
-    # Only clear maintenance that stop itself set, so 'ober start' brings the node back
-    if clear_maintenance:
-        set_maintenance(config.maintenance_path, False)
+        # Stop HA services if not already stopped
+        if bgp_service.is_active:
+            try:
+                run_command(["systemctl", "stop", "ober-bgp"])
+                console.print("[green]Stopped ober-bgp[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-bgp: {e}")
+
+        if ka_service.is_active:
+            try:
+                run_command(["systemctl", "stop", "ober-ha"])
+                console.print("[green]Stopped ober-ha[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-ha: {e}")
+
+        # Stop blocklist sync so it does not touch a stopped HAProxy
+        try:
+            run_command(["systemctl", "stop", "ober-blocklist.timer"], check=False)
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-blocklist.timer: {e}")
+    finally:
+        # Only clear maintenance that stop itself set, so 'ober start' brings the node back
+        if clear_maintenance:
+            set_maintenance(config.maintenance_path, False)
 
     console.print()
     console.print("[bold green]Services stopped![/bold green]")
@@ -286,6 +302,17 @@ def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
 
     # Never stop a working HAProxy for a config it cannot load
     _check_config(ctx, _haproxy_check_cmd(config), "HAProxy")
+    reload_ka = (
+        not hard
+        and config.ha_mode == "keepalived"
+        and ServiceInfo.from_service_name("ober-ha").is_active
+    )
+    if reload_ka:  # check before HAProxy reloads, so both stay on the same apply
+        _check_config(
+            ctx,
+            ["/usr/sbin/keepalived", "-t", "-f", str(config.keepalived_config_path)],
+            "keepalived",
+        )
 
     if hard:
         ha_active = ServiceInfo.from_service_name(ha_unit).is_active
@@ -322,18 +349,12 @@ def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
         ctx.exit(1)
     console.print("[green]HAProxy configuration reloaded (zero-downtime)[/green]")
 
-    if config.ha_mode == "keepalived":
-        if ServiceInfo.from_service_name("ober-ha").is_active:
-            _check_config(
-                ctx,
-                ["/usr/sbin/keepalived", "-t", "-f", str(config.keepalived_config_path)],
-                "keepalived",
-            )
-            try:
-                run_command(["systemctl", "reload", "ober-ha"])
-                console.print("[green]Keepalived configuration reloaded[/green]")
-            except Exception as e:
-                console.print(f"[red]Failed to reload ober-ha:[/red] {e}")
-                ctx.exit(1)
-    else:
+    if reload_ka:
+        try:
+            run_command(["systemctl", "reload", "ober-ha"])
+            console.print("[green]Keepalived configuration reloaded[/green]")
+        except Exception as e:
+            console.print(f"[red]Failed to reload ober-ha:[/red] {e}")
+            ctx.exit(1)
+    elif config.ha_mode == "bgp":
         console.print("[dim]ExaBGP keeps running. Use 'ober restart --hard' for BGP changes.[/dim]")
