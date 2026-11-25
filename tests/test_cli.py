@@ -187,7 +187,7 @@ class TestServiceCommands:
         result = cli_runner.invoke(main, ["restart", "--help"])
         assert result.exit_code == 0
         assert "Restart" in result.output
-        assert "--reload-only" in result.output
+        assert "--hard" in result.output
 
 
 class TestHealthCommand:

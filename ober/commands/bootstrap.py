@@ -55,19 +55,28 @@ vm.panic_on_oom = 1
 kernel.panic = 10
 """
 
+# Tested ExaBGP range; keep in sync with the [bgp] extra in pyproject.toml
+EXABGP_SPEC = "exabgp>=4.2,<5"
+
+# Master-worker mode (-Ws) as in the distro unit: USR2 really reloads, stdout reaches the journal,
+# and a config that fails 'haproxy -c' fails the reload while the old workers keep serving.
 HAPROXY_SERVICE = """[Unit]
 Description=Herr Ober HTTP (HAProxy)
-After=network.target
-Documentation=https://github.com/dirkpetersen/ober
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/dirkpetersen/herr-ober
 
 [Service]
-Type=forking
+Type=notify
 PIDFile=/run/ober-http.pid
-ExecStart=/usr/sbin/haproxy -D -f {config_path} -p /run/ober-http.pid
+ExecStartPre=/usr/sbin/haproxy -Ws -f {config_path} -c
+ExecStart=/usr/sbin/haproxy -Ws -f {config_path} -p /run/ober-http.pid -S /run/ober/master.sock
+ExecReload=/usr/sbin/haproxy -Ws -f {config_path} -c
 ExecReload=/bin/kill -USR2 $MAINPID
 Restart=always
 RestartSec=1s
 KillMode=mixed
+SuccessExitStatus=143
 # /run/ober holds the admin socket used by 'ober blocklist sync'
 RuntimeDirectory=ober
 RuntimeDirectoryMode=0700
@@ -88,7 +97,7 @@ EXABGP_SERVICE = """[Unit]
 Description=Herr Ober BGP (ExaBGP)
 After=network.target ober-http.service
 Documentation=https://github.com/dirkpetersen/herr-ober
-# SAFETY LINK: If HAProxy dies, kill BGP immediately
+# SAFETY LINK: If HAProxy stops, stop BGP immediately (routes are withdrawn)
 BindsTo=ober-http.service
 
 [Service]
@@ -103,7 +112,8 @@ ProtectSystem=strict
 ProtectHome={protect_home}
 
 [Install]
-WantedBy=multi-user.target
+# ober-http.service: when systemd restarts a crashed HAProxy, this unit starts again too
+WantedBy=multi-user.target ober-http.service
 """
 
 KEEPALIVED_SERVICE = """[Unit]
@@ -111,7 +121,7 @@ Description=Herr Ober HA (Keepalived)
 After=network-online.target ober-http.service
 Wants=network-online.target
 Documentation=https://github.com/dirkpetersen/herr-ober
-# SAFETY LINK: If HAProxy dies, kill keepalived immediately
+# SAFETY LINK: If HAProxy stops, stop keepalived immediately (the VIP fails over)
 BindsTo=ober-http.service
 
 [Service]
@@ -129,7 +139,8 @@ ProtectHome={protect_home}
 ReadWritePaths=/run
 
 [Install]
-WantedBy=multi-user.target
+# ober-http.service: when systemd restarts a crashed HAProxy, this unit starts again too
+WantedBy=multi-user.target ober-http.service
 """
 
 
@@ -229,6 +240,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
         # Step 3: Install HAProxy and Keepalived
         task = progress.add_task("Installing HAProxy and Keepalived...", total=None)
         _install_packages(system)
+        _disable_distro_units()
         progress.update(
             task, completed=True, description="[green]Installed HAProxy and Keepalived[/green]"
         )
@@ -302,6 +314,15 @@ def _install_packages(system: SystemInfo) -> None:
         run_command(["dnf", "install", "-y", "haproxy", "keepalived"])
 
 
+def _disable_distro_units() -> None:
+    """Stop the distro haproxy/keepalived units; ober-http and ober-ha replace them.
+
+    The Debian package enables and starts haproxy.service, and package upgrades restart that
+    unit instead of ober-http.
+    """
+    run_command(["systemctl", "disable", "--now", "haproxy", "keepalived"], check=False)
+
+
 def _setup_venv(venv_path: Path) -> None:
     """Create Python virtual environment."""
     # Check for existing valid venv by looking for python binary
@@ -323,10 +344,10 @@ def _install_exabgp(venv_path: Path) -> None:
     # pipx venvs don't include pip by default, so use python -m pip
     # which works whether pip is installed as a standalone or as a module
     if pip_path.exists():
-        run_command([str(pip_path), "install", "exabgp"])
+        run_command([str(pip_path), "install", EXABGP_SPEC])
     else:
         # Use python -m pip (works in pipx venvs)
-        run_command([str(python_path), "-m", "pip", "install", "exabgp"])
+        run_command([str(python_path), "-m", "pip", "install", EXABGP_SPEC])
 
 
 def _is_under_home(path: Path) -> bool:
@@ -346,9 +367,16 @@ def _write_install_pointer(install_path: Path) -> None:
     pointer.write_text(f"{install_path}\n")
 
 
-def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
-    """Create systemd service files."""
-    systemd_path = Path("/etc/systemd/system")
+def _create_systemd_services(
+    config: OberConfig, venv_path: Path, systemd_path: Path = Path("/etc/systemd/system")
+) -> list[str]:
+    """Write (or rewrite) the systemd service files and reload systemd.
+
+    Bootstrap and ``ober upgrade`` both call this, so nodes get new unit templates.
+
+    Returns:
+        Names of the ober-http/ober-bgp/ober-ha units whose content changed.
+    """
 
     protect_home = "true"
     if _is_under_home(config.install_path) or _is_under_home(venv_path):
@@ -359,25 +387,25 @@ def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
             "PIPX_BIN_DIR=/usr/local/bin) to avoid this."
         )
 
-    # HAProxy service
-    http_service = HAPROXY_SERVICE.format(
-        config_path=config.haproxy_config_path, protect_home=protect_home
-    )
-    (systemd_path / "ober-http.service").write_text(http_service)
-
-    # ExaBGP service
-    bgp_service = EXABGP_SERVICE.format(
-        venv_path=venv_path,
-        config_path=config.bgp_config_path,
-        protect_home=protect_home,
-    )
-    (systemd_path / "ober-bgp.service").write_text(bgp_service)
-
-    # Keepalived service
-    ka_service = KEEPALIVED_SERVICE.format(
-        config_path=config.keepalived_config_path, protect_home=protect_home
-    )
-    (systemd_path / "ober-ha.service").write_text(ka_service)
+    units = {
+        "ober-http.service": HAPROXY_SERVICE.format(
+            config_path=config.haproxy_config_path, protect_home=protect_home
+        ),
+        "ober-bgp.service": EXABGP_SERVICE.format(
+            venv_path=venv_path,
+            config_path=config.bgp_config_path,
+            protect_home=protect_home,
+        ),
+        "ober-ha.service": KEEPALIVED_SERVICE.format(
+            config_path=config.keepalived_config_path, protect_home=protect_home
+        ),
+    }
+    changed = []
+    for name, content in units.items():
+        unit_path = systemd_path / name
+        if not unit_path.exists() or unit_path.read_text() != content:
+            unit_path.write_text(content)
+            changed.append(name)
 
     # ober watch (analysis host) and blocklist sync (proxy nodes); enabled on demand
     from ober.watch.units import write_units
@@ -386,6 +414,7 @@ def _create_systemd_services(config: OberConfig, venv_path: Path) -> None:
 
     # Reload systemd
     run_command(["systemctl", "daemon-reload"])
+    return changed
 
 
 def _create_config_templates(config: OberConfig, system: SystemInfo, venv_path: Path) -> None:
