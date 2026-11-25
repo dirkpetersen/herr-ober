@@ -11,7 +11,7 @@ from ober.commands.config import (
     _generate_haproxy_config,
     _netplan_vip_yaml,
 )
-from ober.config import BackendConfig, CertConfig, OberConfig
+from ober.config import BackendConfig, CertConfig, OberConfig, VIPConfig
 
 
 def _refs_and_sections(text: str) -> tuple[set[str], set[str]]:
@@ -233,3 +233,16 @@ def test_config_command_exits_1_on_render_error(
     assert result.exit_code == 1
     assert "No S3 frontend" in result.output
     assert "Configuration applied" not in result.output
+
+
+def test_bare_vip_is_rendered_as_slash_32(sample_config: OberConfig) -> None:
+    import yaml
+
+    from ober.commands.config import _networkd_vip_files
+
+    sample_config.vips = [VIPConfig(address="10.0.100.1")]
+    data = yaml.safe_load(_netplan_vip_yaml(sample_config))
+    assert data["network"]["dummy-devices"]["lo-vip"]["addresses"] == ["10.0.100.1/32"]
+    assert "Address=10.0.100.1/32\n" in _networkd_vip_files(sample_config)["60-lo-vip.network"]
+    calls = _vip_iface(sample_config, "RHEL")
+    assert "10.0.100.1/32" in next(c for c in calls if c[2:3] == ["modify"])

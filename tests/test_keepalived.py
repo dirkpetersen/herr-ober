@@ -34,11 +34,11 @@ class TestVIPValidation:
         assert is_valid is True
         assert error == ""
 
-    def test_validate_vip_valid_ip_with_cidr_24(self) -> None:
-        """Test validation of valid IP with /24 CIDR."""
+    def test_validate_vip_rejects_cidr_24(self) -> None:
+        """A /24 on lo-vip adds a connected route that blackholes replies."""
         is_valid, error = _validate_vip("10.0.0.1/24")
-        assert is_valid is True
-        assert error == ""
+        assert is_valid is False
+        assert "must be a single address (/32)" in error
 
     def test_validate_vip_invalid_ip(self) -> None:
         """Test validation of invalid IP address."""

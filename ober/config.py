@@ -524,11 +524,13 @@ def _is_network(value: Any) -> bool:
         return False
 
 
-def _is_ipv4_interface(value: Any) -> bool:
+def _is_single_ipv4(value: Any) -> bool:
+    """A VIP: one IPv4 address, bare or /32 (a wider prefix adds a connected route)."""
     try:
-        return ipaddress.ip_interface(value).version == 4
+        iface = ipaddress.ip_interface(value)
     except (TypeError, ValueError):
         return False
+    return iface.version == 4 and iface.network.prefixlen == 32
 
 
 def _is_hostport(value: Any) -> bool:
@@ -607,9 +609,9 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
     for i, vip in enumerate(cfg.vips):
         key = f"vips[{i}]"
         need(
-            _is_ipv4_interface(vip.address),
+            _is_single_ipv4(vip.address),
             f"{key}.address",
-            "must be an IPv4 address or CIDR",
+            "must be a single address (/32)",
             vip.address,
         )
         need(
@@ -618,8 +620,9 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
             "must be internal or internet",
             vip.exposure,
         )
-        need(vip.address not in seen, f"{key}.address", "is a duplicate", vip.address)
-        seen.add(str(vip.address))
+        ip = str(vip.address).split("/")[0]
+        need(ip not in seen, f"{key}.address", "is a duplicate", vip.address)
+        seen.add(ip)
 
     for i, backend in enumerate(cfg.backends):
         key = f"backends[{i}]"

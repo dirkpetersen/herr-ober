@@ -406,3 +406,12 @@ def test_health_and_drain_fields_validate(tmp_path: Path) -> None:
     good.bgp.health_rise, good.keepalived.gateway_check = 5, "10.0.0.1"
     good.save()
     assert OberConfig.load(good.config_path) == good
+
+
+def test_vip_must_be_single_address_and_unique(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text("vips: [{address: 10.0.0.5}, {address: 10.0.0.5/32}, {address: 10.0.0.9/24}]\n")
+    errors, _ = OberConfig.load(path).validate()
+    assert "vips[1].address: is a duplicate, got '10.0.0.5/32'" in errors
+    assert "vips[2].address: must be a single address (/32), got '10.0.0.9/24'" in errors
+    assert not any(e.startswith("vips[0]") for e in errors)

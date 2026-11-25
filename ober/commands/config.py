@@ -686,8 +686,8 @@ def _validate_vip(vip: str) -> tuple[bool, str]:
         ip_part, cidr_part = vip.rsplit("/", 1)
         try:
             cidr = int(cidr_part)
-            if not (0 <= cidr <= 32):
-                return False, f"Invalid CIDR prefix: /{cidr_part} (must be 0-32)"
+            if cidr != 32:
+                return False, f"Invalid CIDR prefix: /{cidr_part} (must be a single address (/32))"
         except ValueError:
             return False, f"Invalid CIDR prefix: /{cidr_part}"
     else:
@@ -866,6 +866,11 @@ _LOG_VARS_INIT = (
 def _vip_host(address: str) -> str:
     """Return the bare IP of a VIP in CIDR notation."""
     return address.split("/")[0]
+
+
+def _vip_cidr(address: str) -> str:
+    """Return a VIP as ``ip/32`` (netplan rejects a bare address)."""
+    return f"{_vip_host(address)}/32"
 
 
 def _validated_hostnames(names: list[str]) -> list[str]:
@@ -1488,7 +1493,7 @@ def _netplan_vip_yaml(config: OberConfig) -> str:
     netplan_cfg = {
         "network": {
             "version": 2,
-            "dummy-devices": {"lo-vip": {"addresses": [v.address for v in config.vips]}},
+            "dummy-devices": {"lo-vip": {"addresses": [_vip_cidr(v.address) for v in config.vips]}},
         }
     }
     return yaml.dump(netplan_cfg, default_flow_style=False)
@@ -1500,7 +1505,7 @@ def _networkd_vip_files(config: OberConfig) -> dict[str, str]:
     The ``.network`` file matches only ``lo-vip``, so networkd does not touch other links
     (on Amazon Linux, amazon-ec2-net-utils writes the configs for the ENIs).
     """
-    addresses = "".join(f"Address={v.address}\n" for v in config.vips)
+    addresses = "".join(f"Address={_vip_cidr(v.address)}\n" for v in config.vips)
     return {
         "60-lo-vip.netdev": "[NetDev]\nName=lo-vip\nKind=dummy\n",
         "60-lo-vip.network": (
@@ -1552,7 +1557,7 @@ def _configure_vip_interface(
                     + ["ifname", "lo-vip", "con-name", "lo-vip"]
                 )
             # Set the full list, so removed VIPs go away and nothing is added twice
-            addresses = ",".join(v.address for v in config.vips)
+            addresses = ",".join(_vip_cidr(v.address) for v in config.vips)
             run_command(
                 ["nmcli", "connection", "modify", "lo-vip", "ipv4.method", "manual"]
                 + ["ipv4.addresses", addresses]
