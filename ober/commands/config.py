@@ -1494,31 +1494,57 @@ def _netplan_vip_yaml(config: OberConfig) -> str:
     return yaml.dump(netplan_cfg, default_flow_style=False)
 
 
+def _networkd_vip_files(config: OberConfig) -> dict[str, str]:
+    """Return the systemd-networkd files (name -> text) for the ``lo-vip`` dummy device.
+
+    The ``.network`` file matches only ``lo-vip``, so networkd does not touch other links
+    (on Amazon Linux, amazon-ec2-net-utils writes the configs for the ENIs).
+    """
+    addresses = "".join(f"Address={v.address}\n" for v in config.vips)
+    return {
+        "60-lo-vip.netdev": "[NetDev]\nName=lo-vip\nKind=dummy\n",
+        "60-lo-vip.network": (
+            "[Match]\nName=lo-vip\n\n"
+            "[Link]\nRequiredForOnline=no\n\n"
+            f"[Network]\nLinkLocalAddressing=no\n{addresses}"
+        ),
+    }
+
+
 def _configure_vip_interface(
-    config: OberConfig, netplan_path: Path = Path("/etc/netplan/60-vip.yaml")
+    config: OberConfig,
+    netplan_path: Path = Path("/etc/netplan/60-vip.yaml"),
+    networkd_dir: Path = Path("/etc/systemd/network"),
 ) -> None:
-    """Configure the VIP dummy interface (netplan on Debian, nmcli on RHEL).
+    """Configure the VIP dummy interface.
+
+    Debian uses netplan and RHEL uses nmcli. When that tool is missing (Amazon Linux has
+    no NetworkManager), systemd-networkd is used.
 
     Raises:
-        RuntimeError: If the tool is missing or a command fails.
+        RuntimeError: If no tool is found or a command fails.
     """
     from ober.system import OSFamily, SystemInfo, check_command_exists, run_command
 
     system = SystemInfo()
 
-    if not config.vips:
+    if not config.vips or system.os_family == OSFamily.UNKNOWN:
         return
 
     tool = "netplan" if system.os_family == OSFamily.DEBIAN else "nmcli"
-    if system.os_family in (OSFamily.DEBIAN, OSFamily.RHEL) and not check_command_exists(tool):
-        raise RuntimeError(f"{tool} not found: it is needed to put the VIPs on lo-vip")
+    if not check_command_exists(tool):
+        if not check_command_exists("networkctl"):
+            raise RuntimeError(
+                f"{tool} or networkctl not found: one is needed to put the VIPs on lo-vip"
+            )
+        tool = "networkctl"
 
     try:
-        if system.os_family == OSFamily.DEBIAN:
+        if tool == "netplan":
             netplan_path.write_text(_netplan_vip_yaml(config))
             netplan_path.chmod(0o600)  # netplan warns about world-readable files
             run_command(["netplan", "apply"])
-        elif system.os_family == OSFamily.RHEL:
+        elif tool == "nmcli":
             exists = run_command(["nmcli", "connection", "show", "lo-vip"], check=False)
             if exists.returncode != 0:
                 run_command(
@@ -1532,6 +1558,18 @@ def _configure_vip_interface(
                 + ["ipv4.addresses", addresses]
             )
             run_command(["nmcli", "connection", "up", "lo-vip"])
+        else:
+            networkd_dir.mkdir(parents=True, exist_ok=True)
+            for name, text in _networkd_vip_files(config).items():
+                (networkd_dir / name).write_text(text)
+                (networkd_dir / name).chmod(0o644)
+            active = run_command(
+                ["systemctl", "is-active", "--quiet", "systemd-networkd"], check=False
+            )
+            run_command(["systemctl", "enable", "--now", "systemd-networkd"])
+            if active.returncode == 0:
+                # reload creates a new netdev and reapplies changed .network files
+                run_command(["networkctl", "reload"])
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         raise RuntimeError(f"VIP interface setup failed: {' '.join(exc.cmd)}: {detail}") from exc

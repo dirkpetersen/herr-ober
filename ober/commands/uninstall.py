@@ -228,9 +228,23 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
         console.print(f"Configuration preserved at: {config.config_path}")
 
 
-def _remove_vip_interface(system: SystemInfo) -> None:
-    """Remove the VIP dummy interface."""
+def _remove_vip_interface(
+    system: SystemInfo, networkd_dir: Path = Path("/etc/systemd/network")
+) -> None:
+    """Remove the VIP dummy interface (netplan, nmcli or systemd-networkd)."""
     from ober.system import OSFamily
+
+    removed = False
+    for name in ("60-lo-vip.netdev", "60-lo-vip.network"):
+        path = networkd_dir / name
+        if path.exists():
+            path.unlink()
+            removed = True
+            console.print(f"  [green]Removed {path}[/green]")
+    if removed:
+        # reload does not remove a netdev, so delete the link first
+        run_command(["networkctl", "delete", "lo-vip"], check=False)
+        run_command(["networkctl", "reload"], check=False)
 
     if system.os_family == OSFamily.DEBIAN:
         netplan_path = Path("/etc/netplan/60-vip.yaml")
@@ -239,7 +253,7 @@ def _remove_vip_interface(system: SystemInfo) -> None:
             console.print(f"  [green]Removed {netplan_path}[/green]")
             run_command(["netplan", "apply"], check=False)
 
-    elif system.os_family == OSFamily.RHEL:
+    elif system.os_family == OSFamily.RHEL and check_command_exists("nmcli"):
         # Remove nmcli connection
         run_command(
             ["nmcli", "connection", "delete", "lo-vip"],

@@ -20,6 +20,7 @@ from ober.commands.config import (
     _generate_haproxy_config,
     _generate_keepalived_config,
     _netplan_vip_yaml,
+    _networkd_vip_files,
     _write_security_lists,
 )
 from ober.config import (
@@ -107,6 +108,10 @@ def render(root: Path, cert: Path, mode: str, node: int) -> OberConfig:
         netplan.parent.mkdir(parents=True)
         netplan.write_text(_netplan_vip_yaml(config))
         netplan.chmod(0o600)
+        networkd = root / "networkd"
+        networkd.mkdir()
+        for name, text in _networkd_vip_files(config).items():
+            (networkd / name).write_text(text)
     else:
         system = MagicMock(hostname=f"node{node + 1}")
         system.get_local_ip.return_value = ip
@@ -174,6 +179,18 @@ def test_netplan_generate(cluster: list[OberConfig]) -> None:
         pytest.skip("netplan not installed")
     for config in cluster:
         _run([netplan, "generate", "--root-dir", str(config.install_path / "netplan-root")])
+
+
+def test_networkd_files(cluster: list[OberConfig]) -> None:
+    """Amazon Linux path: one dummy netdev, and a .network file that matches only lo-vip."""
+    if cluster[0].ha_mode != "bgp":
+        pytest.skip("BGP mode only")
+    for config in cluster:
+        networkd = config.install_path / "networkd"
+        assert "Kind=dummy" in (networkd / "60-lo-vip.netdev").read_text()
+        network = (networkd / "60-lo-vip.network").read_text()
+        assert network.count("Name=") == 1 and "Name=lo-vip" in network
+        assert [f"Address={v.address}" for v in VIPS] == re.findall(r"Address=\S+", network)
 
 
 def test_keepalived_check(cluster: list[OberConfig]) -> None:
