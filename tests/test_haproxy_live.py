@@ -262,6 +262,9 @@ def launch(**security: Any) -> Iterator[Proxy]:
         sock = root / "h.sock"
         _write_security_lists(config)
         _generate_haproxy_config(config, socket_path=sock, https_port=port)
+        # maxconn 100000 needs ~200k FDs; a non-root CI user cannot raise its limit that high.
+        cfg = config.haproxy_config_path
+        cfg.write_text(cfg.read_text().replace("    maxconn 100000\n", "    maxconn 10000\n", 1))
 
         # Probe with a trusted source so the main scenarios start clean
         proc = subprocess.Popen(
