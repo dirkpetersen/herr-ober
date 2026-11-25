@@ -310,7 +310,7 @@ class OberConfig:
         """
         try:
             with open(path) as f:
-                data = yaml.safe_load(f)
+                data = yaml.load(f, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
         except yaml.MarkedYAMLError as e:
             mark = e.problem_mark
             where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
@@ -425,6 +425,21 @@ class OberConfig:
             dirs.append(self.install_path / "venv")
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate keys; PyYAML silently keeps the last one."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        seen: set[str] = set()
+        for key_node, _ in node.value:
+            key = key_node.value
+            if isinstance(key_node, yaml.ScalarNode) and key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"duplicate key {key!r}", key_node.start_mark
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep)
 
 
 _HOSTPORT_RE = re.compile(r"^[A-Za-z0-9.:\[\]-]+:\d{1,5}$")

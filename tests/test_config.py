@@ -329,6 +329,12 @@ class TestValidate:
         assert "YAML syntax error at line" in errors[0]
         assert config.ha_mode == "bgp"  # defaults stay usable for stop/status/logs
 
+    def test_duplicate_key_is_an_error(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "bgp: {neighbors: [10.0.0.1]}\nstats_port: 1\nbgp: {}\n")
+        errors, _ = config.validate()
+        assert len(errors) == 1
+        assert "line 3" in errors[0] and "duplicate key 'bgp'" in errors[0]
+
     def test_reports_all_problems(self, tmp_path: Path) -> None:
         config = self._load(
             tmp_path,

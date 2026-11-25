@@ -174,7 +174,7 @@ def test_non_interactive_needs_yaml(
         system.return_value.is_root = True
         result = cli_runner.invoke(main, ["config", "--non-interactive"])
     assert result.exit_code == 1
-    assert "not found" in result.output
+    assert "not found" in " ".join(result.output.split())  # rich wraps long paths
 
 
 def test_invalid_yaml_blocks_config_and_start_but_not_stop_status_logs(
