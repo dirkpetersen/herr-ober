@@ -10,11 +10,12 @@ answer here or say so in the session.
   pushed until you say so. `gh` is not installed, so pull requests can't be opened from here.
 - **AWS lab lifetime.** Default: a 3-node lab plus one helper node (S3 backend and BGP peer)
   in us-west-2, using the `iam-dirk` profile. It keeps running while the loop is active, and
-  `~/herr-ober-lab/teardown.sh` deletes it. The cost is roughly $0.12 an hour (t4g instances).
+  `lab/aws/teardown.sh` (still to be written) deletes it by tag. The cost is roughly $0.12 an hour (t4g instances).
 - **AWS lab OS.** Default: Amazon Linux 2027 *preview* on arm64 (`al2027-preview-ami-*`,
   kernel 7.2). There is no non-preview AL2027 image yet. Amazon Linux reports `ID=amzn`,
   `ID_LIKE=fedora`, so ober gets an Amazon Linux branch in the RHEL family.
-- **Should the AWS lab scripts be in the repo?** Default: no. They live in `~/herr-ober-lab/`.
+- **Should the AWS lab scripts be in the repo?** Default: yes, under `lab/aws/`, so they move with
+  the work to the new server. Remove them before merging to `main` if you don't want them there.
 
 ## Fix decisions (wave 1)
 
