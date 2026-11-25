@@ -6,7 +6,7 @@ import time
 import click
 from rich.console import Console
 
-from ober.config import OberConfig
+from ober.config import OberConfig, exit_if_invalid
 from ober.system import ServiceInfo, SystemInfo, run_command
 
 console = Console()
@@ -29,6 +29,7 @@ def start(ctx: click.Context) -> None:
         ctx.exit(1)
 
     config = OberConfig.load()
+    exit_if_invalid(config, ctx)
 
     # Check if config exists
     if not config.haproxy_config_path.exists():

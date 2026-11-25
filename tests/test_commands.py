@@ -1041,6 +1041,7 @@ class TestServiceCommandEdgeCases:
             mock_system.return_value = mock_instance
 
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.haproxy_config_path.exists.return_value = True
             config_mock.bgp_config_path.exists.return_value = True
             config_mock.bgp.neighbors = ["10.0.0.1"]
@@ -1440,6 +1441,7 @@ class TestTestCommandCLI:
             patch("ober.commands.test._test_backend") as mock_backend,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.ha_mode = "bgp"
             config_mock.bgp.neighbors = ["10.0.0.1"]
@@ -1747,6 +1749,7 @@ class TestTestCommandWarnings:
             patch("ober.commands.test._test_haproxy_config") as mock_haproxy,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.bgp.neighbors = []
             config_mock.vips = []
@@ -1773,6 +1776,7 @@ class TestTestCommandWarnings:
             patch("ober.commands.test._test_haproxy_config") as mock_haproxy,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.ha_mode = "bgp"
             config_mock.bgp.neighbors = []
@@ -1824,6 +1828,7 @@ class TestServiceStartNoBGP:
             mock_system.return_value = mock_instance
 
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.haproxy_config_path.exists.return_value = True
             config_mock.bgp_config_path.exists.return_value = False  # No BGP config
             config_mock.bgp.neighbors = []
@@ -2054,6 +2059,7 @@ class TestTestCommandJSON:
             patch("ober.commands.test._test_haproxy_config") as mock_haproxy,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.ha_mode = "bgp"
             config_mock.bgp.neighbors = []
