@@ -44,6 +44,15 @@ def test(ctx: click.Context) -> None:
         _output_results(results, json_output, config.ha_mode)
         ctx.exit(1)
 
+    # Schema check of ober.yaml; later tests assume valid types
+    errors, warnings = config.validate()
+    results["warnings"].extend(warnings)
+    if errors:
+        results["config_valid"] = False
+        results["errors"].extend(errors)
+        _output_results(results, json_output, config.ha_mode)
+        ctx.exit(1)
+
     # Test 2: Validate HAProxy config syntax
     haproxy_test = _test_haproxy_config(config)
     results["tests"].append(haproxy_test)

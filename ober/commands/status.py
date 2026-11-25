@@ -60,9 +60,11 @@ def status(ctx: click.Context, check: bool) -> None:
 def load_config_safe() -> tuple[OberConfig, str | None]:
     """Load the config, or return defaults and the error when the file is invalid."""
     try:
-        return OberConfig.load(), None
+        config = OberConfig.load()
     except Exception as exc:  # read-only commands must work with a broken config
         return OberConfig(), str(exc) or type(exc).__name__
+    errors, _ = config.validate()  # load() records problems instead of raising
+    return config, "\n".join(errors) or None
 
 
 def collect_status(config: OberConfig, config_error: str | None = None) -> dict[str, Any]:

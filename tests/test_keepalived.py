@@ -480,6 +480,7 @@ class TestServiceCommandsKeepalived:
             mock_system.return_value = mock_instance
 
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.ha_mode = "keepalived"
             config_mock.haproxy_config_path.exists.return_value = True
             config_mock.keepalived_config_path.exists.return_value = True

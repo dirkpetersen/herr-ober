@@ -85,6 +85,7 @@ def _service_env(ha_mode: str, check_rc: int = 0, reload_fails: bool = False) ->
 
     config = MagicMock()
     config.ha_mode = ha_mode
+    config.validate.return_value = ([], [])
     svc = MagicMock(is_active=True, is_enabled=True)
     patches = [
         patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
