@@ -887,6 +887,16 @@ _LOG_VARS_INIT = (
 )
 
 
+def _write_if_changed(path: Path, text: str) -> None:
+    """Write only a changed file, so a no-op apply does not look like a pending reload."""
+    try:
+        if path.read_text() == text:
+            return
+    except OSError:
+        pass
+    path.write_text(text)
+
+
 def _vip_host(address: str) -> str:
     """Return the bare IP of a VIP in CIDR notation."""
     return address.split("/")[0]
@@ -1195,7 +1205,7 @@ def _write_security_lists(config: OberConfig) -> None:
         (config.trusted_path, config.security.trusted_networks, "trusted network"),
         (_internal_path(config), config.security.internal_networks, "internal network"),
     ):
-        path.write_text("".join(f"{line}\n" for line in _valid_networks(entries, label)))
+        _write_if_changed(path, "".join(f"{line}\n" for line in _valid_networks(entries, label)))
     if not config.blocklist_path.exists():
         config.blocklist_path.write_text("")
 
@@ -1328,7 +1338,7 @@ def _generate_haproxy_config(
         cfg_lines.append("")
 
     config.haproxy_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.haproxy_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.haproxy_config_path, "\n".join(cfg_lines))
 
 
 def _generate_exabgp_config(config: OberConfig) -> None:
@@ -1369,7 +1379,7 @@ def _generate_exabgp_config(config: OberConfig) -> None:
         )
 
     config.bgp_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.bgp_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.bgp_config_path, "\n".join(cfg_lines))
 
 
 def _generate_keepalived_config(config: OberConfig) -> None:
@@ -1508,7 +1518,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         )
 
     config.keepalived_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.keepalived_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.keepalived_config_path, "\n".join(cfg_lines))
     # keepalived ignores a track_file that does not exist when it parses the config
     if not config.maintenance_path.exists():
         set_maintenance(config.maintenance_path, False)

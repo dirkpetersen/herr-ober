@@ -285,3 +285,16 @@ def test_stats_bind_wildcard_rejected_with_internet_vip(sample_config: OberConfi
     assert any(
         e.startswith("stats_bind[0]: must not be 0.0.0.0") for e in sample_config.validate()[0]
     )
+
+
+def test_unchanged_haproxy_config_is_not_rewritten(sample_config: OberConfig) -> None:
+    import os
+
+    _generate_haproxy_config(sample_config)
+    path = sample_config.haproxy_config_path
+    os.utime(path, (1, 1))
+    _generate_haproxy_config(sample_config)
+    assert path.stat().st_mtime == 1
+    sample_config.stats_port = 9000
+    _generate_haproxy_config(sample_config)
+    assert path.stat().st_mtime > 1
