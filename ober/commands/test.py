@@ -10,6 +10,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from ober.certs import check_cert_expiry
 from ober.config import OberConfig
 from ober.system import check_command_exists
 
@@ -105,7 +106,10 @@ def test(ctx: click.Context) -> None:
     if config.certs.path:
         cert_test = _test_certificate(config.certs.path)
         results["tests"].append(cert_test)
-        if not cert_test["passed"]:
+        if cert_test.get("expiry") == "crit":
+            results["config_valid"] = False
+            results["errors"].append(f"Certificate: {cert_test['message']}")
+        elif not cert_test["passed"] or cert_test.get("expiry") == "warn":
             results["warnings"].append(f"Certificate: {cert_test['message']}")
 
     _output_results(results, json_output, config.ha_mode)
@@ -366,10 +370,12 @@ def _test_certificate(cert_path: str) -> dict[str, Any]:
         has_key = "-----BEGIN" in content and "PRIVATE KEY-----" in content
 
         if has_cert and has_key:
+            expiry = check_cert_expiry(path)
             return {
                 "name": "Certificate",
-                "passed": True,
-                "message": "Valid PEM file with certificate and key",
+                "passed": expiry["level"] != "crit",
+                "message": f"Valid PEM file with certificate and key, {expiry['message']}",
+                "expiry": expiry["level"],
             }
         elif has_cert:
             return {
