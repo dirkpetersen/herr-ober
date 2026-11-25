@@ -176,7 +176,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
     # Check prerequisites
     if not system.is_supported:
         console.print(f"[red]Error:[/red] {system.os_name} {system.os_version} is not supported.")
-        console.print("Supported: Ubuntu, Debian, RHEL 10+")
+        console.print("Supported: Ubuntu, Debian, RHEL 10+, Amazon Linux 2023/2027")
         ctx.exit(1)
 
     if not system.is_root:

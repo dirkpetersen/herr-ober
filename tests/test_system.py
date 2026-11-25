@@ -72,6 +72,23 @@ class TestSystemInfo:
         info.os_version = "9.3"
         assert info.is_supported is False
 
+    @pytest.mark.parametrize(
+        ("version", "supported"), [("2023", True), ("2027", True), ("2", False), ("", False)]
+    )
+    def test_amazon_linux(self, version: str, supported: bool) -> None:
+        """Amazon Linux is in the RHEL family; only 2023 and 2027 are supported."""
+        content = f'ID="amzn"\nID_LIKE="fedora"\nNAME="Amazon Linux"\nVERSION_ID="{version}"\n'
+        with (
+            patch("ober.system.Path") as mock_path,
+            patch("builtins.open", mock_open(read_data=content)),
+        ):
+            mock_path.return_value.exists.return_value = True
+            info = SystemInfo()
+        assert info.os_family == OSFamily.RHEL
+        assert info.os_id == "amzn"
+        assert info.package_manager == "dnf"
+        assert info.is_supported is supported
+
     def test_is_not_supported_unknown(self) -> None:
         """Test that unknown OS is not supported."""
         info = SystemInfo()
