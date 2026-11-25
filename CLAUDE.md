@@ -31,12 +31,16 @@ CI (`.github/workflows/test.yml`, Python 3.12, 3.13 and 3.14) runs `ruff check .
 
 **CLI (`ober/cli.py`)**: Click group `main` builds a `Context` (verbose/quiet/json_output, `config`, `system: SystemInfo`) and registers subcommands from `ober/commands/` (one file per command; `start`/`stop`/`restart` share `service.py`). Commands use `@click.pass_context` and read the shared object via `ctx.obj` (may be `None`, so they fall back to `SystemInfo()`). The `pass_context` helper in `cli.py` is not used by commands. Most commands also call `OberConfig.load()` themselves instead of using `ctx.obj.config`.
 
-**Config (`ober/config.py`)**: Dataclasses `OberConfig` → `BGPConfig`, `KeepalivedConfig`, `VIPConfig` (list), `BackendConfig` (list), `CertConfig`. `_load_from_file()` and `save()` map each field by hand, so **a new config field must be added in the dataclass, `_load_from_file`, and `save`**. All file paths are properties derived from `install_path` (`config_path`, `haproxy_config_path`, `bgp_config_path`, `keepalived_config_path`, `certs_path`, `whitelist_path`, all under `<install_path>/etc/`). Secrets go to `~/.ober/login` (mode 600) via `load_secrets()`/`save_secrets()`.
+**Config (`ober/config.py`)**: Dataclasses `OberConfig` → `BGPConfig`, `KeepalivedConfig`, `VIPConfig` (list, with `exposure: internal|internet`), `BackendConfig` (list), `CertConfig`, `SecurityConfig`, `WatchConfig`, `SentinelConfig`, `MDEConfig`. Two loading styles coexist:
+- The older sections (bgp, keepalived, vips, backends, certs, top-level scalars) are mapped by hand in `_load_from_file()` and `save()`. **A new field there must be added in the dataclass, `_load_from_file`, and `save`.**
+- `security`, `watch`, `sentinel`, `mde` load via `_section_from_dict()` (unknown keys ignored) and save via `asdict()`. A new field there only needs the dataclass.
+
+File paths are properties derived from `install_path` (`config_path`, `haproxy_config_path`, `bgp_config_path`, `keepalived_config_path`, `certs_path`, `whitelist_path`, `blocklist_path`, `admin_socket_path`, `watch_data_dir`). Secrets, including Entra ID client secrets for Sentinel/MDE, go to `~/.ober/login` (mode 600) via `load_secrets()`/`save_secrets()`.
 
 **System (`ober/system.py`)**: `SystemInfo` detects OS family (DEBIAN/RHEL), version, root, hostname, local IP. `ServiceInfo.from_service_name()` wraps systemd. Shell calls go through `run_command()`.
 
 **Lifecycle split**:
-- `bootstrap.py` runs once per node as root. It installs `haproxy` + `keepalived` from OS packages (Ubuntu adds `ppa:vbernat/haproxy-3.3`), installs **ExaBGP via pip into the venv** (`python -m pip`, since pipx venvs lack `pip`), writes sysctl tuning, watchdog, firewall, and writes **all three** systemd units (`ober-http`, `ober-bgp`, `ober-ha`) from string templates at the top of the file.
+- `bootstrap.py` runs once per node as root. It installs `haproxy` + `keepalived` from OS packages (Ubuntu adds `ppa:vbernat/haproxy-3.3`), installs **ExaBGP via pip into the venv** (`python -m pip`, since pipx venvs lack `pip`), writes sysctl tuning, watchdog, firewall, and writes **all three** HA-path systemd units (`ober-http`, `ober-bgp`, `ober-ha`) from string templates at the top of the file, plus the `ober-watch`/`ober-blocklist` units from `watch/units.py`. The watch and blocklist units are enabled only when needed.
 - `config.py` is the interactive wizard (`inquirer`). HA mode is asked first and gates the BGP vs keepalived questions. `_apply_configuration()` saves YAML and generates `haproxy.cfg` plus either the ExaBGP config **and** the `lo-vip` dummy interface (netplan on Debian, nmcli on RHEL), or `keepalived.conf` (keepalived manages VIPs itself).
 - `service.py` enables/starts `ober-http`, then only the service for the current `ha_mode`.
 
@@ -66,6 +70,15 @@ Bootstrap in a venv (pipx, the recommended setup) defaults to the existing point
 - Unicast is the default (`unicast_src_ip` + `unicast_peer`); multicast is optional. No VRRP auth.
 - `chk_haproxy` track_script curls `/health` (weight -50, fall/rise 2), plus `track_interface` weight -50.
 
+### Security monitoring (`ober watch`, `ober/watch/`)
+
+The full user guide is in `docs/security-monitoring.md`. Work is split so the data path never waits on analysis:
+- **Data path (proxy nodes)**: `_generate_haproxy_config()` emits separate frontends for internal and internet VIPs. The internet frontend gets cheap early rejects, an allowlist, an admin-API deny, per-IP auto-ban counters, and conn limits. Both frontends reject sources in the `blocklist_path` ACL file. HAProxy sends one JSON log line per request over UDP syslog to `security.log_target`. **Controls here must be native HAProxy with per-request cost only.** The log field contract is `LOG_FIELDS` in `watch/models.py`, and the logs must never contain signatures, object keys, or query secrets (`tests/test_haproxy_live.py` checks this).
+- **Analysis host**: `ober watch run` (`watch/daemon.py`) runs an asyncio receive loop: parse (`parser.py`, a hot path with no regex), then streaming rules (`rules.py`, LRU-bounded state), summaries, and the blocklist. Anything that blocks (the disk `store.py`, the Sentinel/MDE sinks) runs on worker threads behind bounded queues, and items are dropped and counted when a queue is full. Raw logs stay on local disk. Only findings and per-access-key summaries go to Sentinel. `server.py` serves the blocklist on `:8405`.
+- **Proxy nodes pull** the blocklist through `ober blocklist sync` (systemd `ober-blocklist.timer`, `watch/sync.py`). It applies diffs live through the HAProxy runtime socket (`watch/runtime.py`) and falls back to updating only the file.
+- The Sentinel/MDE clients are hand-rolled HTTP with no Azure SDK (`auth.py`, `sentinel.py`, `mde.py`). Azure-side DCR, table, and analytics-rule definitions are in `deploy/sentinel/`.
+- Units come from `watch/units.py` (`write_units`), and bootstrap and `ober config` both call it. These units keep `ProtectHome=read-only` so root can read `~/.ober/login`. `ober upgrade` never rewrites unit files, so `config` adds a `RuntimeDirectory` drop-in to `ober-http.service` for nodes bootstrapped before 0.4.
+
 ### Systemd safety links
 
 `ober-bgp.service` and `ober-ha.service` both have `BindsTo=ober-http.service`. If HAProxy dies, BGP routes are withdrawn or the VIP fails over immediately. Keep this coupling when editing the unit templates.
@@ -78,4 +91,4 @@ Bootstrap in a venv (pipx, the recommended setup) defaults to the existing point
 
 ## Testing
 
-Tests never touch the real system. Fixtures in `tests/conftest.py`: `cli_runner`, `temp_dir`, `temp_config`, `sample_config`, `mock_system_info` / `mock_root_system_info`, `mock_run_command`, `mock_check_command_exists`. Because commands import names directly, **patch at the use site**, e.g. `ober.cli.SystemInfo`, `ober.commands.service.OberConfig.load`, `ober.commands.service.run_command`, `ober.commands.status.ServiceInfo`, not `ober.system.*`. Integration tests use `moto[server]` as a mock S3 backend.
+Tests never touch the real system. Fixtures in `tests/conftest.py`: `cli_runner`, `temp_dir`, `temp_config`, `sample_config`, `mock_system_info` / `mock_root_system_info`, `mock_run_command`, `mock_check_command_exists`. Because commands import names directly, **patch at the use site**, e.g. `ober.cli.SystemInfo`, `ober.commands.service.OberConfig.load`, `ober.commands.service.run_command`, `ober.commands.status.ServiceInfo`, not `ober.system.*`. Integration tests use `moto[server]` as a mock S3 backend. `tests/test_haproxy_live.py` starts a real HAProxy on localhost (127.0.0.1 acts as the internet VIP, 127.0.0.2 as internal) and is skipped unless `haproxy` and `openssl` are installed.
