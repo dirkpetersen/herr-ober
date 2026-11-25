@@ -101,7 +101,7 @@ class TestHealthLoop:
 
 class TestMaintenanceFlag:
     def test_flag_values(self, temp_dir: Path) -> None:
-        flag = temp_dir / "etc" / "maintenance"
+        flag = temp_dir / "var" / "run" / "maintenance"
         assert not is_maintenance(flag)
         set_maintenance(flag, True)
         assert flag.read_text() == "1\n"
@@ -169,7 +169,7 @@ class TestKeepalivedChecks:
         content = self._generate(temp_dir)
         assert "curl" not in content
         assert f"{sys.executable} -m ober.commands.health --once --timeout 1 --port 8404" in content
-        assert f'file "{temp_dir}/etc/maintenance"' in content
+        assert f'file "{temp_dir}/var/run/maintenance"' in content
         assert "track_file {\n        ober_maintenance\n    }" in content
         assert f"vrrp-notify --state-file {temp_dir}/var/run/vrrp-state.json" in content
         assert "chk_gateway" not in content
@@ -215,7 +215,7 @@ class TestStopDrain:
 
         config = self._config(temp_dir, "keepalived")
         set_maintenance(config.maintenance_path, True)
-        config.vrrp_state_path.parent.mkdir(parents=True)
+        config.vrrp_state_path.parent.mkdir(parents=True, exist_ok=True)
         config.vrrp_state_path.write_text('{"VI_1": "MASTER"}')
         runtime = MagicMock()
         runtime.send.side_effect = OSError("no socket")

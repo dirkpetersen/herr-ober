@@ -2,6 +2,8 @@
 """Ober bootstrap command - automated installation."""
 
 import contextlib
+import os
+import pwd
 import re
 import sys
 import venv
@@ -91,8 +93,8 @@ RuntimeDirectoryMode=0700
 # keep it while HAProxy is stopped: blocklist sync still updates the file
 RuntimeDirectoryPreserve=yes
 
-# Security
-NoNewPrivileges=true
+# Security. No NoNewPrivileges here: on SELinux hosts (RHEL, Amazon Linux) it blocks the
+# switch to the haproxy_t domain, and then HAProxy cannot create its sockets in /run/ober.
 ProtectSystem=strict
 ProtectHome={protect_home}
 ReadWritePaths=/run /var/log
@@ -142,8 +144,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=1s
 
-# Security
-NoNewPrivileges=true
+# Security. No NoNewPrivileges: on SELinux hosts it blocks the switch to keepalived_t, and
+# then keepalived cannot open its VRRP raw socket or run ping for chk_gateway.
 ProtectSystem=strict
 ProtectHome={protect_home}
 # /run for the PID file; state_dir for the VRRP state that the notify hook writes
@@ -257,6 +259,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
         task = progress.add_task("Installing HAProxy and Keepalived...", total=None)
         _install_packages(system)
         _disable_distro_units()
+        _allow_haproxy_backend_ports()
         progress.update(
             task, completed=True, description="[green]Installed HAProxy and Keepalived[/green]"
         )
@@ -280,6 +283,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
         # Step 5: Create systemd services
         task = progress.add_task("Creating systemd services...", total=None)
         _create_systemd_services(config, venv_path)
+        _own_state_dir(config)
         progress.update(task, completed=True, description="[green]Created systemd services[/green]")
 
         # Step 6: Create initial config templates
@@ -338,7 +342,53 @@ def _install_packages(system: SystemInfo) -> None:
         # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])
     elif system.os_family == OSFamily.RHEL:
-        run_command(["dnf", "install", "-y", "haproxy", "keepalived", "iputils"])
+        run_command(
+            [
+                "dnf",
+                "install",
+                "-y",
+                "haproxy",
+                "keepalived",
+                "iputils",
+                "policycoreutils-python-utils",
+            ]
+        )
+
+
+def _own_state_dir(config: OberConfig) -> None:
+    """Give the state dir to 'nobody', the user ExaBGP and its health process drop to.
+
+    The health process writes ober-health.json there. Root processes (the keepalived notify
+    hook, ober status) can still write and read it.
+    """
+    state_dir = config.health_state_path.parent
+    state_dir.mkdir(parents=True, exist_ok=True)
+    nobody = pwd.getpwnam("nobody")
+    os.chown(state_dir, nobody.pw_uid, nobody.pw_gid)
+
+
+def _allow_haproxy_backend_ports() -> None:
+    """On SELinux hosts, let haproxy_t reach RGW and let keepalived run the ober scripts.
+
+    Without haproxy_connect_any the policy allows only the http port types, so backends on
+    ports such as 7480 or 8080 are refused. No-op when SELinux is off or missing.
+    """
+    if not check_command_exists("getenforce"):
+        return
+    result = run_command(["getenforce"], check=False)
+    if result.stdout.strip() == "Disabled":
+        return
+    run_command(["setsebool", "-P", "haproxy_connect_any", "1"])
+    # shortcut: keepalived_t blocks our check/notify scripts (connect to the stats port, write
+    # the state dir, exec ping, watch the maintenance flag). A permissive keepalived_t is no
+    # weaker than before 0.4, when keepalived ran as init_t. Upgrade: ship a policy module.
+    if check_command_exists("semanage"):
+        run_command(["semanage", "permissive", "-a", "keepalived_t"], check=False)
+    else:
+        console.print(
+            "[yellow]Warning:[/yellow] semanage not found (policycoreutils-python-utils); "
+            "keepalived mode needs 'semanage permissive -a keepalived_t' on SELinux hosts."
+        )
 
 
 def _disable_distro_units() -> None:

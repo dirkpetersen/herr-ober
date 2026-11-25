@@ -121,6 +121,7 @@ def test_bootstrap_firewall_is_opt_in(temp_dir: Path, flag: bool) -> None:
         patch.object(bs, "_setup_venv"),
         patch.object(bs, "_install_exabgp"),
         patch.object(bs, "_create_systemd_services"),
+        patch.object(bs, "_own_state_dir"),
         patch.object(bs, "_create_config_templates"),
         patch.object(bs, "_configure_watchdog"),
         patch.object(bs, "_open_firewall_ports") as firewall,

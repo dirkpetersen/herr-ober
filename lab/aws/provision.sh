@@ -19,9 +19,11 @@ for name in "${INGRESS_NODES[@]}"; do
 done
 
 log "Provisioning helper"
-lab_ssh helper sudo bash -s -- "$GOBGP_VERSION" "$HELPER_IP" "${NODE_IPS# }" <<'EOF'
+NODE_CSV="${NODE_IPS# }"
+# ssh joins its arguments with spaces, so pass the list as one comma-separated word
+lab_ssh helper sudo bash -s -- "$GOBGP_VERSION" "$HELPER_IP" "${NODE_CSV// /,}" <<'EOF'
 set -euo pipefail
-GOBGP_VERSION="$1"; HELPER_IP="$2"; read -r -a NODE_IPS <<<"$3"
+GOBGP_VERSION="$1"; HELPER_IP="$2"; IFS=, read -r -a NODE_IPS <<<"$3"
 dnf -y -q install python3-pip tar jq iproute >/dev/null
 
 # S3 backends: two moto servers, one per port.
@@ -73,11 +75,13 @@ cat >/usr/local/bin/lab-route-sync <<'SH'
 # shortcut: polls the GoBGP RIB every second; fine for a lab, not a router.
 while true; do
     want="$(/usr/local/bin/gobgp global rib -j 2>/dev/null \
-        | jq -r 'to_entries[] | .key as $p | [.value[] | .attrs[] | select(.type==3) | .nexthop]
+        | jq -r 'to_entries[] | (.key | sub("/32$"; "")) as $p
+                 | [.value[] | .attrs[] | select(.type==3) | .nexthop]
                  | unique | "\($p) \(join(","))"' 2>/dev/null || true)"
-    have="$(ip -4 route show proto 99 | awk '{print $1}')"
+    # The kernel prints host routes without /32; nexthop lines start with whitespace.
+    have="$(ip -4 route show proto 99 | awk '/^[0-9]/{print $1}')"
     while read -r prefix hops; do
-        [ -n "$prefix" ] || continue
+        [ -n "$prefix" ] && [ -n "$hops" ] || continue
         args=()
         for h in ${hops//,/ }; do args+=(nexthop via "$h"); done
         ip route replace "$prefix" proto 99 "${args[@]}"

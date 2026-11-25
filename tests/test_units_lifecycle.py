@@ -199,9 +199,12 @@ def test_upgrade_rerenders_units_and_reenables_ha_unit(temp_dir: Path) -> None:
         patch.object(up, "_create_systemd_services", return_value=["ober-http.service"]) as cs,
         patch.object(up, "ServiceInfo") as svc,
         patch.object(up, "run_command") as run,
+        patch.object(up, "_allow_haproxy_backend_ports") as sebool,
+        patch.object(up, "_own_state_dir"),
     ):
         svc.from_service_name.return_value.is_enabled = True
         up._rerender_units(config)
+    sebool.assert_called_once_with()
     cs.assert_called_once_with(config, config.venv_path)
     run.assert_called_once_with(["systemctl", "enable", "ober-bgp"], check=False)
 
@@ -243,3 +246,37 @@ def test_uninstall_removes_kernel_tuning_files(tmp_path: Path) -> None:
         uninstall._remove_kernel_tuning(sysctl, modules)  # nothing left: no error
     assert not sysctl.exists() and not modules.exists()
     assert run.call_count == 1
+
+
+def test_http_unit_allows_selinux_domain_switch(temp_dir: Path) -> None:
+    # NoNewPrivileges blocks init_t -> haproxy_t; HAProxy then cannot create /run/ober sockets
+    units = _units(temp_dir)
+    assert "NoNewPrivileges=true" not in units["ober-http.service"]
+    assert "NoNewPrivileges=true" not in units["ober-ha.service"]  # VRRP raw socket, ping
+
+
+def test_selinux_boolean_set_unless_disabled() -> None:
+    for state, expected in (("Enforcing", True), ("Permissive", True), ("Disabled", False)):
+        with (
+            patch.object(bs, "check_command_exists", return_value=True),
+            patch.object(bs, "run_command", return_value=MagicMock(stdout=state + "\n")) as run,
+        ):
+            bs._allow_haproxy_backend_ports()
+        cmds = [c.args[0] for c in run.call_args_list]
+        assert (["setsebool", "-P", "haproxy_connect_any", "1"] in cmds) is expected
+        assert (["semanage", "permissive", "-a", "keepalived_t"] in cmds) is expected
+    with (
+        patch.object(bs, "check_command_exists", return_value=False),
+        patch.object(bs, "run_command") as run,
+    ):
+        bs._allow_haproxy_backend_ports()
+    run.assert_not_called()
+
+
+def test_state_dir_owned_by_exabgp_user(temp_dir: Path) -> None:
+    # ExaBGP drops to nobody, and so does the health process that writes ober-health.json
+    config = OberConfig(install_path=temp_dir)
+    with patch.object(bs.os, "chown") as chown:
+        bs._own_state_dir(config)
+    nobody = bs.pwd.getpwnam("nobody")
+    chown.assert_called_once_with(config.health_state_path.parent, nobody.pw_uid, nobody.pw_gid)
