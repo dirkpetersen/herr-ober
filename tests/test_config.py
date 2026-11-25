@@ -384,3 +384,25 @@ class TestValidate:
 
 def test_node_ip_prefers_override() -> None:
     assert OberConfig(local_ip="10.9.9.9").node_ip() == "10.9.9.9"
+
+
+def test_health_and_drain_fields_validate(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(
+        "drain_timeout: 0\nbgp: {health_rise: 0, health_fall: 0, health_holddown: -1}\n"
+        "keepalived: {gateway_check: nope}\n"
+    )
+    errors, _ = OberConfig.load(path).validate()
+    text = "\n".join(errors)
+    for key in (
+        "drain_timeout",
+        "bgp.health_rise",
+        "bgp.health_fall",
+        "bgp.health_holddown",
+        "keepalived.gateway_check",
+    ):
+        assert key in text, key
+    good = OberConfig(install_path=tmp_path, drain_timeout=60)
+    good.bgp.health_rise, good.keepalived.gateway_check = 5, "10.0.0.1"
+    good.save()
+    assert OberConfig.load(good.config_path) == good

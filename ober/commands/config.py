@@ -14,6 +14,7 @@ import click
 import inquirer  # type: ignore[import-untyped]
 from rich.console import Console
 
+from ober.commands.maintenance import set_maintenance
 from ober.config import (
     BackendConfig,
     BGPConfig,
@@ -1361,16 +1362,46 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         "    vrrp_garp_master_delay 1",
         "}",
         "",
-        "# Health check script",
+        "# Health check script (Python entry point, exit 0 = healthy)",
         "vrrp_script chk_haproxy {",
-        f'    script "/usr/bin/curl -sf http://127.0.0.1:{config.stats_port}/health"',
+        f'    script "{sys.executable} -m ober.commands.health --once --timeout 1'
+        f' --port {config.stats_port}"',
         "    interval 2",
+        "    timeout 3",
         "    weight -50  # Reduce priority by 50 if health check fails",
         "    fall 2      # Require 2 failures before marking down",
         "    rise 2      # Require 2 successes before marking up",
         "}",
         "",
+        "# Maintenance flag (ober maintenance on|off): 1 x -100 drops priority below all peers",
+        "track_file ober_maintenance {",
+        f'    file "{config.maintenance_path}"',
+        "    weight -100",
+        "}",
+        "",
     ]
+    track_scripts = ["chk_haproxy"]
+    if config.keepalived.gateway_check:
+        gateway = str(ipaddress.ip_address(config.keepalived.gateway_check))
+        track_scripts.append("chk_gateway")
+        cfg_lines.extend(
+            [
+                "# Gateway reachability: an isolated node goes to FAULT and releases its VIPs",
+                "vrrp_script chk_gateway {",
+                f'    script "/usr/bin/ping -c 1 -W 1 {gateway}"',
+                "    interval 2",
+                "    timeout 2",
+                "    weight 0  # 0 = FAULT state on failure",
+                "    fall 3",
+                "    rise 2",
+                "}",
+                "",
+            ]
+        )
+    notify = (
+        f"{sys.executable} -m ober.commands.maintenance vrrp-notify"
+        f" --state-file {config.vrrp_state_path}"
+    )
 
     # Generate one vrrp_instance per VIP
     for idx, vip_config in enumerate(config.vips):
@@ -1421,8 +1452,15 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                 "",
                 "    # Health check - demote priority if HAProxy is down",
                 "    track_script {",
-                "        chk_haproxy",
+                *(f"        {name}" for name in track_scripts),
                 "    }",
+                "",
+                "    track_file {",
+                "        ober_maintenance",
+                "    }",
+                "",
+                "    # Write VRRP state for ober status",
+                f'    notify "{notify}"',
                 "",
                 "    virtual_ipaddress {",
                 f"        {vip}/32 dev {interface}",
@@ -1434,6 +1472,9 @@ def _generate_keepalived_config(config: OberConfig) -> None:
 
     config.keepalived_config_path.parent.mkdir(parents=True, exist_ok=True)
     config.keepalived_config_path.write_text("\n".join(cfg_lines))
+    # keepalived ignores a track_file that does not exist when it parses the config
+    if not config.maintenance_path.exists():
+        set_maintenance(config.maintenance_path, False)
 
 
 def _configure_vip_interface(config: OberConfig) -> None:

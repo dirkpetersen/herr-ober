@@ -38,9 +38,10 @@ File paths are properties derived from `install_path` (`config_path`, `haproxy_c
 **System (`ober/system.py`)**: `SystemInfo` detects OS family (DEBIAN/RHEL), version, root, hostname, local IP. `ServiceInfo.from_service_name()` wraps systemd. Shell calls go through `run_command()`.
 
 **Lifecycle split**:
-- `bootstrap.py` runs once per node as root. It installs `haproxy` + `keepalived` from OS packages (Ubuntu adds `ppa:vbernat/haproxy-3.3`), installs **ExaBGP via pip into the venv** (`python -m pip`, since pipx venvs lack `pip`), writes sysctl tuning (incl. conntrack limits), watchdog, the firewall only with `--firewall` (ufw or firewalld: SSH first, 443/tcp, VRRP), and writes **all three** HA-path systemd units (`ober-http`, `ober-bgp`, `ober-ha`) from string templates at the top of the file, plus the `ober-watch`/`ober-blocklist` units from `watch/units.py`. The watch and blocklist units are enabled only when needed.
+- `bootstrap.py` runs once per node as root. It installs `haproxy` + `keepalived` from OS packages (Ubuntu adds `ppa:vbernat/haproxy-3.3`), installs **ExaBGP via pip into the venv** (`python -m pip`, since pipx venvs lack `pip`), pinned to `EXABGP_SPEC` (`exabgp>=4.2,<5`, the same range as the `[bgp]` extra), disables the distro `haproxy`/`keepalived` units, writes sysctl tuning (incl. conntrack limits), watchdog, the firewall only with `--firewall` (ufw or firewalld: SSH first, 443/tcp, VRRP), and writes **all three** HA-path systemd units (`ober-http`, `ober-bgp`, `ober-ha`) from string templates at the top of the file, plus the `ober-watch`/`ober-blocklist` units from `watch/units.py`. The watch and blocklist units are enabled only when needed.
 - `config.py` is the interactive wizard (`inquirer`). HA mode is asked first and gates the BGP vs keepalived questions. `_apply_configuration()` saves YAML and generates `haproxy.cfg` plus either the ExaBGP config **and** the `lo-vip` dummy interface (netplan on Debian, nmcli on RHEL), or `keepalived.conf` (keepalived manages VIPs itself).
-- `service.py` enables/starts `ober-http`, then only the service for the current `ha_mode`.
+- `service.py`: `start` disables and stops the other mode's unit, then enables/starts `ober-http` and the unit for the current `ha_mode`. `restart` runs `haproxy -c` first and then `systemctl reload` (keepalived: `keepalived -t` and HUP). A failed check or reload exits 1 and never falls back to a restart. `restart --hard` is the full restart.
+- `upgrade.py` re-renders the unit files through `bootstrap._create_systemd_services` (it returns the changed units), so nodes bootstrapped earlier get new templates. A changed `ober-http.service` needs one `ober restart --hard`.
 
 ### Install path resolution
 
@@ -79,7 +80,10 @@ The full user guide is in `docs/security-monitoring.md`. Work is split so the da
 
 ### Systemd safety links
 
-`ober-bgp.service` and `ober-ha.service` both have `BindsTo=ober-http.service`. If HAProxy dies, BGP routes are withdrawn or the VIP fails over immediately. Keep this coupling when editing the unit templates.
+- `ober-http.service` runs HAProxy in master-worker mode (`-Ws`, `Type=notify`), like the distro unit. `ExecStartPre` and the first `ExecReload` run `haproxy -c`, so a bad config fails the start or reload and the running workers keep serving. `ExecReload` then sends `USR2`, which reloads (in `-D` mode it does nothing). Stdout and stderr go to the journal.
+- `ober-bgp.service` and `ober-ha.service` both have `BindsTo=ober-http.service`. If HAProxy stops or crashes, systemd stops the HA unit at once: BGP routes are withdrawn or the VIP fails over.
+- Both HA units also have `WantedBy=multi-user.target ober-http.service`. Enabling one creates a link in `ober-http.service.wants/`, so when systemd restarts a crashed HAProxy (`Restart=always`), the HA unit starts again. Without this it stays inactive. A deliberate `systemctl stop ober-http` still stops both. This is why `ober start` disables the other mode's unit: its link would start it too.
+- Keep all of this when editing the unit templates. Health still gates the announcements.
 
 ## Conventions
 

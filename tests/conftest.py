@@ -117,3 +117,37 @@ def sample_config(temp_config: OberConfig) -> OberConfig:
     temp_config.stats_port = 8404
 
     return temp_config
+
+
+@pytest.fixture
+def pem_cert(temp_dir: Path) -> Path:
+    """A real self-signed key+cert PEM (as HAProxy uses it) valid for 100 days."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("openssl"):
+        pytest.skip("openssl not installed")
+    key, crt = temp_dir / "k.pem", temp_dir / "c.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(crt),
+            "-days",
+            "100",
+            "-subj",
+            "/CN=test",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    pem = temp_dir / "server.pem"
+    pem.write_text(key.read_text() + crt.read_text())
+    return pem

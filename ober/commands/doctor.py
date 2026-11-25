@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """Ober doctor command - diagnostic checks."""
 
+import os
+import time
+from pathlib import Path
 from typing import Any
 
 import click
 from rich.console import Console
 from rich.table import Table
 
+from ober.certs import check_cert_expiry
+from ober.commands.maintenance import is_maintenance
+from ober.commands.status import (
+    load_config_safe,
+    local_ipv4_addresses,
+    read_vrrp_state,
+)
 from ober.config import OberConfig
 from ober.system import (
     OSFamily,
@@ -31,59 +41,41 @@ def doctor(ctx: click.Context) -> None:
     parent_ctx = ctx.obj
     json_output = parent_ctx.json_output if parent_ctx else False
 
-    checks: list[dict[str, Any]] = []
-    all_passed = True
-
-    # System checks
     system = SystemInfo()
+    config, config_error = load_config_safe()
 
-    # Check 1: Operating System
-    os_check = _check_os(system)
-    checks.append(os_check)
-    if not os_check["passed"]:
-        all_passed = False
+    checks: list[dict[str, Any]] = [
+        _check_os(system),
+        _check_python(system),
+        _check_root(system),
+        _check_haproxy(),
+    ]
+    if config.ha_mode == "bgp":
+        checks.append(_check_exabgp())
+    else:
+        checks.append(_check_keepalived())
+    checks.append(_check_config(config_error))
 
-    # Check 2: Python version
-    python_check = _check_python(system)
-    checks.append(python_check)
-    if not python_check["passed"]:
-        all_passed = False
+    # Only the unit for the current HA mode must run; the other one must stay off.
+    ha_unit, other_unit = (
+        ("ober-bgp", "ober-ha") if config.ha_mode == "bgp" else ("ober-ha", "ober-bgp")
+    )
+    http_service = ServiceInfo.from_service_name("ober-http")
+    checks.append(_check_service("ober-http"))
+    checks.append(_check_service(ha_unit))
+    checks.append(_check_unit_off(other_unit, "other HA mode's unit"))
+    checks.append(_check_unit_off("haproxy", "distro unit, conflicts with ober-http"))
+    checks.append(_check_unit_off("keepalived", "distro unit, conflicts with ober-ha"))
+    checks.append(_check_restart_pending(config, http_service))
+    if config.config_path.exists() and not config_error:
+        checks.append(_check_haproxy_syntax(config))
+        checks.append(_check_vips(config))
+    if config.certs.path:
+        checks.append(_check_cert(config.certs.path))
+    checks.append(_check_maintenance(config))
+    checks.append(_check_network_tools())
 
-    # Check 3: Root access
-    root_check = _check_root(system)
-    checks.append(root_check)
-    if not root_check["passed"]:
-        all_passed = False
-
-    # Check 4: HAProxy installed
-    haproxy_check = _check_haproxy()
-    checks.append(haproxy_check)
-
-    # Check 5: ExaBGP installed
-    exabgp_check = _check_exabgp()
-    checks.append(exabgp_check)
-
-    # Check 5.5: Keepalived installed
-    keepalived_check = _check_keepalived()
-    checks.append(keepalived_check)
-
-    # Check 6: Configuration exists
-    config_check = _check_config()
-    checks.append(config_check)
-
-    # Check 7: Services status
-    http_service_check = _check_service("ober-http")
-    checks.append(http_service_check)
-
-    bgp_service_check = _check_service("ober-bgp")
-    checks.append(bgp_service_check)
-
-    ha_service_check = _check_service("ober-ha")
-    checks.append(ha_service_check)
-
-    # Check 8: Network tools
-    network_check = _check_network_tools()
-    checks.append(network_check)
+    all_passed = not any(c.get("critical") and not c["passed"] for c in checks)
 
     if json_output:
         import json
@@ -170,8 +162,8 @@ def _check_root(system: SystemInfo) -> dict[str, Any]:
         "name": "Root Access",
         "passed": False,
         "status": "missing",
-        "message": "Not running as root. Use sudo for bootstrap/config operations",
-        "critical": True,
+        "message": "Not root: some checks are unknown. Use sudo for bootstrap/config",
+        "critical": False,
     }
 
 
@@ -182,7 +174,7 @@ def _check_haproxy() -> dict[str, Any]:
         # Check for AWS-LC build (version 3.3+)
         try:
             major, minor = map(int, version.split(".")[:2])
-            if major >= 3 and minor >= 3:
+            if (major, minor) >= (3, 3):
                 return {
                     "name": "HAProxy",
                     "passed": True,
@@ -256,9 +248,19 @@ def _check_keepalived() -> dict[str, Any]:
     }
 
 
-def _check_config() -> dict[str, Any]:
-    """Check if configuration exists."""
-    config = OberConfig.load()
+def _check_config(config_error: str | None = None) -> dict[str, Any]:
+    """Check if configuration exists and loads."""
+    config = OberConfig()
+    if config_error is None:
+        config, config_error = load_config_safe()
+    if config_error:
+        return {
+            "name": "Configuration",
+            "passed": False,
+            "status": "invalid",
+            "message": config_error.splitlines()[0][:200],
+            "critical": True,
+        }
     if config.config_path.exists():
         return {
             "name": "Configuration",
@@ -278,8 +280,6 @@ def _check_config() -> dict[str, Any]:
 
 def _check_service(name: str) -> dict[str, Any]:
     """Check systemd service status."""
-    from pathlib import Path
-
     service = ServiceInfo.from_service_name(name)
 
     # Check if service file exists
@@ -315,6 +315,176 @@ def _check_service(name: str) -> dict[str, Any]:
         "passed": False,
         "status": "not configured",
         "message": "Service not installed",
+        "critical": False,
+    }
+
+
+def _check_unit_off(name: str, why: str) -> dict[str, Any]:
+    """Check that a unit which must not run is disabled and inactive."""
+    service = ServiceInfo.from_service_name(name)
+    if service.is_active or service.is_enabled:
+        state = "active" if service.is_active else "enabled"
+        return {
+            "name": f"Unit off: {name}",
+            "passed": False,
+            "status": state,
+            "message": f"{why}. Run 'systemctl disable --now {name}'",
+            "critical": False,
+        }
+    return {
+        "name": f"Unit off: {name}",
+        "passed": True,
+        "status": "off",
+        "message": why,
+        "critical": False,
+    }
+
+
+def _process_start_time(pid: int) -> float:
+    """Return the start time (unix seconds) of a process from /proc."""
+    # Field 22 (starttime, clock ticks since boot) is index 19 after the ")" of comm.
+    ticks = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+    btime = next(
+        int(line.split()[1])
+        for line in Path("/proc/stat").read_text().splitlines()
+        if line.startswith("btime ")
+    )
+    return btime + ticks / os.sysconf("SC_CLK_TCK")
+
+
+def _haproxy_loaded_at(config: OberConfig, pid: int) -> float:
+    """Return when HAProxy last loaded its config.
+
+    In master-worker mode a reload keeps the master PID, so the worker uptime from the
+    runtime socket is the real load time. Fall back to the master start time.
+    """
+    from ober.watch.runtime import HAProxyRuntime
+
+    try:
+        info = HAProxyRuntime(config.admin_socket_path, timeout=2).send("show info")
+        for line in info.splitlines():
+            if line.startswith("Uptime_sec:"):
+                return time.time() - int(line.split(":", 1)[1])
+    except (OSError, ValueError):
+        pass
+    return _process_start_time(pid)
+
+
+def _check_restart_pending(config: OberConfig, service: ServiceInfo) -> dict[str, Any]:
+    """Check for a replaced HAProxy binary or a config newer than the running process."""
+    name = "Restart pending"
+    if not service.is_active or not service.pid:
+        return {"name": name, "passed": True, "status": "n/a", "message": "ober-http not running"}
+    try:
+        exe = os.readlink(f"/proc/{service.pid}/exe")
+        if exe.endswith(" (deleted)"):
+            return {
+                "name": name,
+                "passed": False,
+                "status": "restart needed",
+                "message": "HAProxy binary changed on disk. Run 'ober restart --hard'",
+                "critical": False,
+            }
+        loaded = _haproxy_loaded_at(config, service.pid)
+    except (OSError, ValueError, IndexError, StopIteration) as exc:
+        return {
+            "name": name,
+            "passed": False,
+            "status": "unknown",
+            "message": f"Cannot inspect PID {service.pid}: {exc}",
+            "critical": False,
+        }
+    path = config.haproxy_config_path
+    if path.exists() and path.stat().st_mtime > loaded + 2:  # 2 s slack for clock rounding
+        return {
+            "name": name,
+            "passed": False,
+            "status": "reload needed",
+            "message": f"{path} changed after HAProxy loaded it. Run 'ober restart'",
+            "critical": False,
+        }
+    return {"name": name, "passed": True, "status": "no", "message": "Running config is current"}
+
+
+def _check_haproxy_syntax(config: OberConfig) -> dict[str, Any]:
+    """Run ``haproxy -c`` on the generated config."""
+    from ober.commands.test import _test_haproxy_config
+
+    result = _test_haproxy_config(config)
+    return {
+        "name": "HAProxy config (haproxy -c)",
+        "passed": result["passed"],
+        "status": "valid" if result["passed"] else "invalid",
+        "message": result["message"],
+        "critical": result["message"].startswith("Invalid configuration"),
+    }
+
+
+def _check_vips(config: OberConfig) -> dict[str, Any]:
+    """Check VIPs on local interfaces against what the HA mode expects."""
+    name = "VIPs present"
+    present = local_ipv4_addresses()
+    vips = [v.address.split("/")[0] for v in config.vips]
+    if present is None:
+        return {
+            "name": name,
+            "passed": False,
+            "status": "unknown",
+            "message": "'ip -o -4 addr show' failed",
+            "critical": False,
+        }
+    if config.ha_mode == "bgp":
+        # BGP mode: every node holds every VIP on lo-vip.
+        missing = [v for v in vips if v not in present]
+        wrong = [f"{v} missing" for v in missing]
+    else:
+        # Keepalived: a VIP must be here only while this node is MASTER for it.
+        states = read_vrrp_state(config) or {}
+        wrong = []
+        for v in vips:
+            state = states.get(v)
+            if state == "MASTER" and v not in present:
+                wrong.append(f"{v} missing (MASTER)")
+            elif state in ("BACKUP", "FAULT") and v in present:
+                wrong.append(f"{v} present ({state})")
+    if wrong:
+        return {
+            "name": name,
+            "passed": False,
+            "status": "mismatch",
+            "message": ", ".join(wrong),
+            "critical": False,
+        }
+    held = [v for v in vips if v in present]
+    return {
+        "name": name,
+        "passed": True,
+        "status": "ok",
+        "message": f"held here: {', '.join(held) or 'none'}",
+        "critical": False,
+    }
+
+
+def _check_cert(path: str) -> dict[str, Any]:
+    """Check certificate expiry (warn at 21 days, fail at 7)."""
+    result = check_cert_expiry(path)
+    return {
+        "name": "Certificate expiry",
+        "passed": result["level"] == "ok",
+        "status": {"ok": "ok", "warn": "expires soon"}.get(result["level"], "expiring"),
+        "message": result["message"],
+        "critical": result["level"] == "crit",
+    }
+
+
+def _check_maintenance(config: OberConfig) -> dict[str, Any]:
+    """Warn when the node is in maintenance mode (out of rotation)."""
+    on = is_maintenance(config.maintenance_path)
+    return {
+        "name": "Maintenance mode",
+        "passed": not on,
+        "status": "on" if on else "off",
+        "message": "Node is out of rotation; run 'ober maintenance off'" if on else "",
         "critical": False,
     }
 

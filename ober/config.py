@@ -23,6 +23,9 @@ class BGPConfig:
     local_address: str = ""
     hold_time: int = 3
     bfd_enabled: bool = True
+    health_rise: int = 3  # good probes in a row before routes are announced
+    health_fall: int = 2  # failed probes in a row before routes are withdrawn
+    health_holddown: int = 5  # seconds after health start before the first announce
 
 
 @dataclass
@@ -144,6 +147,7 @@ class KeepalivedConfig:
     interface: str = ""  # Network interface for VIP (auto-detected if empty)
     use_multicast: bool = False  # Default: unicast
     advert_int: int = 1  # VRRP advertisement interval (seconds)
+    gateway_check: str = ""  # IP to ping; when unreachable the node goes to FAULT ("" = off)
 
 
 INSTALL_POINTER_PATH = Path("/etc/ober/install_path")
@@ -206,6 +210,7 @@ class OberConfig:
     certs: CertConfig = field(default_factory=CertConfig)
     log_retention_days: int = 7
     stats_port: int = 8404
+    drain_timeout: int = 30  # seconds `ober stop` waits for connections to close
     security: SecurityConfig = field(default_factory=SecurityConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
@@ -273,6 +278,21 @@ class OberConfig:
     def admin_socket_path(self) -> Path:
         """HAProxy admin socket (local only, root only)."""
         return Path("/run/ober/haproxy.sock")
+
+    @property
+    def maintenance_path(self) -> Path:
+        """Maintenance flag file ("1" = on, "0" or missing = off), also a keepalived track_file."""
+        return self.install_path / "etc" / "maintenance"
+
+    @property
+    def health_state_path(self) -> Path:
+        """Routes announced by the BGP health process (JSON)."""
+        return self.install_path / "var" / "run" / "ober-health.json"
+
+    @property
+    def vrrp_state_path(self) -> Path:
+        """VRRP state per instance, written by the keepalived notify hook (JSON)."""
+        return self.install_path / "var" / "run" / "vrrp-state.json"
 
     @property
     def watch_data_dir(self) -> Path:
@@ -559,8 +579,24 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
         bgp.hold_time,
     )
 
+    need(_in_range(bgp.health_rise, 1, 1000), "bgp.health_rise", "must be >= 1", bgp.health_rise)
+    need(_in_range(bgp.health_fall, 1, 1000), "bgp.health_fall", "must be >= 1", bgp.health_fall)
+    need(
+        _in_range(bgp.health_holddown, 0, 86400),
+        "bgp.health_holddown",
+        "must be >= 0",
+        bgp.health_holddown,
+    )
+    need(_in_range(cfg.drain_timeout, 1, 86400), "drain_timeout", "must be > 0", cfg.drain_timeout)
+
     ka = cfg.keepalived
     each("keepalived.peers", ka.peers, _is_ip, "must be an IP address")
+    need(
+        ka.gateway_check == "" or _is_ip(ka.gateway_check),
+        "keepalived.gateway_check",
+        "must be an IP or empty",
+        ka.gateway_check,
+    )
     need(_in_range(ka.advert_int, 1, 255), "keepalived.advert_int", "must be 1-255", ka.advert_int)
 
     seen: set[str] = set()

@@ -90,18 +90,8 @@ class TestProtectHome:
         config = OberConfig(install_path=install)
         sysd = tmp / "systemd"
         sysd.mkdir()
-        real_path = Path
-
-        def fake_path(*a: str) -> Path:
-            if a == ("/etc/systemd/system",):
-                return sysd
-            return real_path(*a)
-
-        with (
-            patch.object(bs, "Path", side_effect=fake_path),
-            patch.object(bs, "run_command"),
-        ):
-            bs._create_systemd_services(config, venv)
+        with patch.object(bs, "run_command"):
+            bs._create_systemd_services(config, venv, sysd)
         # Services only: timers have no ProtectHome
         return {f.name: f.read_text() for f in sysd.iterdir() if f.suffix == ".service"}
 

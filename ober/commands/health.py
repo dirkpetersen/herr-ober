@@ -6,13 +6,16 @@ HAProxy health and outputs BGP announce/withdraw commands to stdout
 which ExaBGP reads and acts upon.
 """
 
+import json
 import signal
 import sys
 import time
+from pathlib import Path
 
 import click
 import requests
 
+from ober.commands.maintenance import is_maintenance, write_atomic
 from ober.config import OberConfig
 
 # Global flag for graceful shutdown
@@ -23,6 +26,57 @@ def _signal_handler(_signum: int, _frame: object) -> None:
     """Handle SIGTERM/SIGINT for graceful shutdown."""
     global _running
     _running = False
+
+
+class Hysteresis:
+    """Rise/fall counters with a startup hold-down for the announce decision."""
+
+    def __init__(self, rise: int, fall: int, holddown_until: float) -> None:
+        self.rise = max(1, rise)
+        self.fall = max(1, fall)
+        self.holddown_until = holddown_until
+        self.up = False
+        self.good = 0
+        self.bad = 0
+
+    def update(self, healthy: bool, maintenance: bool, now: float) -> str | None:
+        """Feed one probe result.
+
+        Returns:
+            The reason for a state change, or None when the state stays the same.
+        """
+        if healthy:
+            self.good, self.bad = self.good + 1, 0
+        else:
+            self.good, self.bad = 0, self.bad + 1
+        if self.up and maintenance:
+            self.up = False
+            return "maintenance mode is on"
+        if self.up and self.bad >= self.fall:
+            self.up = False
+            return f"{self.bad} failed probes in a row"
+        if (
+            not self.up
+            and not maintenance
+            and self.good >= self.rise
+            and now >= self.holddown_until
+        ):
+            self.up = True
+            return f"{self.good} good probes in a row"
+        return None
+
+
+def _log(msg: str) -> None:
+    sys.stderr.write(f"[ober] {msg}\n")
+    sys.stderr.flush()
+
+
+def _write_state(path: Path, announced: list[str]) -> None:
+    """Write the announced routes for `ober status` (never fatal)."""
+    try:
+        write_atomic(path, json.dumps({"announced": announced, "updated": int(time.time())}) + "\n")
+    except OSError as e:
+        _log(f"Cannot write {path}: {e}")
 
 
 @click.command()
@@ -37,17 +91,38 @@ def _signal_handler(_signum: int, _frame: object) -> None:
     default=2.0,
     help="Health check timeout in seconds.",
 )
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Probe one time and exit 0 (healthy) or 1. Used by the keepalived check.",
+)
+@click.option("--port", type=int, default=None, help="HAProxy stats port (default: from config).")
 @click.pass_context
-def health(ctx: click.Context, vip: str | None, interval: float, timeout: float) -> None:
+def health(
+    ctx: click.Context,
+    vip: str | None,
+    interval: float,
+    timeout: float,
+    once: bool,
+    port: int | None,
+) -> None:
     """Run health check process for ExaBGP.
 
     Continuously monitors HAProxy health endpoint and outputs BGP
     announce/withdraw commands. This command is meant to be spawned
-    by ExaBGP's process configuration.
+    by ExaBGP's process configuration. Routes are announced after
+    bgp.health_rise good probes (and not before bgp.health_holddown
+    seconds), withdrawn after bgp.health_fall failed probes, and
+    withdrawn at once while maintenance mode is on.
 
     VIP is the virtual IP address to announce/withdraw.
     If not specified, all configured VIPs are used.
     """
+    if once:
+        if port is None:
+            port = OberConfig.load().stats_port
+        ctx.exit(0 if _check_health(f"http://127.0.0.1:{port}/health", timeout) else 1)
+
     # Register signal handlers
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
@@ -61,57 +136,53 @@ def health(ctx: click.Context, vip: str | None, interval: float, timeout: float)
         vips = [v.address.split("/")[0] for v in config.vips]
     else:
         # No VIPs configured, exit
-        sys.stderr.write("[ober] No VIPs configured, exiting health check\n")
-        sys.stderr.flush()
+        _log("No VIPs configured, exiting health check")
         ctx.exit(1)
 
-    health_url = f"http://127.0.0.1:{config.stats_port}/health"
+    health_url = f"http://127.0.0.1:{port or config.stats_port}/health"
+    routes = [f"{v}/32" for v in vips]
+    state_path = config.health_state_path
+    state = Hysteresis(
+        config.bgp.health_rise,
+        config.bgp.health_fall,
+        time.monotonic() + config.bgp.health_holddown,
+    )
 
-    # Track current state
-    announced = False
-
-    sys.stderr.write(f"[ober] Starting health check for VIPs: {', '.join(vips)}\n")
-    sys.stderr.write(f"[ober] Health endpoint: {health_url}\n")
-    sys.stderr.flush()
+    _log(f"Starting health check for VIPs: {', '.join(vips)}")
+    _log(
+        f"Health endpoint: {health_url} (rise {state.rise}, fall {state.fall}, "
+        f"hold-down {config.bgp.health_holddown}s)"
+    )
+    _write_state(state_path, [])
+    last_write = time.monotonic()
 
     while _running:
         try:
             healthy = _check_health(health_url, timeout)
-
-            if healthy and not announced:
-                # Announce routes
-                for vip_addr in vips:
-                    _announce_route(vip_addr)
-                announced = True
-                sys.stderr.write("[ober] HAProxy healthy, announced routes\n")
-                sys.stderr.flush()
-
-            elif not healthy and announced:
-                # Withdraw routes
-                for vip_addr in vips:
-                    _withdraw_route(vip_addr)
-                announced = False
-                sys.stderr.write("[ober] HAProxy unhealthy, withdrew routes\n")
-                sys.stderr.flush()
-
+            maint = is_maintenance(config.maintenance_path)
         except Exception as e:
-            sys.stderr.write(f"[ober] Health check error: {e}\n")
-            sys.stderr.flush()
+            _log(f"Health check error: {e}")
+            healthy, maint = False, False
 
-            # On error, withdraw routes to be safe
-            if announced:
-                for vip_addr in vips:
-                    _withdraw_route(vip_addr)
-                announced = False
+        reason = state.update(healthy, maint, time.monotonic())
+        if reason:
+            for vip_addr in vips:
+                (_announce_route if state.up else _withdraw_route)(vip_addr)
+            _log(f"{'Announced' if state.up else 'Withdrew'} routes: {reason}")
+
+        # Refresh the state file on change and every 10 s, so readers can see it is live
+        if reason or time.monotonic() - last_write >= 10:
+            _write_state(state_path, routes if state.up else [])
+            last_write = time.monotonic()
 
         time.sleep(interval)
 
     # Graceful shutdown - withdraw all routes
-    sys.stderr.write("[ober] Shutting down, withdrawing routes\n")
-    sys.stderr.flush()
+    _log("Shutting down, withdrawing routes")
 
     for vip_addr in vips:
         _withdraw_route(vip_addr)
+    _write_state(state_path, [])
 
 
 def _check_health(url: str, timeout: float) -> bool:
