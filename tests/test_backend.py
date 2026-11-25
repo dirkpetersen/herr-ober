@@ -101,3 +101,31 @@ def test_save_state_skips_when_haproxy_down(temp_dir: Path) -> None:
         rt.return_value.send.side_effect = OSError("no socket")
         assert save_server_state(config) is False
     assert not config.server_state_path.exists()
+
+
+def test_all_nodes_runs_everywhere_and_reports_failures(temp_dir: Path) -> None:
+    import subprocess
+
+    config = _config(temp_dir)
+    config.local_ip = "10.0.0.1"
+    config.nodes = ["10.0.0.1", "b", "c"]
+    runtime = MagicMock()
+    runtime.send.side_effect = lambda cmd: "1\n" if cmd == "show servers state" else ""
+    sent: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        sent.append(cmd)
+        rc = 1 if cmd[cmd.index("--") + 1] == "c" else 0
+        return subprocess.CompletedProcess(cmd, rc, "done", "")
+
+    with (
+        patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
+        patch("ober.commands.backend.OberConfig.load", return_value=config),
+        patch("ober.commands.backend.HAProxyRuntime", return_value=runtime),
+        patch("ober.commands.backend.subprocess.run", side_effect=fake_run),
+    ):
+        result = CliRunner().invoke(main, ["backend", "drain", "rgw1:7480", "--all-nodes"])
+    assert result.exit_code == 1, result.output
+    assert "set server s3_backend/rgw1_7480 state drain" in str(runtime.send.call_args_list)
+    assert [c[-1] for c in sent] == ["sudo -n ober backend drain -- rgw1:7480"] * 2
+    assert "Failed on: c" in result.output

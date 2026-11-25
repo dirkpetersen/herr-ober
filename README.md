@@ -139,7 +139,7 @@ ober cluster status       # All nodes over SSH: VIP placement, drift (set nodes:
 ober apply [-f FILE|-]    # Apply ober.yaml: diff, check, reload, health gate, auto roll back
 ober push                 # ober apply on the other nodes, one at a time; stops at a failure
 ober rollback [--list]    # Go back to the state before the last apply
-ober backend list|drain|maint|ready <server>  # RGW servers on this node
+ober backend list|drain|maint|ready <server> [--all-nodes]  # RGW servers (this node or all)
 ober start|stop|restart   # Service management (stop gracefully withdraws routes/releases VIPs)
                           # restart = validated zero-downtime reload; restart --hard = full restart
 ober logs [-f] [-n N]     # View logs (--service http|bgp|ha|all to filter)

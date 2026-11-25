@@ -15,6 +15,7 @@ from typing import Any
 import click
 import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from ober.commands.status import LEVELS, collect_status, load_config_safe
@@ -227,7 +228,8 @@ def push(ctx: click.Context, nodes: str | None, timeout: int, yes: bool) -> None
     """
     config, error = load_config_safe()
     if error or not config.config_path.exists():
-        console.print(f"[red]Error:[/red] No valid {config.config_path}: {error}", markup=False)
+        what = escape(f"{config.config_path}: {error}")
+        console.print(f"[red]Error:[/red] No valid {what}")
         ctx.exit(1)
     names = [n.strip() for n in nodes.split(",") if n.strip()] if nodes else cluster_nodes(config)
     targets = [n for n in names if not _is_local(n, config)]

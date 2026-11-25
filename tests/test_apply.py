@@ -104,6 +104,7 @@ def test_failed_health_gate_rolls_back(node: dict[str, Any]) -> None:
     result = CliRunner().invoke(main, ["apply", "--timeout", "0"])
     assert result.exit_code == 1, result.output
     assert "did not become OK" in result.output
+    assert "Apply failed:" in result.output and "[red]" not in result.output
     assert "rgw3:7480" in config.config_path.read_text()  # the edit stays, to fix and retry
     assert "rgw2_7480" in config.haproxy_config_path.read_text()
     assert ap._snapshots(config) == []
