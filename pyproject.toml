@@ -37,6 +37,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# ExaBGP for ha_mode: bgp; the tested range (keep in sync with EXABGP_SPEC in bootstrap.py)
+bgp = [
+    "exabgp>=4.2,<5",
+]
 route53 = [
     "boto3>=1.34.0",
 ]

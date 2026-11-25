@@ -10,9 +10,11 @@ import inquirer  # type: ignore[import-untyped]
 from rich.console import Console
 from rich.table import Table
 
+from ober.commands.bootstrap import EXABGP_SPEC, _create_systemd_services
 from ober.config import OberConfig
 from ober.system import (
     OSFamily,
+    ServiceInfo,
     SystemInfo,
     get_exabgp_version,
     get_haproxy_version,
@@ -91,6 +93,9 @@ def upgrade(ctx: click.Context, check_only: bool) -> None:
             console.print("Run 'sudo ober upgrade' to install updates")
         return
 
+    if config.config_path.exists():
+        _rerender_units(config)
+
     if not has_updates:
         console.print("[green]All components are up to date![/green]")
         return
@@ -120,8 +125,27 @@ def upgrade(ctx: click.Context, check_only: bool) -> None:
     console.print()
     console.print("[bold green]Upgrade complete![/bold green]")
     console.print()
-    console.print("Note: Services may need to be restarted.")
-    console.print("Run 'ober restart' to apply changes.")
+    if updates["haproxy"].get("update_available"):
+        # The master process re-executes the new binary on reload
+        console.print("Run 'sudo ober restart' to load the new HAProxy (zero-downtime reload).")
+    if updates["exabgp"].get("update_available"):
+        console.print("Run 'sudo ober restart --hard' to load the new ExaBGP.")
+
+
+def _rerender_units(config: OberConfig) -> None:
+    """Rewrite the systemd units from the current templates (nodes bootstrapped earlier)."""
+    changed = _create_systemd_services(config, config.venv_path)
+    unit = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
+    if ServiceInfo.from_service_name(unit).is_enabled:
+        # Adds the ober-http.service.wants link of a new [Install] section
+        run_command(["systemctl", "enable", unit], check=False)
+    if changed:
+        console.print(f"[yellow]Updated systemd units:[/yellow] {', '.join(changed)}")
+        if "ober-http.service" in changed:
+            console.print(
+                "Run 'sudo ober restart --hard' once, in a maintenance window, "
+                "so HAProxy runs with the new unit."
+            )
 
 
 def _check_haproxy_update(system: SystemInfo) -> dict[str, Any]:
@@ -192,51 +216,31 @@ def _check_exabgp_update(config: OberConfig) -> dict[str, Any]:
         "update_available": False,
     }
 
-    # Check PyPI for latest version
-    pip_path = config.venv_path / "bin" / "pip"
-    if not pip_path.exists():
+    pip = _venv_pip(config)
+    if pip is None:
         return result
 
     try:
         output = subprocess.run(
-            [str(pip_path), "index", "versions", "exabgp"],
+            [*pip, "index", "versions", "exabgp"],
             capture_output=True,
             text=True,
             timeout=30,
         )
         if output.returncode == 0:
-            # Parse output for available versions
-            # Format: "exabgp (X.Y.Z)"
+            # Format: "Available versions: 5.0.15, ..., 4.2.25, ..." (newest first)
             for line in output.stdout.split("\n"):
                 if "Available versions:" in line:
-                    versions = line.split(":")[1].strip()
-                    if versions:
-                        latest = versions.split(",")[0].strip()
-                        result["available"] = latest
-                        if current and latest and latest != current:
-                            result["update_available"] = True
+                    versions = [v.strip() for v in line.split(":")[1].split(",")]
+                    # shortcut: matches EXABGP_SPEC (4.2 <= v < 5) by prefix; update with the spec
+                    latest = next((v for v in versions if v.startswith("4.")), None)
+                    result["available"] = latest
+                    # A missing ExaBGP (for example after "pipx reinstall") is installed too
+                    if latest and latest != current:
+                        result["update_available"] = True
                     break
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-
-    # Fallback: try pip list --outdated
-    if result["available"] is None:
-        try:
-            output = subprocess.run(
-                [str(pip_path), "list", "--outdated", "--format=json"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if output.returncode == 0:
-                packages = json.loads(output.stdout)
-                for pkg in packages:
-                    if pkg["name"].lower() == "exabgp":
-                        result["available"] = pkg["latest_version"]
-                        result["update_available"] = True
-                        break
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-            pass
 
     return result
 
@@ -253,11 +257,20 @@ def _upgrade_haproxy(system: SystemInfo) -> None:
         console.print("[green]HAProxy upgraded[/green]")
 
 
+def _venv_pip(config: OberConfig) -> list[str] | None:
+    """Return the pip command of the ober venv, or None when the venv is missing.
+
+    Uses ``python -m pip`` because pipx venvs have no ``bin/pip``.
+    """
+    python = config.venv_path / "bin" / "python"
+    return [str(python), "-m", "pip"] if python.exists() else None
+
+
 def _upgrade_exabgp(config: OberConfig) -> None:
-    """Upgrade ExaBGP in the virtual environment."""
-    pip_path = config.venv_path / "bin" / "pip"
-    if pip_path.exists():
-        run_command([str(pip_path), "install", "--upgrade", "exabgp"])
-        console.print("[green]ExaBGP upgraded[/green]")
-    else:
+    """Upgrade ExaBGP in the virtual environment, inside the tested version range."""
+    pip = _venv_pip(config)
+    if pip is None:
         console.print("[yellow]ExaBGP venv not found, skipping[/yellow]")
+        return
+    run_command([*pip, "install", "--upgrade", EXABGP_SPEC])
+    console.print("[green]ExaBGP upgraded[/green]")

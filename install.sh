@@ -77,7 +77,8 @@ if pipx list 2>/dev/null | grep -q "herr-ober"; then
     echo "Upgrading existing installation..."
     pipx upgrade herr-ober
 else
-    pipx install herr-ober
+    # [bgp] pins ExaBGP to the tested range and keeps it through 'pipx reinstall'
+    pipx install 'herr-ober[bgp]'
 fi
 
 # Make later 'pipx upgrade herr-ober' in a new root shell find the global install
