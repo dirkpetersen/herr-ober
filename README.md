@@ -166,7 +166,7 @@ curl http://127.0.0.1:8404/health
 | **Node Crash** | Traffic fails over via ECMP (instant) |
 | **OS Freeze** | Proxmox Watchdog hard-resets VM (10s) |
 | **HAProxy Crash** | BGP withdraws immediately (`BindsTo=`) |
-| **Network Cut** | BFD detects and tears down route (~150ms) |
+| **Network Cut** | BGP hold timer expires and the router removes the route (3s default hold-time) |
 
 ### Keepalived Mode
 | Event | Recovery |

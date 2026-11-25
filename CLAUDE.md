@@ -68,7 +68,7 @@ Bootstrap in a venv (pipx, the recommended setup) defaults to the existing point
 - `get_vip_owner()` sorts the nodes and picks the owner by **md5** of the VIP (deterministic across nodes; never use Python's salted `hash()`). The owner gets priority 100, others 90. All instances start as `BACKUP` with preempt.
 - `get_vrrp_router_id()` gives `virtual_router_id` = md5(VIP) % 255 + 1.
 - Unicast is the default (`unicast_src_ip` + `unicast_peer`); multicast is optional. No VRRP auth.
-- `chk_haproxy` track_script curls `/health` (weight -50, fall/rise 2), plus `track_interface` weight -50.
+- `chk_haproxy` track_script curls `/health` (weight -50, fall/rise 2). No `track_interface`: keepalived already goes to FAULT when the instance interface is down. `global_defs` sets `enable_script_security` and `script_user root`.
 
 ### Security monitoring (`ober watch`, `ober/watch/`)
 
