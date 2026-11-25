@@ -20,6 +20,7 @@ from typing import TextIO
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 from ober.commands.backend import save_server_state
 from ober.config import OberConfig, exit_if_invalid, write_atomic
@@ -200,7 +201,7 @@ def apply(ctx: click.Context, timeout: int, diff: bool, new_file: TextIO | None)
 
     error = _activate(config, timeout, _bgp_changed(config, before, after))
     if error:
-        console.print(f"[red]Apply failed:[/red] {error}", markup=False)
+        console.print(f"[red]Apply failed:[/red] {escape(error)}")
         # Without -f, ober.yaml keeps the edit, so it can be fixed and applied again;
         # with -f, the old ober.yaml comes back
         _write(config, before)
@@ -276,7 +277,7 @@ def rollback(ctx: click.Context, snapshot: str | None, list_only: bool, timeout:
     _sync_vips()
     error = _activate(config, timeout, _bgp_changed(config, current, files))
     if error:
-        console.print(f"[red]Rollback failed:[/red] {error}", markup=False)
+        console.print(f"[red]Rollback failed:[/red] {escape(error)}")
         _write(config, current)
         _sync_vips()
         _activate(config, timeout, False)

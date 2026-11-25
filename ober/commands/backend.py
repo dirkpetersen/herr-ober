@@ -6,10 +6,13 @@ saved to the server-state-file, so it survives a reload or restart of HAProxy.
 """
 
 import json
+import shlex
+import subprocess
 from typing import Any
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from ober.config import OberConfig, server_name, write_atomic
@@ -111,11 +114,39 @@ _HELP: dict[str, Any] = {
 }
 
 
+def _on_other_nodes(ctx: click.Context, server: str, state: str) -> None:
+    """Run the same change on every other node; all are tried, any failure exits 1."""
+    from ober.commands.cluster import _is_local, _ssh, cluster_nodes
+
+    config = OberConfig.load()
+    others = [n for n in cluster_nodes(config) if not _is_local(n, config)]
+    if not others:
+        console.print("[red]Error:[/red] No other nodes. Set 'nodes:' in ober.yaml.")
+        ctx.exit(1)
+    failed = []
+    for node in others:
+        cmd = [*_ssh(node, 10), f"sudo -n ober backend {state} -- {shlex.quote(server)}"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            out, rc = proc.stdout + proc.stderr, proc.returncode
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out, rc = str(e), 1
+        click.echo(f"{node}: {out.strip()}")
+        if rc != 0:
+            failed.append(node)
+    if failed:
+        console.print(f"[red]Failed on:[/red] {escape(', '.join(failed))}")
+        ctx.exit(1)
+
+
 def _make(state: str) -> click.Command:
     @click.argument("server")
+    @click.option("--all-nodes", is_flag=True, help="Also on every other node ('nodes:').")
     @click.pass_context
-    def cmd(ctx: click.Context, server: str) -> None:
+    def cmd(ctx: click.Context, server: str, all_nodes: bool) -> None:
         _set_state(ctx, server, state)
+        if all_nodes:
+            _on_other_nodes(ctx, server, state)
 
     cmd.__doc__ = _HELP[state] + " SERVER is its name or host:port."
     return backend.command(state)(cmd)
