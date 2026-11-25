@@ -20,6 +20,9 @@ class BGPConfig:
     local_address: str = ""
     hold_time: int = 3
     bfd_enabled: bool = True
+    health_rise: int = 3  # good probes in a row before routes are announced
+    health_fall: int = 2  # failed probes in a row before routes are withdrawn
+    health_holddown: int = 5  # seconds after health start before the first announce
 
 
 @dataclass
@@ -150,6 +153,7 @@ class KeepalivedConfig:
     interface: str = ""  # Network interface for VIP (auto-detected if empty)
     use_multicast: bool = False  # Default: unicast
     advert_int: int = 1  # VRRP advertisement interval (seconds)
+    gateway_check: str = ""  # IP to ping; when unreachable the node goes to FAULT ("" = off)
 
 
 INSTALL_POINTER_PATH = Path("/etc/ober/install_path")
@@ -209,6 +213,7 @@ class OberConfig:
     certs: CertConfig = field(default_factory=CertConfig)
     log_retention_days: int = 7
     stats_port: int = 8404
+    drain_timeout: int = 30  # seconds `ober stop` waits for connections to close
     security: SecurityConfig = field(default_factory=SecurityConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
@@ -273,6 +278,21 @@ class OberConfig:
         return Path("/run/ober/haproxy.sock")
 
     @property
+    def maintenance_path(self) -> Path:
+        """Maintenance flag file ("1" = on, "0" or missing = off), also a keepalived track_file."""
+        return self.install_path / "etc" / "maintenance"
+
+    @property
+    def health_state_path(self) -> Path:
+        """Routes announced by the BGP health process (JSON)."""
+        return self.install_path / "var" / "run" / "ober-health.json"
+
+    @property
+    def vrrp_state_path(self) -> Path:
+        """VRRP state per instance, written by the keepalived notify hook (JSON)."""
+        return self.install_path / "var" / "run" / "vrrp-state.json"
+
+    @property
     def watch_data_dir(self) -> Path:
         """Data directory of ober watch (raw logs, findings, blocklist state)."""
         if self.watch.data_dir:
@@ -321,6 +341,9 @@ class OberConfig:
                 local_address=bgp_data.get("local_address", ""),
                 hold_time=bgp_data.get("hold_time", 3),
                 bfd_enabled=bgp_data.get("bfd_enabled", True),
+                health_rise=bgp_data.get("health_rise", 3),
+                health_fall=bgp_data.get("health_fall", 2),
+                health_holddown=bgp_data.get("health_holddown", 5),
             )
 
         if "keepalived" in data:
@@ -330,6 +353,7 @@ class OberConfig:
                 interface=ka_data.get("interface", ""),
                 use_multicast=ka_data.get("use_multicast", False),
                 advert_int=ka_data.get("advert_int", 1),
+                gateway_check=ka_data.get("gateway_check", ""),
             )
 
         if "vips" in data:
@@ -367,6 +391,7 @@ class OberConfig:
 
         self.log_retention_days = data.get("log_retention_days", 7)
         self.stats_port = data.get("stats_port", 8404)
+        self.drain_timeout = data.get("drain_timeout", 30)
 
         self.security = _section_from_dict(SecurityConfig, data.get("security"))
         self.watch = _section_from_dict(WatchConfig, data.get("watch"))
@@ -399,12 +424,16 @@ class OberConfig:
                 "local_address": self.bgp.local_address,
                 "hold_time": self.bgp.hold_time,
                 "bfd_enabled": self.bgp.bfd_enabled,
+                "health_rise": self.bgp.health_rise,
+                "health_fall": self.bgp.health_fall,
+                "health_holddown": self.bgp.health_holddown,
             },
             "keepalived": {
                 "peers": self.keepalived.peers,
                 "interface": self.keepalived.interface,
                 "use_multicast": self.keepalived.use_multicast,
                 "advert_int": self.keepalived.advert_int,
+                "gateway_check": self.keepalived.gateway_check,
             },
             "vips": [
                 {"address": v.address, "interface": v.interface, "exposure": v.exposure}
@@ -430,6 +459,7 @@ class OberConfig:
             },
             "log_retention_days": self.log_retention_days,
             "stats_port": self.stats_port,
+            "drain_timeout": self.drain_timeout,
             "security": asdict(self.security),
             "watch": asdict(self.watch),
             "sentinel": asdict(self.sentinel),

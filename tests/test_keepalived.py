@@ -500,6 +500,7 @@ class TestServiceCommandsKeepalived:
             patch("ober.commands.service.OberConfig.load") as mock_config,
             patch("ober.commands.service.run_command"),
             patch("ober.commands.service.time.sleep"),
+            patch("ober.commands.service._drain", return_value=False) as mock_drain,
         ):
             mock_instance = MagicMock()
             mock_instance.is_root = True
@@ -519,8 +520,8 @@ class TestServiceCommandsKeepalived:
             mock_config.return_value = config_mock
 
             result = cli_runner.invoke(main, ["stop"])
-            # Should mention VIPs being released
-            assert "VIP" in result.output or "stopped" in result.output.lower()
+            assert result.exit_code == 0, result.output
+            mock_drain.assert_called_once_with(config_mock, True)
 
 
 @pytest.fixture
