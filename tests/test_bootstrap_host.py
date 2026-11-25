@@ -12,14 +12,20 @@ from ober.commands import bootstrap as bs
 
 
 def _runner(
-    fail: str = "", sshd: str = "port 22\nport 2222\n", active: int = 0
+    fail: str = "",
+    sshd: str = "port 22\nport 2222\n",
+    active: int = 0,
+    ufw: str = "Status: inactive\n",
+    sshd_rc: int = 0,
 ) -> tuple[list[list[str]], Callable[..., MagicMock]]:
     calls: list[list[str]] = []
 
     def run(cmd: list[str], check: bool = True) -> MagicMock:  # noqa: ARG001
         calls.append(cmd)
         if cmd[:2] == ["sshd", "-T"]:
-            return MagicMock(returncode=0, stdout=sshd, stderr="")
+            return MagicMock(returncode=sshd_rc, stdout=sshd, stderr="no hostkeys")
+        if cmd[:2] == ["ufw", "status"]:
+            return MagicMock(returncode=0, stdout=ufw, stderr="")
         if cmd[:2] == ["systemctl", "is-active"]:
             return MagicMock(returncode=active, stdout="", stderr="")
         code = 1 if fail and fail in " ".join(cmd) else 0
@@ -35,7 +41,7 @@ def _apply(tools: set[str], **kw: object) -> list[list[str]]:
         patch.object(bs, "check_command_exists", lambda name: name in tools),
     ):
         bs._open_firewall_ports()
-    return [c for c in calls if c[0] != "sshd"]
+    return [c for c in calls if c[0] != "sshd" and c[:2] != ["ufw", "status"]]
 
 
 def test_ufw_allows_ssh_first_and_enables_last() -> None:
@@ -66,10 +72,39 @@ def test_firewalld_not_running_uses_offline_cmd() -> None:
     assert calls[-1] == ["systemctl", "enable", "--now", "firewalld"]
 
 
-def test_firewalld_running_is_permanent_and_reloads() -> None:
-    calls = _apply({"firewall-cmd"}, active=0, sshd="")
-    assert calls[1] == ["firewall-cmd", "--permanent", "--add-port=22/tcp"]
-    assert calls[-1] == ["firewall-cmd", "--reload"]
+def test_firewalld_running_keeps_ssh_rules_and_reloads() -> None:
+    calls = _apply({"firewall-cmd"}, active=0)
+    assert calls[1:] == [
+        ["firewall-cmd", "--permanent", "--add-service=https"],
+        ["firewall-cmd", "--permanent", "--add-protocol=vrrp"],
+        ["firewall-cmd", "--reload"],
+    ]
+
+
+def test_ufw_active_keeps_ssh_rules_and_is_not_reenabled() -> None:
+    """An admin's narrow SSH rule must not be widened to "from anywhere"."""
+    calls = _apply({"ufw"}, ufw="Status: active\n")
+    assert calls == [
+        ["ufw", "allow", "443/tcp"],
+        ["ufw", "allow", "proto", "vrrp", "from", "any", "to", "any"],
+    ]
+
+
+def test_ssh_ports_from_listenaddress() -> None:
+    sshd = "port 22\nlistenaddress 10.0.0.1:2200\nlistenaddress [::]:22\n"
+    calls = _apply({"ufw"}, sshd=sshd)
+    assert calls[:2] == [["ufw", "allow", "22/tcp"], ["ufw", "allow", "2200/tcp"]]
+
+
+def test_sshd_t_failure_stops_before_firewall_changes() -> None:
+    calls, run = _runner(sshd_rc=255)
+    with (
+        patch.object(bs, "run_command", run),
+        patch.object(bs, "check_command_exists", lambda name: name == "ufw"),
+        pytest.raises(click.ClickException, match="no hostkeys"),
+    ):
+        bs._open_firewall_ports()
+    assert not any(c[:2] == ["ufw", "allow"] or "enable" in c for c in calls)
 
 
 def test_no_firewall_tool_changes_nothing() -> None:

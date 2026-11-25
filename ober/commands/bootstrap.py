@@ -581,44 +581,60 @@ def _configure_watchdog() -> None:
 
 
 def _ssh_ports() -> list[str]:
-    """Ports sshd listens on (``sshd -T``), else 22."""
+    """Ports sshd listens on (``port`` and ``listenaddress <addr>:<port>`` of ``sshd -T``).
+
+    Raises:
+        click.ClickException: ``sshd -T`` failed; a guessed port could lock out SSH.
+    """
     try:
         result = run_command(["sshd", "-T"], check=False)
-    except OSError:
-        return ["22"]
-    ports = re.findall(r"^port (\d+)$", result.stdout or "", re.MULTILINE)
-    return sorted(set(ports)) or ["22"]
+        detail = (result.stderr or "").strip() if result.returncode != 0 else ""
+    except OSError as exc:
+        detail = str(exc) or "sshd not found"
+    if detail:
+        raise click.ClickException(
+            f"'sshd -T' failed ({detail}); cannot find the SSH port, the firewall was not changed"
+        )
+    out = result.stdout or ""
+    ports = re.findall(r"^port (\d+)$", out, re.MULTILINE)
+    ports += re.findall(r"^listenaddress \S+:(\d+)$", out, re.MULTILINE)
+    return sorted(set(ports), key=int) or ["22"]
 
 
 def _firewall_commands() -> list[list[str]] | None:
-    """Commands that allow SSH first, then 443/tcp and VRRP, and then enable the firewall.
+    """Commands that allow 443/tcp and VRRP, and SSH plus enable when the firewall was off.
 
-    All rules are persistent and safe to add again. Port 80 is not opened (HAProxy binds only
-    443). BGP needs no inbound rule (ExaBGP connects out, replies are tracked). The stats port
-    stays closed (health checks are local). Returns None when neither ufw nor firewalld exists.
+    A firewall that is already active keeps its own SSH rules (they can be narrower than
+    "allow from anywhere") and is not enabled again. All rules are persistent and safe to add
+    again. Port 80 is not opened (HAProxy binds only 443). BGP needs no inbound rule (ExaBGP
+    connects out, replies are tracked). The stats port stays closed (health checks are local).
+    Returns None when neither ufw nor firewalld exists.
     """
-    ssh = _ssh_ports()
     if check_command_exists("ufw"):
+        status = run_command(["ufw", "status"], check=False)
+        active = "Status: active" in (status.stdout or "")
+        ssh = [] if active else [["ufw", "allow", f"{port}/tcp"] for port in _ssh_ports()]
         return [
-            *(["ufw", "allow", f"{port}/tcp"] for port in ssh),
+            *ssh,
             ["ufw", "allow", "443/tcp"],
             ["ufw", "allow", "proto", "vrrp", "from", "any", "to", "any"],
-            ["ufw", "--force", "enable"],
+            *([] if active else [["ufw", "--force", "enable"]]),
         ]
     if check_command_exists("firewall-cmd"):
         running = run_command(["systemctl", "is-active", "--quiet", "firewalld"], check=False)
+        if running.returncode == 0:
+            rules = ["--add-service=https", "--add-protocol=vrrp"]
+            return [
+                *(["firewall-cmd", "--permanent", r] for r in rules),
+                ["firewall-cmd", "--reload"],
+            ]
         # firewall-offline-cmd edits the permanent config before firewalld first starts
-        tool = (
-            ["firewall-cmd", "--permanent"] if running.returncode == 0 else ["firewall-offline-cmd"]
-        )
-        rules = [f"--add-port={port}/tcp" for port in ssh]
+        rules = [f"--add-port={port}/tcp" for port in _ssh_ports()]
         rules += ["--add-service=https", "--add-protocol=vrrp"]
-        last = (
-            ["firewall-cmd", "--reload"]
-            if running.returncode == 0
-            else ["systemctl", "enable", "--now", "firewalld"]
-        )
-        return [*([*tool, rule] for rule in rules), last]
+        return [
+            *(["firewall-offline-cmd", r] for r in rules),
+            ["systemctl", "enable", "--now", "firewalld"],
+        ]
     return None
 
 

@@ -167,7 +167,9 @@ uses another NIC.
 
 `ober bootstrap` changes no firewall unless you add `--firewall`. With it, bootstrap allows the
 SSH port(s) from `sshd -T` first, then 443/tcp and VRRP, and then enables ufw (Debian/Ubuntu) or
-firewalld (RHEL). All rules are persistent. Port 80, BGP and the stats port are not opened.
+firewalld (RHEL). When the firewall is already active, bootstrap adds only 443/tcp and VRRP and
+keeps your SSH rules. If `sshd -T` fails, bootstrap stops before it changes the firewall. All
+rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every
 client and RGW connection.
 
