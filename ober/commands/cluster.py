@@ -13,11 +13,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import click
+import yaml
 from rich.console import Console
 from rich.table import Table
 
 from ober.commands.status import LEVELS, collect_status, load_config_safe
-from ober.config import OberConfig
+from ober.config import PER_NODE_KEYS, OberConfig
 
 console = Console()
 
@@ -39,9 +40,13 @@ def _is_local(node: str, config: OberConfig) -> bool:
     )
 
 
+def _ssh(node: str, timeout: int) -> list[str]:
+    return ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}", "--", node]
+
+
 def _remote_status(node: str, timeout: int) -> dict[str, Any]:
     """Run ``ober --json status`` on ``node`` over SSH. Raises RuntimeError with the reason."""
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}", node, REMOTE_STATUS]
+    cmd = [*_ssh(node, timeout), REMOTE_STATUS]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 15)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -191,3 +196,69 @@ def cluster_status(ctx: click.Context, nodes: str | None, timeout: int, json_fla
     console.print(table)
     console.print(check["summary"], markup=False)
     ctx.exit(LEVELS[check["level"]])
+
+
+def shared_per_node_values(text: str) -> list[str]:
+    """Per-node keys that ober.yaml sets (copied to every node, they would clash)."""
+    found, data = [], yaml.safe_load(text) or {}
+    for keys in PER_NODE_KEYS:
+        value: Any = data
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        if value:
+            found.append(".".join(keys))
+    return found
+
+
+@click.command()
+@click.option("--nodes", help="Comma-separated nodes (default: 'nodes' in ober.yaml).")
+@click.option(
+    "--timeout", default=30, show_default=True, help="Seconds each node waits for /health."
+)
+@click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
+@click.pass_context
+def push(ctx: click.Context, nodes: str | None, timeout: int, yes: bool) -> None:
+    """Apply this node's ober.yaml on the other nodes, one node at a time.
+
+    Each node runs 'ssh NODE sudo -n ober apply -f -' (check, reload, health gate, and restore
+    on failure). The push stops at the first node that fails. Apply on this node first. Values
+    that differ per node (local_ip, bgp.router_id, bgp.local_address) go in ober.local.yaml on
+    each node. Certificates are not copied.
+    """
+    config, error = load_config_safe()
+    if error or not config.config_path.exists():
+        console.print(f"[red]Error:[/red] No valid {config.config_path}: {error}", markup=False)
+        ctx.exit(1)
+    names = [n.strip() for n in nodes.split(",") if n.strip()] if nodes else cluster_nodes(config)
+    targets = [n for n in names if not _is_local(n, config)]
+    if not targets:
+        console.print("[red]Error:[/red] No other nodes. Set 'nodes:' in ober.yaml or use --nodes.")
+        ctx.exit(1)
+    text = config.config_path.read_text()
+    shared = shared_per_node_values(text)
+    if shared:
+        console.print(
+            f"[red]Error:[/red] ober.yaml sets {', '.join(shared)}, which must differ per node."
+            " Move them to ober.local.yaml (same directory) on each node."
+        )
+        ctx.exit(1)
+    if not yes:
+        click.confirm(f"Apply ober.yaml on {', '.join(targets)}, one at a time?", abort=True)
+    for done, node in enumerate(targets):
+        console.print(f"[bold]== {node}[/bold]")
+        cmd = [*_ssh(node, 10), f"sudo -n ober apply --timeout {int(timeout)} -f -"]
+        try:
+            proc = subprocess.run(
+                cmd, input=text, capture_output=True, text=True, timeout=timeout + 120
+            )
+            out, rc = proc.stdout + proc.stderr, proc.returncode
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out, rc = str(e), 1
+        click.echo(out.rstrip())
+        if rc != 0:
+            rest = targets[done + 1 :]
+            console.print(f"[red]Push stopped:[/red] {node} failed (exit {rc}).")
+            if rest:
+                console.print(f"Not pushed: {', '.join(rest)}", markup=False)
+            ctx.exit(1)
+    console.print(f"[green]Applied on {len(targets)} node(s).[/green] Check: ober cluster status")

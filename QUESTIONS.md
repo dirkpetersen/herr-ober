@@ -93,3 +93,10 @@ These were not in the list above. Each one is the default the work used.
   kept. Not covered: certificates, the blocklist and the `lo-vip` network files. The health gate
   is skipped when `/health` was failing before the apply, because it could never pass. An
   ExaBGP config change still needs `ober restart --hard` (only a message, no automatic restart).
+- **Cluster file and push (4.1, 4.4).** No new file format: `ober.yaml` is the cluster file,
+  and `ober.local.yaml` on each node holds the values that differ (`local_ip`,
+  `bgp.router_id`, `bgp.local_address`, or anything else). No migration is needed. `ober push`
+  sends the file over SSH (stdin to `ober apply -f -`), so it needs no knowledge of the remote
+  install path, and each node runs the same check, health gate and restore as a local apply.
+  Certificates are not pushed (keys stay where they are made; see 6.2). Drift shows in
+  `ober cluster status` (hash of `haproxy.cfg`), not yet as a metric (7.4).

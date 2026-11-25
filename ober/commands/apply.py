@@ -11,10 +11,12 @@ managed by ``ober blocklist sync``) and the ``lo-vip`` network files outside the
 """
 
 import difflib
+import os
 import shutil
 import time
 import urllib.request
 from pathlib import Path
+from typing import TextIO
 
 import click
 from rich.console import Console
@@ -157,20 +159,30 @@ def _root_config(ctx: click.Context) -> OberConfig:
 @click.command()
 @click.option("--timeout", default=30, show_default=True, help="Seconds to wait for /health.")
 @click.option("--diff/--no-diff", default=True, show_default=True, help="Show the changes.")
+@click.option(
+    "-f",
+    "--file",
+    "new_file",
+    type=click.File("r"),
+    help="Install this ober.yaml first ('-' = stdin). A failure restores the old one too.",
+)
 @click.pass_context
-def apply(ctx: click.Context, timeout: int, diff: bool) -> None:
+def apply(ctx: click.Context, timeout: int, diff: bool, new_file: TextIO | None) -> None:
     """Apply ober.yaml: render, check, reload, health gate, roll back on failure."""
     from ober.commands.config import _apply_configuration
 
     config = _root_config(ctx)
+    before = _tracked(config)
+    if new_file is not None:
+        config = _install(ctx, config, new_file.read())
     exit_if_invalid(config, ctx)
     other = "ober-ha" if config.ha_mode == "bgp" else "ober-bgp"
     if ServiceInfo.from_service_name(other).is_active:
         # A reload cannot switch modes: the old unit would keep the VIPs that we remove
         console.print(f"[red]Error:[/red] ha_mode is {config.ha_mode}, but {other} runs.")
         console.print("Switch with: ober stop; ober config --non-interactive; ober start")
+        _write(config, before)
         ctx.exit(1)
-    before = _tracked(config)
     try:
         _apply_configuration(config)
     except Exception as e:
@@ -189,7 +201,9 @@ def apply(ctx: click.Context, timeout: int, diff: bool) -> None:
     error = _activate(config, timeout, _bgp_changed(config, before, after))
     if error:
         console.print(f"[red]Apply failed:[/red] {error}", markup=False)
-        _write(config, before)  # ober.yaml keeps the edit, so it can be fixed and applied again
+        # Without -f, ober.yaml keeps the edit, so it can be fixed and applied again;
+        # with -f, the old ober.yaml comes back
+        _write(config, before)
         if _activate(config, timeout, False):
             console.print("[red]The old files did not get healthy either. Check the node.[/red]")
         else:
@@ -201,6 +215,24 @@ def apply(ctx: click.Context, timeout: int, diff: bool) -> None:
         _save(config, before)
     snap = _save(config, after)
     console.print(f"[green]Applied[/green] as snapshot {snap.name}. Undo with: ober rollback")
+
+
+def _install(ctx: click.Context, config: OberConfig, text: str) -> OberConfig:
+    """Replace ober.yaml with ``text`` when it is valid here (with this node's ober.local.yaml)."""
+    new = config.config_path.with_name(".ober.yaml.new")  # same dir: the overlay applies
+    write_atomic(new, text)
+    candidate = OberConfig.load(new)
+    errors, _ = candidate.validate()
+    if candidate.install_path != config.install_path:
+        errors.append(f"install_path {candidate.install_path} is not {config.install_path}")
+    if errors:
+        new.unlink()
+        console.print("[red]Error:[/red] The new ober.yaml is not valid on this node:")
+        for err in errors:
+            console.print(f"  {err}", markup=False)
+        ctx.exit(1)
+    os.replace(new, config.config_path)
+    return OberConfig.load()
 
 
 def _sync_vips() -> None:

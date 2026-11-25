@@ -1,5 +1,6 @@
 """Tests for ober apply / rollback: snapshot, check, reload, health gate, restore."""
 
+import re
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -29,7 +30,10 @@ def node(sample_config: OberConfig) -> Iterator[dict[str, Any]]:
 
     with (
         patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
-        patch("ober.commands.apply.OberConfig.load", side_effect=lambda: _reload(sample_config)),
+        patch(
+            "ober.commands.apply.OberConfig.load",
+            side_effect=lambda path=None: _reload(sample_config, path),
+        ),
         patch("ober.commands.apply.run_command", side_effect=run),
         patch("ober.commands.apply.ServiceInfo") as svc,
         patch("ober.commands.apply._healthy", side_effect=healthy),
@@ -52,9 +56,9 @@ def node(sample_config: OberConfig) -> Iterator[dict[str, Any]]:
 _LOAD = OberConfig.load
 
 
-def _reload(config: OberConfig) -> OberConfig:
+def _reload(config: OberConfig, path: Any = None) -> OberConfig:
     with patch.dict("os.environ", {"OBER_INSTALL_PATH": str(config.install_path)}):
-        return _LOAD(config.config_path)
+        return _LOAD(path or config.config_path)
 
 
 def _edit(config: OberConfig, server: str) -> None:
@@ -168,3 +172,31 @@ def test_rollback_resyncs_lo_vip(node: dict[str, Any]) -> None:
     node["vip"].reset_mock()
     assert CliRunner().invoke(main, ["rollback"]).exit_code == 0
     node["vip"].assert_called_once()
+
+
+def test_apply_file_installs_and_restores_on_failure(node: dict[str, Any]) -> None:
+    config = node["config"]
+    old = config.config_path.read_text()
+    new = old.replace("rgw2:7480", "rgw3:7480")
+    node["healthy"] = [True, False]  # healthy before, never after the reload
+    result = CliRunner().invoke(main, ["apply", "--timeout", "1", "-f", "-"], input=new)
+    assert result.exit_code == 1, result.output
+    assert config.config_path.read_text() == old  # -f: the old ober.yaml comes back
+    node["healthy"] = [True]
+    result = CliRunner().invoke(main, ["apply", "-f", "-"], input=new)
+    assert result.exit_code == 0, result.output
+    assert config.config_path.read_text() == new
+    assert "rgw3_7480" in config.haproxy_config_path.read_text()
+
+
+def test_apply_file_refuses_invalid_or_other_install_path(node: dict[str, Any]) -> None:
+    config = node["config"]
+    old = config.config_path.read_text()
+    moved = re.sub(r"^install_path: .*$", "install_path: /elsewhere", old, flags=re.M)
+    assert moved != old
+    for bad in ("ha_mode: carrier-pigeon\n", moved):
+        result = CliRunner().invoke(main, ["apply", "-f", "-"], input=bad)
+        assert result.exit_code == 1, result.output
+        assert "not valid on this node" in result.output
+        assert config.config_path.read_text() == old
+        assert not config.config_path.with_name(".ober.yaml.new").exists()

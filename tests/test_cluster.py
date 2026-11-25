@@ -9,7 +9,12 @@ from unittest.mock import MagicMock, patch
 from click.testing import CliRunner
 
 from ober.cli import main
-from ober.commands.cluster import cluster_nodes, evaluate_cluster, gather
+from ober.commands.cluster import (
+    cluster_nodes,
+    evaluate_cluster,
+    gather,
+    shared_per_node_values,
+)
 from ober.commands.status import config_hash
 from ober.config import KeepalivedConfig, OberConfig
 
@@ -123,3 +128,61 @@ def test_config_hash_ignores_per_node_stats_bind(temp_dir: Path) -> None:
     c.write_text("frontend stats\n    bind 127.0.0.1:8404\n    maxconn 20\n")
     assert config_hash(a) == config_hash(b) != config_hash(c)
     assert config_hash(temp_dir / "missing") is None
+
+
+def test_local_overlay_merges_and_saves_back(temp_dir: Path) -> None:
+    etc = temp_dir / "etc"
+    etc.mkdir()
+    (etc / "ober.yaml").write_text(
+        "ha_mode: bgp\nbgp:\n  local_as: 65010\n  neighbors: [10.0.0.254]\n"
+    )
+    (etc / "ober.local.yaml").write_text("local_ip: 10.0.0.7\nbgp:\n  router_id: 10.0.0.7\n")
+    with patch.dict("os.environ", {"OBER_INSTALL_PATH": str(temp_dir)}):
+        config = OberConfig.load()
+    assert (config.local_ip, config.bgp.router_id, config.bgp.local_as) == (
+        "10.0.0.7",
+        "10.0.0.7",
+        65010,
+    )
+    config.bgp.router_id = "10.0.0.8"
+    config.bgp.local_as = 65020
+    config.save()
+    shared = (etc / "ober.yaml").read_text()
+    assert shared_per_node_values(shared) == []  # per-node values stay in the local file
+    assert "65020" in shared
+    assert "10.0.0.8" in (etc / "ober.local.yaml").read_text()
+
+
+def _push(temp_dir: Path, text: str, rcs: dict[str, int]) -> tuple[Any, list[str]]:
+    (temp_dir / "etc").mkdir(exist_ok=True)
+    (temp_dir / "etc" / "ober.yaml").write_text(text)
+    config = OberConfig(install_path=temp_dir, local_ip="10.0.0.1", nodes=["10.0.0.1", *rcs])
+    sent: list[str] = []
+
+    def fake_run(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        node = cmd[cmd.index("--") + 1]
+        sent.append(node)
+        assert kw["input"] == text and cmd[-1].endswith("ober apply --timeout 30 -f -")
+        return subprocess.CompletedProcess(cmd, rcs[node], f"applied on {node}\n", "")
+
+    with (
+        patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
+        patch("ober.commands.cluster.load_config_safe", return_value=(config, None)),
+        patch("ober.commands.cluster.subprocess.run", side_effect=fake_run),
+    ):
+        return CliRunner().invoke(main, ["push", "-y"]), sent
+
+
+def test_push_one_node_at_a_time_and_stops_at_failure(temp_dir: Path) -> None:
+    result, sent = _push(temp_dir, "ha_mode: bgp\n", {"b": 0, "c": 1, "d": 0})
+    assert result.exit_code == 1, result.output
+    assert sent == ["b", "c"]  # never the local node, nothing after the failure
+    assert "Not pushed: d" in result.output
+    result, sent = _push(temp_dir, "ha_mode: bgp\n", {"b": 0, "c": 0})
+    assert result.exit_code == 0 and sent == ["b", "c"], result.output
+
+
+def test_push_refuses_per_node_values(temp_dir: Path) -> None:
+    result, sent = _push(temp_dir, "bgp:\n  router_id: 10.0.0.1\n", {"b": 0})
+    assert result.exit_code == 1 and sent == []
+    assert "bgp.router_id" in result.output and "ober.local.yaml" in result.output
