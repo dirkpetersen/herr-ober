@@ -211,6 +211,8 @@ class OberConfig:
     log_retention_days: int = 7
     stats_port: int = 8404
     drain_timeout: int = 30  # seconds `ober stop` waits for connections to close
+    # Extra addresses for stats/metrics/health; 127.0.0.1 is always bound
+    stats_bind: list[str] = field(default_factory=list)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
@@ -558,6 +560,7 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
         cfg.local_ip,
     )
     need(_in_range(cfg.stats_port, 1, max_port), "stats_port", "must be 1-65535", cfg.stats_port)
+    each("stats_bind", cfg.stats_bind, _is_ip, "must be an IP address")
     need(
         _in_range(cfg.log_retention_days, 1, 36500),
         "log_retention_days",

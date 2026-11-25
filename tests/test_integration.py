@@ -41,7 +41,7 @@ class TestConfigGeneration:
         assert "global" in content
         assert "defaults" in content
         assert "frontend stats" in content
-        assert f"bind *:{temp_config.stats_port}" in content
+        assert f"bind 127.0.0.1:{temp_config.stats_port}" in content
         assert "backend s3_backend" in content
         assert "balance leastconn" in content
         assert "server srv1 rgw1:7480" in content
@@ -73,26 +73,19 @@ class TestConfigGeneration:
         assert "local-as 65001" in content
         assert "peer-as 65000" in content
         assert "hold-time 3" in content
-        assert "bfd {" in content
+        assert "bfd" not in content  # ExaBGP has no BFD
 
     def test_haproxy_config_without_ssl(self, temp_config: OberConfig) -> None:
-        """Test HAProxy config generation without SSL configuration."""
+        """Without a certificate no S3 frontend can exist, so generation fails."""
         from ober.commands.config import _generate_haproxy_config
 
         temp_config.vips = [VIPConfig(address="10.0.100.1/32")]
         temp_config.backends = [
             BackendConfig(name="s3_backend", servers=["rgw:7480"]),
         ]
-        # No certs configured
 
-        _generate_haproxy_config(temp_config)
-
-        content = temp_config.haproxy_config_path.read_text()
-
-        # Should not have SSL frontend
-        assert "ssl crt" not in content
-        # Should still have backend
-        assert "backend s3_backend" in content
+        with pytest.raises(ValueError, match="certificate path"):
+            _generate_haproxy_config(temp_config)
 
     def test_config_roundtrip(self, temp_config: OberConfig) -> None:
         """Test saving and loading configuration."""

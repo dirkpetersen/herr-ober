@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -211,7 +212,11 @@ def config(ctx: click.Context, dry_run: bool, non_interactive: bool) -> None:
         console.print("[yellow]Configuration not applied.[/yellow]")
         return
 
-    _apply_configuration(config)
+    try:
+        _apply_configuration(config)
+    except (ValueError, RuntimeError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        ctx.exit(1)
     console.print()
     console.print("[bold green]Configuration applied![/bold green]")
     console.print()
@@ -392,11 +397,6 @@ def _configure_bgp(current: BGPConfig) -> BGPConfig:
             default=str(current.hold_time),
             validate=lambda _, x: x.isdigit() and (int(x) == 0 or 3 <= int(x) <= 65535),
         ),
-        inquirer.Confirm(
-            "bfd_enabled",
-            message="Enable BFD (Bidirectional Forwarding Detection)?",
-            default=current.bfd_enabled,
-        ),
     ]
 
     answers = inquirer.prompt(questions)
@@ -411,7 +411,6 @@ def _configure_bgp(current: BGPConfig) -> BGPConfig:
         router_id=answers["router_id"].strip(),
         local_address=answers["local_address"].strip(),
         hold_time=int(answers["hold_time"]),
-        bfd_enabled=answers["bfd_enabled"],
     )
 
 
@@ -581,9 +580,8 @@ def _configure_backends(current: list[BackendConfig]) -> list[BackendConfig]:
             )
         )
 
-        if pending:
-            continue
-        if not inquirer.confirm("Add another backend group?", default=False):
+        # Only one backend group is supported, so existing groups are edited but none added
+        if not pending:
             break
 
     return backends
@@ -719,7 +717,6 @@ def _print_config_summary(config: OberConfig) -> None:
         console.print(f"  Router ID: {config.bgp.router_id}")
         console.print(f"  Local Address: {config.bgp.local_address}")
         console.print(f"  Hold Time: {config.bgp.hold_time}s")
-        console.print(f"  BFD: {'enabled' if config.bgp.bfd_enabled else 'disabled'}")
     else:
         console.print("[cyan]Keepalived:[/cyan]")
         console.print(f"  Peers: {', '.join(config.keepalived.peers) or 'none'}")
@@ -763,14 +760,14 @@ def _print_config_summary(config: OberConfig) -> None:
                 console.print(f"    - {server}")
         if len(config.backends) > 1:
             console.print(
-                f"  [yellow]Note: only the first backend ({config.backends[0].name}) "
-                "receives S3 traffic.[/yellow]"
+                "  [bold red]Error: only one backend group is supported; apply will fail."
+                "[/bold red]"
             )
     else:
         console.print("  [dim]none configured[/dim]")
         console.print(
-            "  [bold yellow]Warning: no backends configured; the S3 frontend will NOT be "
-            "generated and HAProxy will serve no S3 traffic.[/bold yellow]"
+            "  [bold red]Error: no backends configured; no S3 frontend can be generated, "
+            "so apply will fail.[/bold red]"
         )
 
     console.print()
@@ -782,8 +779,8 @@ def _print_config_summary(config: OberConfig) -> None:
         if config.certs.route53_enabled or config.certs.acme_enabled:
             console.print("  [yellow]Note: Let's Encrypt/ACME is not implemented yet.[/yellow]")
         console.print(
-            "  [bold yellow]Warning: no certificate path; the S3 frontend will NOT be "
-            "generated and HAProxy will serve no S3 traffic.[/bold yellow]"
+            "  [bold red]Error: no certificate path; no S3 frontend can be generated, "
+            "so apply will fail.[/bold red]"
         )
 
     console.print()
@@ -1193,6 +1190,31 @@ def _generate_haproxy_config(
     else:
         log_line = "    log stdout format raw local0 info"
     hostnames = _validated_hostnames(sec.s3_hostnames)
+    missing = [
+        name
+        for name, value in (
+            ("VIPs", config.vips),
+            ("certificate path", config.certs.path),
+            ("backends", config.backends),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"No S3 frontend can be generated: missing {', '.join(missing)}")
+    if len(config.backends) > 1:
+        # shortcut: one backend group only; add vip.backend when several clusters are needed
+        raise ValueError(
+            "Only one backend group is supported, found "
+            + ", ".join(b.name for b in config.backends)
+        )
+    backend_name = config.backends[0].name
+    # health.py and the keepalived check poll 127.0.0.1, so it is always bound
+    stats_addrs = ["127.0.0.1"] + [a for a in config.stats_bind if a != "127.0.0.1"]
+    for addr in stats_addrs:
+        try:
+            ipaddress.ip_address(addr)
+        except ValueError as exc:
+            raise ValueError(f"Invalid stats_bind address: {addr!r}") from exc
 
     internet = [v for v in config.vips if v.exposure == "internet"]
     internal = [v for v in config.vips if v.exposure != "internet"]
@@ -1237,29 +1259,27 @@ def _generate_haproxy_config(
         "",
         f"# Stats endpoint on port {config.stats_port}",
         "frontend stats",
-        f"    bind *:{config.stats_port}",
+        "    bind " + ",".join(f"{a}:{config.stats_port}" for a in stats_addrs),
         "    no log",
         *stats_guard,
         "    stats enable",
         "    stats uri /stats",
         "    stats refresh 10s",
-        "    http-request use-service prometheus-exporter if { path /metrics }",
         "    monitor-uri /health",
+        # /health fails when no backend server can serve S3
+        f"    monitor fail if {{ nbsrv({backend_name}) lt 1 }}",
+        "    http-request use-service prometheus-exporter if { path /metrics }",
         "",
     ]
 
-    # S3 frontends (only emitted when a backend exists to route to, since HAProxy
-    # refuses to start if default_backend references a missing backend section)
-    if config.vips and config.certs.path and config.backends:
-        backend_name = config.backends[0].name
-        if internal:
-            hosts = [_vip_host(v.address) for v in internal]
-            binds = " ".join(f"{h}:{https_port}" for h in hosts)
-            cfg_lines += _s3_frontend_internal(config, binds, backend_name, hostnames, hosts)
-        if internet:
-            hosts = [_vip_host(v.address) for v in internet]
-            binds = " ".join(f"{h}:{https_port}" for h in hosts)
-            cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames, hosts)
+    if internal:
+        hosts = [_vip_host(v.address) for v in internal]
+        binds = ",".join(f"{h}:{https_port}" for h in hosts)
+        cfg_lines += _s3_frontend_internal(config, binds, backend_name, hostnames, hosts)
+    if internet:
+        hosts = [_vip_host(v.address) for v in internet]
+        binds = ",".join(f"{h}:{https_port}" for h in hosts)
+        cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames, hosts)
 
     # Backends
     for backend in config.backends:
@@ -1308,21 +1328,7 @@ def _generate_exabgp_config(config: OberConfig) -> None:
                 "        ipv4 unicast;",
                 "    }",
                 "",
-            ]
-        )
-
-        if config.bgp.bfd_enabled:
-            cfg_lines.extend(
-                [
-                    "    bfd {",
-                    "        enabled;",
-                    "    }",
-                    "",
-                ]
-            )
-
-        cfg_lines.extend(
-            [
+                # ExaBGP has no BFD: bgp.bfd_enabled is ignored, failure detection is hold-time
                 "    api {",
                 "        processes [ announce-routes ];",
                 "    }",
@@ -1360,6 +1366,9 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         f"    router_id ober_{hostname}",
         "    vrrp_skip_check_adv_addr",
         "    vrrp_garp_master_delay 1",
+        # keepalived -t fails on track scripts without script security
+        "    enable_script_security",
+        "    script_user root",
         "}",
         "",
         "# Health check script (Python entry point, exit 0 = healthy)",
@@ -1445,11 +1454,6 @@ def _generate_keepalived_config(config: OberConfig) -> None:
 
         cfg_lines.extend(
             [
-                "    # Track interface - demote priority if interface goes down",
-                "    track_interface {",
-                f"        {interface} weight -50",
-                "    }",
-                "",
                 "    # Health check - demote priority if HAProxy is down",
                 "    track_script {",
                 *(f"        {name}" for name in track_scripts),
@@ -1477,64 +1481,57 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         set_maintenance(config.maintenance_path, False)
 
 
-def _configure_vip_interface(config: OberConfig) -> None:
-    """Configure the VIP dummy interface."""
-    from ober.system import OSFamily, SystemInfo
+def _netplan_vip_yaml(config: OberConfig) -> str:
+    """Return the netplan file that puts all VIPs on the ``lo-vip`` dummy device."""
+    import yaml
+
+    netplan_cfg = {
+        "network": {
+            "version": 2,
+            "dummy-devices": {"lo-vip": {"addresses": [v.address for v in config.vips]}},
+        }
+    }
+    return yaml.dump(netplan_cfg, default_flow_style=False)
+
+
+def _configure_vip_interface(
+    config: OberConfig, netplan_path: Path = Path("/etc/netplan/60-vip.yaml")
+) -> None:
+    """Configure the VIP dummy interface (netplan on Debian, nmcli on RHEL).
+
+    Raises:
+        RuntimeError: If the tool is missing or a command fails.
+    """
+    from ober.system import OSFamily, SystemInfo, check_command_exists, run_command
 
     system = SystemInfo()
 
     if not config.vips:
         return
 
-    if system.os_family == OSFamily.DEBIAN:
-        # Use netplan
-        netplan_cfg = {
-            "network": {
-                "version": 2,
-                "tunnels": {
-                    "lo-vip": {
-                        "mode": "dummy",
-                        "addresses": [v.address for v in config.vips],
-                    }
-                },
-            }
-        }
-        import yaml
+    tool = "netplan" if system.os_family == OSFamily.DEBIAN else "nmcli"
+    if system.os_family in (OSFamily.DEBIAN, OSFamily.RHEL) and not check_command_exists(tool):
+        raise RuntimeError(f"{tool} not found: it is needed to put the VIPs on lo-vip")
 
-        netplan_path = Path("/etc/netplan/60-vip.yaml")
-        netplan_path.write_text(yaml.dump(netplan_cfg, default_flow_style=False))
-
-        # Apply netplan
-        from ober.system import run_command
-
-        run_command(["netplan", "apply"], check=False)
-
-    elif system.os_family == OSFamily.RHEL:
-        # Use nmcli
-        from ober.system import run_command
-
-        # Create dummy interface
-        run_command(
-            [
-                "nmcli",
-                "connection",
-                "add",
-                "type",
-                "dummy",
-                "ifname",
-                "lo-vip",
-                "con-name",
-                "lo-vip",
-            ],
-            check=False,
-        )
-
-        # Add IP addresses
-        for vip in config.vips:
+    try:
+        if system.os_family == OSFamily.DEBIAN:
+            netplan_path.write_text(_netplan_vip_yaml(config))
+            netplan_path.chmod(0o600)  # netplan warns about world-readable files
+            run_command(["netplan", "apply"])
+        elif system.os_family == OSFamily.RHEL:
+            exists = run_command(["nmcli", "connection", "show", "lo-vip"], check=False)
+            if exists.returncode != 0:
+                run_command(
+                    ["nmcli", "connection", "add", "type", "dummy"]
+                    + ["ifname", "lo-vip", "con-name", "lo-vip"]
+                )
+            # Set the full list, so removed VIPs go away and nothing is added twice
+            addresses = ",".join(v.address for v in config.vips)
             run_command(
-                ["nmcli", "connection", "modify", "lo-vip", "+ipv4.addresses", vip.address],
-                check=False,
+                ["nmcli", "connection", "modify", "lo-vip", "ipv4.method", "manual"]
+                + ["ipv4.addresses", addresses]
             )
-
-        # Bring up the interface
-        run_command(["nmcli", "connection", "up", "lo-vip"], check=False)
+            run_command(["nmcli", "connection", "up", "lo-vip"])
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"VIP interface setup failed: {' '.join(exc.cmd)}: {detail}") from exc

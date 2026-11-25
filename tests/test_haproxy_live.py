@@ -245,6 +245,7 @@ def launch(**security: Any) -> Iterator[Proxy]:
         ]
         config.certs = CertConfig(path=str(pem))
         config.stats_port = free_port()
+        config.stats_bind = [INTERNAL_IP]  # 127.0.0.1 (the internet VIP here) is always bound
         settings: dict[str, Any] = {
             "s3_hostnames": [HOST],
             "allowlist": ["127.0.0.0/24"],  # 127.0.1.x is outside: default deny

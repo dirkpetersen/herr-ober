@@ -366,9 +366,9 @@ class TestKeepalivedConfigGeneration:
         assert "10.0.0.2" in content
         assert "10.0.0.3" in content
         assert "192.168.1.100/32" in content
-        # Verify track_interface is present
-        assert "track_interface" in content
-        assert "eth0 weight -50" in content
+        # keepalived already goes to FAULT when its own interface is down
+        assert "track_interface" not in content
+        assert "enable_script_security" in content
 
     def test_generate_keepalived_config_multicast(self, temp_dir: Path) -> None:
         """Test keepalived config generation in multicast mode."""
