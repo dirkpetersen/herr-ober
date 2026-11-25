@@ -294,3 +294,23 @@ class TestStopDrain:
             result = cli_runner.invoke(main, ["restart", "--hard"])
         assert result.exit_code == 0, result.output
         assert order.index("drain") < order.index("systemctl restart ober-http")
+
+
+def test_sighup_reload_announces_new_and_withdraws_removed_vips(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ober.commands import health as h
+
+    with patch.object(h, "_config_vips", return_value=["10.0.0.2", "10.0.0.3"]):
+        vips, routes = h._reload_vips(["10.0.0.1", "10.0.0.2"], up=True)
+    assert vips == ["10.0.0.2", "10.0.0.3"] and routes == ["10.0.0.2/32", "10.0.0.3/32"]
+    assert capsys.readouterr().out.splitlines() == [
+        "withdraw route 10.0.0.1/32 next-hop self",
+        "announce route 10.0.0.3/32 next-hop self",
+    ]
+    with patch.object(h, "_config_vips", return_value=["10.0.0.3"]):
+        h._reload_vips(["10.0.0.2"], up=False)  # unhealthy: withdraw only, no announce
+    assert capsys.readouterr().out == "withdraw route 10.0.0.2/32 next-hop self\n"
+    with patch.object(h, "_config_vips", side_effect=ValueError("bad yaml")):
+        assert h._reload_vips(["10.0.0.2"], up=True) == (["10.0.0.2"], ["10.0.0.2/32"])
+    assert capsys.readouterr().out == ""  # a broken file changes no route

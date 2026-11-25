@@ -64,7 +64,7 @@ Bootstrap in a venv (pipx, the recommended setup) defaults to the existing point
 
 ### BGP mode health check
 
-`ober health` is **not run by users**. The generated ExaBGP config spawns it as `<venv>/bin/python -m ober.commands.health` (no VIP argument, so it covers all configured VIPs). It polls `http://127.0.0.1:<stats_port>/health` (HAProxy `monitor-uri`, default port 8404) and writes ExaBGP text-encoder commands to **stdout** (`announce|withdraw route <vip>/32 next-hop self`). Logs go to stderr. On SIGTERM/SIGINT it withdraws all routes before exiting. Never print anything else to stdout in that module.
+`ober health` is **not run by users**. The generated ExaBGP config spawns it as `<venv>/bin/python -m ober.commands.health` (no VIP argument, so it covers all configured VIPs). It polls `http://127.0.0.1:<stats_port>/health` (HAProxy `monitor-uri`, default port 8404) and writes ExaBGP text-encoder commands to **stdout** (`announce|withdraw route <vip>/32 next-hop self`). Logs go to stderr. On SIGTERM/SIGINT it withdraws all routes before exiting. On SIGHUP it re-reads the VIPs from ober.yaml, withdraws removed ones and (while healthy) announces new ones; the VIP list is not in the ExaBGP config, so `ober apply`/`rollback` send `pkill -HUP -f ober[.]commands[.]health` in BGP mode. Never print anything else to stdout in that module.
 
 ### Keepalived mode
 

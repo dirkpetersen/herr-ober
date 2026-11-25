@@ -18,14 +18,24 @@ import requests
 from ober.commands.maintenance import is_maintenance, write_atomic
 from ober.config import OberConfig
 
-# Global flag for graceful shutdown
+# Global flags for graceful shutdown and for re-reading the VIPs (SIGHUP from ober apply)
 _running = True
+_reload = False
 
 
 def _signal_handler(_signum: int, _frame: object) -> None:
     """Handle SIGTERM/SIGINT for graceful shutdown."""
     global _running
     _running = False
+
+
+def _hup_handler(_signum: int, _frame: object) -> None:
+    global _reload
+    _reload = True
+
+
+def _config_vips() -> list[str]:
+    return [v.address.split("/")[0] for v in OberConfig.load().vips]
 
 
 class Hysteresis:
@@ -126,6 +136,7 @@ def health(
     # Register signal handlers
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGHUP, _hup_handler)
 
     config = OberConfig.load()
 
@@ -156,7 +167,12 @@ def health(
     _write_state(state_path, [])
     last_write = time.monotonic()
 
+    global _reload
     while _running:
+        if _reload and not vip:
+            _reload = False
+            vips, routes = _reload_vips(vips, state.up)
+            last_write = 0.0  # write the new route list at once
         try:
             healthy = _check_health(health_url, timeout)
             maint = is_maintenance(config.maintenance_path)
@@ -183,6 +199,24 @@ def health(
     for vip_addr in vips:
         _withdraw_route(vip_addr)
     _write_state(state_path, [])
+
+
+def _reload_vips(old: list[str], up: bool) -> tuple[list[str], list[str]]:
+    """Re-read the VIPs; withdraw removed ones and, while healthy, announce new ones."""
+    try:
+        new = _config_vips()
+    except Exception as e:  # keep serving the old list rather than die on a bad file
+        _log(f"VIP reload failed, keeping {', '.join(old)}: {e}")
+        return old, [f"{v}/32" for v in old]
+    for addr in old:
+        if addr not in new:
+            _withdraw_route(addr)
+    if up:
+        for addr in new:
+            if addr not in old:
+                _announce_route(addr)
+    _log(f"Reloaded VIPs: {', '.join(new) or 'none'}")
+    return new, [f"{v}/32" for v in new]
 
 
 def _check_health(url: str, timeout: float) -> bool:
