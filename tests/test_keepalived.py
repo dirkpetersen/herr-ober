@@ -34,11 +34,11 @@ class TestVIPValidation:
         assert is_valid is True
         assert error == ""
 
-    def test_validate_vip_valid_ip_with_cidr_24(self) -> None:
-        """Test validation of valid IP with /24 CIDR."""
+    def test_validate_vip_rejects_cidr_24(self) -> None:
+        """A /24 on lo-vip adds a connected route that blackholes replies."""
         is_valid, error = _validate_vip("10.0.0.1/24")
-        assert is_valid is True
-        assert error == ""
+        assert is_valid is False
+        assert "must be a single address (/32)" in error
 
     def test_validate_vip_invalid_ip(self) -> None:
         """Test validation of invalid IP address."""
@@ -366,9 +366,9 @@ class TestKeepalivedConfigGeneration:
         assert "10.0.0.2" in content
         assert "10.0.0.3" in content
         assert "192.168.1.100/32" in content
-        # Verify track_interface is present
-        assert "track_interface" in content
-        assert "eth0 weight -50" in content
+        # keepalived already goes to FAULT when its own interface is down
+        assert "track_interface" not in content
+        assert "enable_script_security" in content
 
     def test_generate_keepalived_config_multicast(self, temp_dir: Path) -> None:
         """Test keepalived config generation in multicast mode."""
@@ -480,6 +480,7 @@ class TestServiceCommandsKeepalived:
             mock_system.return_value = mock_instance
 
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.ha_mode = "keepalived"
             config_mock.haproxy_config_path.exists.return_value = True
             config_mock.keepalived_config_path.exists.return_value = True
@@ -500,6 +501,7 @@ class TestServiceCommandsKeepalived:
             patch("ober.commands.service.OberConfig.load") as mock_config,
             patch("ober.commands.service.run_command"),
             patch("ober.commands.service.time.sleep"),
+            patch("ober.commands.service._drain", return_value=False) as mock_drain,
         ):
             mock_instance = MagicMock()
             mock_instance.is_root = True
@@ -519,129 +521,8 @@ class TestServiceCommandsKeepalived:
             mock_config.return_value = config_mock
 
             result = cli_runner.invoke(main, ["stop"])
-            # Should mention VIPs being released
-            assert "VIP" in result.output or "stopped" in result.output.lower()
-
-
-class TestVRRPState:
-    """Tests for VRRP state parsing."""
-
-    def test_get_vrrp_state_master(self) -> None:
-        """Test parsing VRRP MASTER state from logs."""
-        from ober.commands.status import _get_vrrp_state
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "Oct 15 10:00:00 node1 Keepalived_vrrp[123]: VI_1 Entering MASTER STATE"
-        )
-
-        with patch("subprocess.run", return_value=mock_result):
-            states = _get_vrrp_state()
-            assert states.get("VI_1") == "MASTER"
-
-    def test_get_vrrp_state_backup(self) -> None:
-        """Test parsing VRRP BACKUP state from logs."""
-        from ober.commands.status import _get_vrrp_state
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "Oct 15 10:00:00 node1 Keepalived_vrrp[123]: VI_2 Entering BACKUP STATE"
-        )
-
-        with patch("subprocess.run", return_value=mock_result):
-            states = _get_vrrp_state()
-            assert states.get("VI_2") == "BACKUP"
-
-    def test_get_vrrp_state_multiple_instances(self) -> None:
-        """Test parsing multiple VRRP instances."""
-        from ober.commands.status import _get_vrrp_state
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "Oct 15 10:00:00 node1 Keepalived_vrrp[123]: VI_1 Entering MASTER STATE\n"
-            "Oct 15 10:00:00 node1 Keepalived_vrrp[123]: VI_2 Entering BACKUP STATE\n"
-            "Oct 15 10:00:01 node1 Keepalived_vrrp[123]: VI_3 Entering MASTER STATE\n"
-        )
-
-        with patch("subprocess.run", return_value=mock_result):
-            states = _get_vrrp_state()
-            assert states.get("VI_1") == "MASTER"
-            assert states.get("VI_2") == "BACKUP"
-            assert states.get("VI_3") == "MASTER"
-
-    def test_get_vrrp_state_latest_wins(self) -> None:
-        """Test that latest state transition wins."""
-        from ober.commands.status import _get_vrrp_state
-
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = (
-            "Oct 15 10:00:00 node1 Keepalived_vrrp[123]: VI_1 Entering BACKUP STATE\n"
-            "Oct 15 10:00:05 node1 Keepalived_vrrp[123]: VI_1 Entering MASTER STATE\n"
-        )
-
-        with patch("subprocess.run", return_value=mock_result):
-            states = _get_vrrp_state()
-            assert states.get("VI_1") == "MASTER"
-
-    def test_get_vrrp_state_empty_on_error(self) -> None:
-        """Test empty result on error."""
-        from ober.commands.status import _get_vrrp_state
-
-        with patch("subprocess.run", side_effect=FileNotFoundError):
-            states = _get_vrrp_state()
-            assert states == {}
-
-
-class TestStatusCommandKeepalived:
-    """Tests for status command in keepalived mode."""
-
-    def test_status_keepalived_mode(self, cli_runner: CliRunner) -> None:
-        """Test status command shows keepalived info."""
-        with (
-            patch("ober.commands.status.ServiceInfo") as mock_svc,
-            patch("ober.commands.status.OberConfig.load") as mock_config,
-            patch("ober.commands.status.get_haproxy_version", return_value="3.3.0"),
-            patch("ober.system.get_keepalived_version", return_value="2.2.8"),
-        ):
-            from ober.config import VIPConfig
-
-            http_mock = MagicMock()
-            http_mock.is_active = True
-            http_mock.is_enabled = True
-            http_mock.status = "active"
-            http_mock.pid = 1234
-
-            ka_mock = MagicMock()
-            ka_mock.is_active = True
-            ka_mock.is_enabled = True
-            ka_mock.status = "active"
-            ka_mock.pid = 5678
-
-            bgp_mock = MagicMock()
-            bgp_mock.is_active = False
-            bgp_mock.is_enabled = False
-
-            mock_svc.from_service_name.side_effect = [http_mock, bgp_mock, ka_mock]
-
-            config_mock = MagicMock()
-            config_mock.ha_mode = "keepalived"
-            config_mock.config_path.exists.return_value = True
-            config_mock.config_path = Path("/test/etc/ober.yaml")
-            config_mock.haproxy_config_path.exists.return_value = True
-            config_mock.keepalived_config_path.exists.return_value = True
-            config_mock.vips = [VIPConfig(address="192.168.1.100/32")]
-            config_mock.backends = []
-            config_mock.stats_port = 8404
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["status"])
-            assert result.exit_code == 0
-            # Should show ober-ha instead of ober-bgp
-            assert "ober-ha" in result.output or "Keepalived" in result.output
+            assert result.exit_code == 0, result.output
+            mock_drain.assert_called_once_with(config_mock, True)
 
 
 @pytest.fixture
@@ -657,3 +538,56 @@ def temp_dir() -> Path:
 def cli_runner() -> CliRunner:
     """Create a CLI runner."""
     return CliRunner()
+
+
+def test_same_peer_list_on_all_nodes_gives_one_owner(temp_dir: Path) -> None:
+    """One ober.yaml lists all nodes (self included): each VIP still has exactly one owner."""
+    import re
+
+    from ober.commands.config import _generate_keepalived_config
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    vips = ["192.168.1.100", "192.168.1.101", "192.168.1.102", "192.168.1.103"]
+    priorities: dict[str, list[int]] = {v: [] for v in vips}
+    for node in nodes:
+        config = OberConfig(install_path=temp_dir / node, local_ip=node)
+        config.ha_mode = "keepalived"
+        config.keepalived = KeepalivedConfig(peers=[*nodes, nodes[0]], interface="eth0")
+        config.vips = [VIPConfig(address=v) for v in vips]
+        config.ensure_directories()
+        _generate_keepalived_config(config)
+        text = config.keepalived_config_path.read_text()
+        for block in text.split("vrrp_instance ")[1:]:
+            vip = re.search(r"virtual_ipaddress \{\s+(\S+)/32", block)
+            prio = re.search(r"priority (\d+)", block)
+            assert vip and prio
+            priorities[vip.group(1)].append(int(prio.group(1)))
+            peers = re.search(r"unicast_peer \{([^}]*)\}", block)
+            assert peers and peers.group(1).split() == [n for n in nodes if n != node]
+    for vip, prios in priorities.items():
+        assert sorted(prios) == [90, 90, 100], vip
+
+
+def test_status_expected_owner_matches_generator() -> None:
+    from ober.commands.status import _expected_owner
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    owners = set()
+    for node in nodes:
+        config = OberConfig(local_ip=node, keepalived=KeepalivedConfig(peers=nodes))
+        owners.add(_expected_owner(config, "192.168.1.100"))
+    assert owners == {get_vip_owner("192.168.1.100", nodes, "")[0]}
+
+
+def test_vrrp_router_ids_are_unique() -> None:
+    from ober.commands.config import vrrp_router_ids
+
+    assert get_vrrp_router_id("10.0.0.2") == get_vrrp_router_id("10.0.0.6")
+    ids = vrrp_router_ids(["10.0.0.6", "10.0.0.2"])
+    assert ids == vrrp_router_ids(["10.0.0.2", "10.0.0.6"])  # same on every node
+    assert ids["10.0.0.2"] == get_vrrp_router_id("10.0.0.2")
+    assert ids["10.0.0.6"] != ids["10.0.0.2"]
+    many = vrrp_router_ids([f"10.0.{i // 250}.{i % 250}" for i in range(255)])
+    assert sorted(many.values()) == list(range(1, 256))
+    with pytest.raises(ValueError, match="at most 255"):
+        vrrp_router_ids([f"10.1.{i // 250}.{i % 250}" for i in range(256)])

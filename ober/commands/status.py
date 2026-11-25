@@ -1,249 +1,405 @@
 #!/usr/bin/env python3
 """Ober status command - show current state."""
 
+import csv
 import json
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import click
 from rich.console import Console
 from rich.table import Table
 
+from ober.certs import check_cert_expiry
+from ober.commands.maintenance import is_maintenance
 from ober.config import OberConfig
 from ober.system import ServiceInfo, get_haproxy_version
 
 console = Console()
 
+# State files written by other components, relative to install_path.
+HEALTH_STATE_FILE = Path("var/run/ober-health.json")  # health.py (BGP mode)
+VRRP_STATE_FILE = Path("var/run/vrrp-state.json")  # keepalived notify script
+
+LEVELS = {"OK": 0, "WARN": 1, "CRIT": 2}
+
 
 @click.command()
+@click.option(
+    "--check",
+    is_flag=True,
+    help="Print a one-line summary and exit 0 (OK), 1 (WARN) or 2 (CRIT).",
+)
 @click.pass_context
-def status(ctx: click.Context) -> None:
+def status(ctx: click.Context, check: bool) -> None:
     """Show current status of Ober services.
 
-    Displays BGP session status, HAProxy health, announced routes,
-    and systemd service status.
+    Displays systemd services, VIPs (present, announced or VRRP state),
+    backend health and certificate expiry. Works with a missing or invalid config.
     """
     parent_ctx = ctx.obj
     json_output = parent_ctx.json_output if parent_ctx else False
 
-    config = OberConfig.load()
-    result: dict[str, Any] = {
-        "services": {},
-        "bgp": {},
-        "keepalived": {},
-        "haproxy": {},
-        "config": {},
-    }
+    config, config_error = load_config_safe()
+    result = collect_status(config, config_error)
 
-    # Service status
-    http_service = ServiceInfo.from_service_name("ober-http")
-    bgp_service = ServiceInfo.from_service_name("ober-bgp")
-    ka_service = ServiceInfo.from_service_name("ober-ha")
-
-    result["services"]["ober-http"] = {
-        "active": http_service.is_active,
-        "enabled": http_service.is_enabled,
-        "status": http_service.status,
-        "pid": http_service.pid,
-    }
-
-    # HA service based on mode
-    if config.ha_mode == "bgp":
-        result["services"]["ober-bgp"] = {
-            "active": bgp_service.is_active,
-            "enabled": bgp_service.is_enabled,
-            "status": bgp_service.status,
-            "pid": bgp_service.pid,
-        }
-    else:
-        result["services"]["ober-ha"] = {
-            "active": ka_service.is_active,
-            "enabled": ka_service.is_enabled,
-            "status": ka_service.status,
-            "pid": ka_service.pid,
-        }
-
-    # HAProxy info
-    result["haproxy"]["version"] = get_haproxy_version()
-    result["haproxy"]["config_exists"] = config.haproxy_config_path.exists()
-
-    # BGP or Keepalived info based on mode
-    if config.ha_mode == "bgp":
-        from ober.system import get_exabgp_version
-
-        result["bgp"]["version"] = get_exabgp_version()
-        result["bgp"]["config_exists"] = config.bgp_config_path.exists()
-    else:
-        from ober.system import get_keepalived_version
-
-        result["keepalived"]["version"] = get_keepalived_version()
-        result["keepalived"]["config_exists"] = config.keepalived_config_path.exists()
-
-    # Get BGP announced routes (if service is running in BGP mode)
-    if config.ha_mode == "bgp" and bgp_service.is_active:
-        result["bgp"]["announced_routes"] = _get_announced_routes()
-    else:
-        result["bgp"]["announced_routes"] = []
-
-    # Get VRRP state (if in keepalived mode and service is running)
-    if config.ha_mode == "keepalived" and ka_service.is_active:
-        result["keepalived"]["vrrp_state"] = _get_vrrp_state()
-    else:
-        result["keepalived"]["vrrp_state"] = {}
-
-    # Config info
-    result["config"]["exists"] = config.config_path.exists()
-    result["config"]["path"] = str(config.config_path)
-    if config.vips:
-        result["config"]["vips"] = [v.address for v in config.vips]
-    if config.backends:
-        result["config"]["backends"] = [b.name for b in config.backends]
-
-    # HAProxy stats (if running)
-    if http_service.is_active:
-        result["haproxy"]["stats"] = _get_haproxy_stats(config.stats_port)
+    if check:
+        if json_output:
+            click.echo(json.dumps(result["check"], indent=2))
+        else:
+            click.echo(result["check"]["summary"])
+        ctx.exit(LEVELS[result["check"]["level"]])
 
     if json_output:
         click.echo(json.dumps(result, indent=2, default=str))
     else:
-        ha_service = bgp_service if config.ha_mode == "bgp" else ka_service
-        ha_name = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
-        _print_status(result, http_service, ha_service, ha_name)
+        _print_status(result)
 
 
-def _get_announced_routes() -> list[str]:
-    """Get currently announced BGP routes."""
-    # This would parse ExaBGP state, for now return empty
-    # In production, we'd query ExaBGP's API or parse its state
-    return []
-
-
-def _get_vrrp_state() -> dict[str, str]:
-    """Get VRRP state for each instance from journalctl.
-
-    Returns:
-        Dict mapping instance name (e.g., "VI_1") to state ("MASTER" or "BACKUP")
-    """
-    import re
-    import subprocess
-
-    states: dict[str, str] = {}
-
+def load_config_safe() -> tuple[OberConfig, str | None]:
+    """Load the config, or return defaults and the error when the file is invalid."""
     try:
-        # Get recent keepalived logs
-        result = subprocess.run(
-            ["journalctl", "-u", "ober-ha", "-n", "100", "--no-pager", "-q"],
+        config = OberConfig.load()
+    except Exception as exc:  # read-only commands must work with a broken config
+        return OberConfig(), str(exc) or type(exc).__name__
+    errors, _ = config.validate()  # load() records problems instead of raising
+    return config, "\n".join(errors) or None
+
+
+def collect_status(config: OberConfig, config_error: str | None = None) -> dict[str, Any]:
+    """Collect the node state into one dict (also used by ``--json``)."""
+    ha_name = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
+    services: dict[str, Any] = {}
+    for name in ("ober-http", ha_name):
+        svc = ServiceInfo.from_service_name(name)
+        services[name] = {
+            "active": svc.is_active,
+            "enabled": svc.is_enabled,
+            "status": svc.status,
+            "pid": svc.pid,
+        }
+
+    result: dict[str, Any] = {
+        "ha_mode": config.ha_mode,
+        "services": services,
+        "haproxy": {"version": get_haproxy_version()},
+        "config": {
+            "path": str(config.config_path),
+            "exists": config.config_path.exists(),
+            "error": config_error,
+        },
+    }
+    if config.ha_mode == "bgp":
+        from ober.system import get_exabgp_version
+
+        neighbors = list(config.bgp.neighbors)
+        result["bgp"] = {
+            "version": get_exabgp_version(),
+            "sessions": bgp_sessions(neighbors) if neighbors else {},
+        }
+    else:
+        from ober.system import get_keepalived_version
+
+        result["keepalived"] = {"version": get_keepalived_version()}
+
+    result["maintenance"] = is_maintenance(config.maintenance_path)
+    result["vips"] = _vip_status(config)
+    result["backends"] = backend_summary(config)
+    if config.certs.path:
+        result["certificate"] = {"path": config.certs.path, **check_cert_expiry(config.certs.path)}
+    result["check"] = evaluate(result)
+    return result
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def read_announced_routes(config: OberConfig) -> list[str] | None:
+    """Return the routes health.py announces, or None when unknown."""
+    data = _read_json(config.install_path / HEALTH_STATE_FILE)
+    if not isinstance(data, dict) or not isinstance(data.get("announced"), list):
+        return None
+    return [str(r) for r in data["announced"]]
+
+
+def read_vrrp_state(config: OberConfig) -> dict[str, str] | None:
+    """Return the VRRP state per VIP address, or None when unknown.
+
+    The notify script keys the file by instance name (``VI_<n>``, n = VIP index + 1).
+    A key equal to the VIP address is accepted too.
+    """
+    data = _read_json(config.install_path / VRRP_STATE_FILE)
+    if not isinstance(data, dict):
+        return None
+    states: dict[str, str] = {}
+    for idx, vip in enumerate(config.vips):
+        addr = vip.address.split("/")[0]
+        state = data.get(f"VI_{idx + 1}") or data.get(addr) or data.get(vip.address)
+        if state:
+            states[addr] = str(state).upper()
+    return states
+
+
+def local_ipv4_addresses() -> set[str] | None:
+    """Return the IPv4 addresses on this host (``ip -o -4 addr show``), None if unknown."""
+    try:
+        out = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    addrs = set()
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if "inet" in parts[:-1]:
+            addrs.add(parts[parts.index("inet") + 1].split("/")[0])
+    return addrs
+
+
+def bgp_sessions(neighbors: list[str]) -> dict[str, bool] | None:
+    """Return per neighbor whether a TCP session on port 179 is established, None if unknown."""
+    try:
+        out = subprocess.run(
+            ["ss", "-Htn", "state", "established", "( sport = :179 or dport = :179 )"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if result.returncode == 0:
-            # Parse for state transitions - find the most recent state for each instance
-            # Pattern: "VI_1 Entering MASTER STATE" or "VI_1 Entering BACKUP STATE"
-            pattern = re.compile(
-                r"(VI_\d+)\s+(?:Entering|entering)\s+(MASTER|BACKUP)\s+STATE", re.I
-            )
-            for line in result.stdout.split("\n"):
-                match = pattern.search(line)
-                if match:
-                    instance = match.group(1)
-                    state = match.group(2).upper()
-                    states[instance] = state
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    return states
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    hosts = set()
+    for line in out.stdout.splitlines():
+        for field in line.split()[2:]:  # Recv-Q Send-Q Local:Port Peer:Port
+            hosts.add(field.rsplit(":", 1)[0].strip("[]").removeprefix("::ffff:"))
+    return {n: n in hosts for n in neighbors}
 
 
-def _get_haproxy_stats(port: int) -> dict[str, Any]:
-    """Get HAProxy stats from the stats endpoint."""
-    import requests
+def _expected_owner(config: OberConfig, vip: str) -> str:
+    from ober.commands.config import get_vip_owner, keepalived_peers
+
+    # Same node list as _generate_keepalived_config, so the answer matches the config.
+    local_ip = config.node_ip()
+    return get_vip_owner(vip, [local_ip, *keepalived_peers(config, local_ip)], local_ip)[0]
+
+
+def _vip_status(config: OberConfig) -> list[dict[str, Any]]:
+    present = local_ipv4_addresses()
+    routes = read_announced_routes(config) if config.ha_mode == "bgp" else None
+    vrrp = read_vrrp_state(config) if config.ha_mode == "keepalived" else None
+    vips = []
+    for vip in config.vips:
+        addr = vip.address.split("/")[0]
+        entry: dict[str, Any] = {
+            "address": addr,
+            "exposure": vip.exposure,
+            "present": None if present is None else addr in present,
+        }
+        if config.ha_mode == "bgp":
+            entry["announced"] = None if routes is None else f"{addr}/32" in routes
+        else:
+            entry["vrrp_state"] = None if vrrp is None else vrrp.get(addr, "UNKNOWN")
+            entry["expected_owner"] = _expected_owner(config, addr)
+        vips.append(entry)
+    return vips
+
+
+def backend_summary(config: OberConfig) -> dict[str, Any] | None:
+    """Return server health per backend from the HAProxy runtime socket, None if unknown."""
+    from ober.watch.runtime import HAProxyRuntime
 
     try:
-        resp = requests.get(f"http://127.0.0.1:{port}/stats;json", timeout=2)
-        if resp.status_code == 200:
-            data: dict[str, Any] = resp.json()
-            return data
-    except Exception:
-        pass
-    return {}
+        text = HAProxyRuntime(config.admin_socket_path, timeout=2).send("show stat")
+    except OSError:
+        return None
+    backends: dict[str, Any] = {}
+    for row in csv.DictReader(text.lstrip("# ").splitlines()):
+        if row.get("svname") in (None, "FRONTEND", "BACKEND"):
+            continue
+        state = row.get("status") or ""
+        entry = backends.setdefault(row["pxname"], {"up": 0, "total": 0, "down": []})
+        entry["total"] += 1
+        if state.startswith("UP") or state == "no check":
+            entry["up"] += 1
+        else:
+            since = row.get("lastchg") or ""
+            entry["down"].append(
+                {
+                    "server": row["svname"],
+                    "status": state,
+                    "since_s": int(since) if since.isdigit() else None,
+                }
+            )
+    return backends
 
 
-def _print_status(
-    result: dict[str, Any],
-    http_service: ServiceInfo,
-    ha_service: ServiceInfo,
-    ha_name: str,
-) -> None:
+def evaluate(result: dict[str, Any]) -> dict[str, Any]:
+    """Turn the collected state into OK/WARN/CRIT and a one-line summary."""
+    problems: list[tuple[str, str]] = []
+    cfg = result["config"]
+    if cfg["error"]:
+        problems.append(("CRIT", f"config invalid: {cfg['error'].splitlines()[0][:120]}"))
+    elif not cfg["exists"]:
+        problems.append(("CRIT", f"config not found: {cfg['path']}"))
+    for name, svc in result["services"].items():
+        if not svc["active"]:
+            problems.append(("CRIT", f"{name} {svc['status']}"))
+    if result.get("maintenance"):
+        problems.append(("WARN", "maintenance mode on (node out of rotation)"))
+
+    backends = result["backends"]
+    if backends is None:
+        problems.append(("WARN", "backend state unknown (runtime socket not readable)"))
+    else:
+        for name, b in sorted(backends.items()):
+            if b["up"] == 0:
+                problems.append(("CRIT", f"{name}: 0/{b['total']} servers UP"))
+            elif b["up"] < b["total"]:
+                down = ", ".join(d["server"] for d in b["down"])
+                problems.append(("WARN", f"{name}: {b['up']}/{b['total']} UP ({down} down)"))
+
+    cert = result.get("certificate")
+    if cert and cert["level"] != "ok":
+        problems.append((cert["level"].upper(), f"certificate: {cert['message']}"))
+
+    sessions = result.get("bgp", {}).get("sessions", {})
+    if sessions is None:
+        problems.append(("WARN", "BGP session state unknown (ss failed)"))
+    for neighbor, up in (sessions or {}).items():
+        if not up:
+            problems.append(("WARN", f"BGP neighbor {neighbor}: no established session"))
+
+    for vip in result["vips"]:
+        addr = vip["address"]
+        if "announced" in vip:
+            if vip["announced"] is None:
+                problems.append(("WARN", f"{addr}: announce state unknown"))
+            elif not vip["announced"]:
+                problems.append(("WARN", f"{addr}: not announced"))
+            if vip["present"] is False:
+                problems.append(("WARN", f"{addr}: not on a local interface"))
+        else:
+            state = vip["vrrp_state"]
+            if state in (None, "UNKNOWN"):
+                problems.append(("WARN", f"{addr}: VRRP state unknown"))
+            elif state == "FAULT":
+                problems.append(("CRIT", f"{addr}: VRRP FAULT"))
+            elif vip["present"] is not None and vip["present"] != (state == "MASTER"):
+                held = "present" if vip["present"] else "absent"
+                problems.append(("WARN", f"{addr}: VRRP {state} but VIP {held}"))
+
+    level = max((p[0] for p in problems), key=LEVELS.__getitem__, default="OK")
+    if problems:
+        summary = f"OBER {level} - " + "; ".join(p[1] for p in problems)
+    else:
+        summary = f"OBER OK - {len(result['vips'])} VIP(s), services and backends up"
+    return {"level": level, "summary": summary, "problems": [p[1] for p in problems]}
+
+
+def _fmt_bool(value: bool | None) -> str:
+    if value is None:
+        return "[dim]unknown[/dim]"
+    return "[green]yes[/green]" if value else "[red]no[/red]"
+
+
+def _ago(seconds: int) -> str:
+    if seconds < 120:
+        return f"{seconds}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h"
+
+
+def _print_status(result: dict[str, Any]) -> None:
     """Print status in a human-readable format."""
     console.print()
     console.print("[bold]Ober Status[/bold]")
     console.print()
 
-    # Services table
     table = Table(title="Services", show_header=True, header_style="bold")
-    table.add_column("Service")
-    table.add_column("Status")
-    table.add_column("PID")
-    table.add_column("Enabled")
-
-    for name, service in [("ober-http", http_service), (ha_name, ha_service)]:
-        status_str = (
-            f"[green]{service.status}[/green]"
-            if service.is_active
-            else f"[red]{service.status}[/red]"
+    for col in ("Service", "Status", "PID", "Enabled"):
+        table.add_column(col)
+    for name, svc in result["services"].items():
+        color = "green" if svc["active"] else "red"
+        table.add_row(
+            name,
+            f"[{color}]{svc['status']}[/{color}]",
+            str(svc["pid"]) if svc["pid"] else "-",
+            "[green]yes[/green]" if svc["enabled"] else "[dim]no[/dim]",
         )
-        pid_str = str(service.pid) if service.pid else "-"
-        enabled_str = "[green]yes[/green]" if service.is_enabled else "[dim]no[/dim]"
-        table.add_row(name, status_str, pid_str, enabled_str)
-
     console.print(table)
     console.print()
 
-    # Component versions
-    haproxy_ver = result["haproxy"].get("version", "not installed")
-    console.print(f"[bold]HAProxy:[/bold] {haproxy_ver}")
-
-    # Show HA component version based on mode
-    if ha_name == "ober-bgp":
-        exabgp_ver = result["bgp"].get("version", "not installed")
-        console.print(f"[bold]ExaBGP:[/bold] {exabgp_ver}")
+    console.print(f"[bold]HAProxy:[/bold] {result['haproxy']['version'] or 'not installed'}")
+    if "bgp" in result:
+        console.print(f"[bold]ExaBGP:[/bold] {result['bgp']['version'] or 'not installed'}")
+        sessions = result["bgp"]["sessions"]
+        if sessions is None:
+            console.print("[bold]BGP sessions:[/bold] [dim]unknown (ss failed)[/dim]")
+        for neighbor, up in (sessions or {}).items():
+            state = "[green]established[/green]" if up else "[red]not established[/red]"
+            console.print(f"[bold]BGP {neighbor}:[/bold] {state}")
     else:
-        keepalived_ver = result["keepalived"].get("version", "not installed")
-        console.print(f"[bold]Keepalived:[/bold] {keepalived_ver}")
+        ka_ver = result["keepalived"]["version"] or "not installed"
+        console.print(f"[bold]Keepalived:[/bold] {ka_ver}")
 
-    console.print()
+    if result.get("maintenance"):
+        console.print("[bold yellow]Maintenance mode: on[/bold yellow] (ober maintenance off)")
 
-    # Configuration
-    if result["config"]["exists"]:
-        console.print(f"[bold]Config:[/bold] {result['config']['path']}")
-        if result["config"].get("vips"):
-            console.print(f"[bold]VIPs:[/bold] {', '.join(result['config']['vips'])}")
-        if result["config"].get("backends"):
-            console.print(f"[bold]Backends:[/bold] {', '.join(result['config']['backends'])}")
+    cfg = result["config"]
+    if cfg["error"]:
+        console.print(f"[red]Config invalid:[/red] {cfg['path']}: {cfg['error']}")
+    elif cfg["exists"]:
+        console.print(f"[bold]Config:[/bold] {cfg['path']}")
     else:
         console.print("[yellow]Configuration not found. Run 'ober config' to configure.[/yellow]")
-
     console.print()
 
-    # BGP routes (only shown in BGP mode)
-    routes = result["bgp"].get("announced_routes", [])
-    if routes:
-        console.print(f"[bold]Announced Routes:[/bold] {', '.join(routes)}")
-    elif ha_name == "ober-bgp" and ha_service.is_active:
-        console.print("[bold]Announced Routes:[/bold] [dim]none[/dim]")
-
-    # VRRP state (only shown in keepalived mode)
-    vrrp_state = result["keepalived"].get("vrrp_state", {})
-    if vrrp_state:
+    if result["vips"]:
+        bgp = "bgp" in result
+        vt = Table(title="VIPs", show_header=True, header_style="bold")
+        cols = ["VIP", "Exposure", "Present"] + (["Announced"] if bgp else ["VRRP", "Owner"])
+        for col in cols:
+            vt.add_column(col)
+        for vip in result["vips"]:
+            row = [vip["address"], vip["exposure"], _fmt_bool(vip["present"])]
+            if bgp:
+                row.append(_fmt_bool(vip["announced"]))
+            else:
+                state = vip["vrrp_state"] or "unknown"
+                color = {"MASTER": "green", "BACKUP": "yellow", "FAULT": "red"}.get(state, "dim")
+                row += [f"[{color}]{state}[/{color}]", vip["expected_owner"]]
+            vt.add_row(*row)
+        console.print(vt)
         console.print()
-        console.print("[bold]VRRP State:[/bold]")
-        for instance, state in sorted(vrrp_state.items()):
-            state_color = "green" if state == "MASTER" else "yellow"
-            console.print(f"  {instance}: [{state_color}]{state}[/{state_color}]")
-    elif ha_name == "ober-ha" and ha_service.is_active:
-        console.print()
-        console.print("[bold]VRRP State:[/bold] [dim]unknown (check logs)[/dim]")
 
-    # Show systemd status output for verbose mode
+    backends = result["backends"]
+    if backends is None:
+        console.print("[bold]Backends:[/bold] [dim]unknown (runtime socket needs root)[/dim]")
+    for name, b in sorted((backends or {}).items()):
+        color = "green" if b["up"] == b["total"] else "red" if b["up"] == 0 else "yellow"
+        down = ", ".join(
+            f"{d['server']} {d['status']}" + (f" {_ago(d['since_s'])}" if d["since_s"] else "")
+            for d in b["down"]
+        )
+        line = f"[bold]{name}:[/bold] [{color}]{b['up']}/{b['total']} UP[/{color}]"
+        console.print(line + (f" ({down})" if down else ""))
+
+    cert = result.get("certificate")
+    if cert:
+        color = {"ok": "green", "warn": "yellow"}.get(cert["level"], "red")
+        console.print(f"[bold]Certificate:[/bold] [{color}]{cert['message']}[/{color}]")
+
     console.print()
+    check = result["check"]
+    color = {"OK": "green", "WARN": "yellow"}.get(check["level"], "red")
+    console.print(f"[{color}]{check['summary']}[/{color}]")
     console.print("[dim]Use 'ober logs' to view service logs[/dim]")

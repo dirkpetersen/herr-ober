@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Ober config command - interactive configuration wizard."""
 
+import dataclasses
 import hashlib
 import ipaddress
 import os
 import re
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +15,7 @@ import click
 import inquirer  # type: ignore[import-untyped]
 from rich.console import Console
 
+from ober.commands.maintenance import set_maintenance
 from ober.config import (
     BackendConfig,
     BGPConfig,
@@ -21,34 +24,11 @@ from ober.config import (
     OberConfig,
     SecurityConfig,
     VIPConfig,
+    exit_if_invalid,
 )
 from ober.system import SystemInfo
 
 console = Console()
-
-
-def _get_aws_credentials_path() -> Path:
-    """Get path to AWS credentials file, checking both current user and sudo user."""
-    # First try current user's home
-    current_creds = Path.home() / ".aws" / "credentials"
-    if current_creds.exists():
-        return current_creds
-
-    # If running via sudo, try the original user's home
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        import pwd
-
-        try:
-            user_info = pwd.getpwnam(sudo_user)
-            sudo_creds = Path(user_info.pw_dir) / ".aws" / "credentials"
-            if sudo_creds.exists():
-                return sudo_creds
-        except KeyError:
-            pass
-
-    # Fallback to standard location
-    return Path.home() / ".aws" / "credentials"
 
 
 def get_vip_owner(vip: str, nodes: list[str], local_hostname: str) -> tuple[str, int]:
@@ -84,6 +64,30 @@ def get_vrrp_router_id(vip: str) -> int:
     """
     # Use deterministic hash (md5) to ensure consistent results across nodes
     return (int(hashlib.md5(vip.encode()).hexdigest(), 16) % 255) + 1
+
+
+def vrrp_router_ids(vips: list[str]) -> dict[str, int]:
+    """Give each VIP a unique ``virtual_router_id`` (1-255), the same on all nodes.
+
+    Over the sorted VIPs, each one takes its md5 ID, or the next free ID on a collision.
+
+    Raises:
+        ValueError: More than 255 VIPs.
+    """
+    ids: dict[str, int] = {}
+    for vip in sorted(set(vips)):
+        if len(ids) == 255:
+            raise ValueError("keepalived supports at most 255 VIPs (virtual_router_id 1-255)")
+        vrid = get_vrrp_router_id(vip)
+        while vrid in ids.values():
+            vrid = vrid % 255 + 1
+        ids[vip] = vrid
+    return ids
+
+
+def keepalived_peers(config: OberConfig, local_ip: str) -> list[str]:
+    """Peers without duplicates and without this node (one ober.yaml can list all nodes)."""
+    return [p for p in dict.fromkeys(config.keepalived.peers) if p != local_ip]
 
 
 def _parse_hostlist(hostlist: str) -> list[str]:
@@ -167,14 +171,19 @@ def _detect_default_interface() -> str:
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Validate and preview changes without applying.",
+    help="Validate and preview changes without applying. Without a TTY, uses ober.yaml as is.",
+)
+@click.option(
+    "--non-interactive",
+    is_flag=True,
+    help="No prompts: validate the existing ober.yaml and render all configs from it.",
 )
 @click.pass_context
-def config(ctx: click.Context, dry_run: bool) -> None:
+def config(ctx: click.Context, dry_run: bool, non_interactive: bool) -> None:
     """Interactive configuration wizard.
 
     Configures BGP parameters, VIPs, backends, certificates, and other settings.
-    Can be run multiple times to update configuration (idempotent).
+    Every prompt is prefilled from ober.yaml, so pressing Enter keeps a value.
     """
     parent_ctx = ctx.obj
     system = parent_ctx.system if parent_ctx else SystemInfo()
@@ -185,64 +194,32 @@ def config(ctx: click.Context, dry_run: bool) -> None:
         console.print("Or use --dry-run to preview changes")
         ctx.exit(1)
 
-    # Load existing config or create new
+    # Load existing config or create new; never overwrite a file we cannot read correctly
     config = OberConfig.load()
+    exit_if_invalid(config, ctx)
 
-    console.print()
-    console.print("[bold]Ober Configuration Wizard[/bold]")
-    console.print()
-
-    # Auto-detect local IP
-    local_ip = system.get_local_ip() or ""
-
-    try:
-        # Section 0: HA Mode Selection
-        console.print("[bold cyan]1. HA Mode Selection[/bold cyan]")
-        ha_mode = _configure_ha_mode(config.ha_mode)
-        config.ha_mode = ha_mode
-
-        # Section 1: BGP or Keepalived Configuration (conditional)
-        console.print()
-        if ha_mode == "bgp":
-            console.print("[bold cyan]2. BGP Configuration[/bold cyan]")
-            bgp_config = _configure_bgp(config.bgp, local_ip)
-            config.bgp = bgp_config
-        else:
-            console.print("[bold cyan]2. Keepalived Configuration[/bold cyan]")
-            ka_config = _configure_keepalived(config.keepalived, local_ip, system.hostname)
-            config.keepalived = ka_config
-
-        # Section 3: VIP Configuration
-        console.print()
-        console.print("[bold cyan]3. VIP Configuration[/bold cyan]")
-        # Pass peers for validation if in keepalived mode
-        peers = ka_config.peers if ha_mode == "keepalived" else None
-        vips = _configure_vips(config.vips, ha_mode, peers)
-        config.vips, config.security = _configure_security(config.security, vips)
-
-        # Section 4: Backend Configuration
-        console.print()
-        console.print("[bold cyan]4. Backend Configuration[/bold cyan]")
-        backends = _configure_backends(config.backends)
-        config.backends = backends
-
-        # Section 5: Certificate Configuration
-        console.print()
-        console.print("[bold cyan]5. Certificate Configuration[/bold cyan]")
-        certs = _configure_certs(config.certs)
-        config.certs = certs
-
-        # Section 6: Additional Settings
-        console.print()
-        console.print("[bold cyan]6. Additional Settings[/bold cyan]")
-        config.log_retention_days, config.stats_port = _configure_additional(
-            config.log_retention_days, config.stats_port
-        )
-
-    except KeyboardInterrupt:
-        console.print()
-        console.print("[yellow]Configuration cancelled.[/yellow]")
-        ctx.exit(1)
+    interactive = not non_interactive and sys.stdin.isatty()
+    if not interactive:
+        if not dry_run and not non_interactive:
+            console.print("[red]Error:[/red] No terminal for the prompts.")
+            console.print("Use --non-interactive to render from ober.yaml, or --dry-run.")
+            ctx.exit(1)
+        if not config.config_path.exists():
+            console.print(f"[red]Error:[/red] {config.config_path} not found.")
+            ctx.exit(1)
+    else:
+        try:
+            _run_wizard(config, system)
+        except KeyboardInterrupt:
+            console.print()
+            console.print("[yellow]Configuration cancelled.[/yellow]")
+            ctx.exit(1)
+        errors, _ = config.validate()
+        if errors:
+            console.print("[red]Error:[/red] The configuration is not valid:")
+            for error in errors:
+                console.print(f"  - {error}")
+            ctx.exit(1)
 
     # Preview/Apply
     console.print()
@@ -251,31 +228,85 @@ def config(ctx: click.Context, dry_run: bool) -> None:
         _print_config_summary(config)
         console.print()
         console.print("[yellow]Dry run - no changes applied.[/yellow]")
-    else:
-        _print_config_summary(config)
-        console.print()
+        return
 
-        confirm = inquirer.confirm(
-            "Apply this configuration?",
-            default=True,
-        )
-        if confirm:
-            _apply_configuration(config)
-            console.print()
-            console.print("[bold green]Configuration applied![/bold green]")
-            console.print()
-            _print_config_files(config)
-            console.print()
-            console.print("Next steps:")
-            if config.ha_mode == "bgp":
-                console.print("  1. Run [bold]ober test[/bold] to validate BGP connectivity")
-            else:
-                console.print(
-                    "  1. Run [bold]ober test[/bold] to validate keepalived configuration"
-                )
-            console.print("  2. Run [bold]ober start[/bold] to start services")
-        else:
-            console.print("[yellow]Configuration not applied.[/yellow]")
+    _print_config_summary(config)
+    console.print()
+    if interactive and not inquirer.confirm("Apply this configuration?", default=True):
+        console.print("[yellow]Configuration not applied.[/yellow]")
+        return
+
+    try:
+        _apply_configuration(config)
+    except (ValueError, RuntimeError) as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        ctx.exit(1)
+    console.print()
+    console.print("[bold green]Configuration applied![/bold green]")
+    console.print()
+    _print_config_files(config)
+    console.print()
+    console.print("Next steps:")
+    if config.ha_mode == "bgp":
+        console.print("  1. Run [bold]ober test[/bold] to validate BGP connectivity")
+    else:
+        console.print("  1. Run [bold]ober test[/bold] to validate keepalived configuration")
+    console.print("  2. Run [bold]ober start[/bold] to start services")
+
+
+def _run_wizard(config: OberConfig, system: SystemInfo) -> None:
+    """Ask every question, prefilled from ``config``, and update ``config`` in place."""
+    console.print()
+    console.print("[bold]Ober Configuration Wizard[/bold]")
+    console.print()
+
+    console.print("[bold cyan]1. HA Mode Selection[/bold cyan]")
+    config.ha_mode = _configure_ha_mode(config.ha_mode)
+    config.local_ip = _configure_local_ip(config.local_ip, system.get_local_ip() or "")
+
+    console.print()
+    peers = None
+    if config.ha_mode == "bgp":
+        console.print("[bold cyan]2. BGP Configuration[/bold cyan]")
+        config.bgp = _configure_bgp(config.bgp)
+    else:
+        console.print("[bold cyan]2. Keepalived Configuration[/bold cyan]")
+        config.keepalived = _configure_keepalived(config.keepalived)
+        peers = config.keepalived.peers
+
+    console.print()
+    console.print("[bold cyan]3. VIP Configuration[/bold cyan]")
+    vips = _configure_vips(config.vips, config.ha_mode, peers)
+    config.vips, config.security = _configure_security(config.security, vips)
+
+    console.print()
+    console.print("[bold cyan]4. Backend Configuration[/bold cyan]")
+    config.backends = _configure_backends(config.backends)
+
+    console.print()
+    console.print("[bold cyan]5. Certificate Configuration[/bold cyan]")
+    config.certs = _configure_certs(config.certs, config.certs_path)
+
+    console.print()
+    console.print("[bold cyan]6. Additional Settings[/bold cyan]")
+    config.log_retention_days, config.stats_port = _configure_additional(
+        config.log_retention_days, config.stats_port
+    )
+
+
+def _ip_or_empty(text: str) -> bool:
+    """Prompt validator: an IP address or an empty answer."""
+    return not text.strip() or _validate_ip(text.strip())
+
+
+def _configure_local_ip(current: str, detected: str) -> str:
+    """Ask for this node's IP (keepalived unicast_src_ip, BGP router-id default)."""
+    answer = inquirer.text(
+        message=f"This node's IP for VRRP/BGP (empty = auto-detect, now {detected or 'unknown'})",
+        default=current,
+        validate=lambda _, x: _ip_or_empty(x),
+    )
+    return str(answer).strip()
 
 
 def _configure_ha_mode(current: str) -> str:
@@ -302,20 +333,19 @@ def _configure_ha_mode(current: str) -> str:
     return str(answers["ha_mode"])
 
 
-def _configure_keepalived(
-    current: KeepalivedConfig, _local_ip: str, _hostname: str
-) -> KeepalivedConfig:
+def _configure_keepalived(current: KeepalivedConfig) -> KeepalivedConfig:
     """Configure keepalived settings."""
     questions = [
         inquirer.Text(
             "peers",
             message="Peer node IPs (comma-separated, Slurm hostlist supported)",
-            default=",".join(current.peers) if current.peers else "",
+            default=",".join(current.peers),
+            validate=lambda _, x: all(_validate_ip(p) for p in _parse_hostlist(x)),
         ),
         inquirer.Text(
             "interface",
             message="Network interface for VIPs (leave empty for auto-detect)",
-            default=current.interface or "",
+            default=current.interface,
         ),
         inquirer.Confirm(
             "use_multicast",
@@ -325,8 +355,8 @@ def _configure_keepalived(
         inquirer.Text(
             "advert_int",
             message="Advertisement interval (seconds)",
-            default=str(current.advert_int or 1),
-            validate=lambda _, x: x.isdigit() and int(x) >= 1,
+            default=str(current.advert_int),
+            validate=lambda _, x: x.isdigit() and 1 <= int(x) <= 255,
         ),
     ]
 
@@ -335,8 +365,7 @@ def _configure_keepalived(
         raise KeyboardInterrupt
 
     # Parse peers (support Slurm hostlist format)
-    peers_str = answers["peers"]
-    peers = _parse_hostlist(peers_str)
+    peers = _parse_hostlist(answers["peers"])
 
     # Validate minimum peers
     if len(peers) < 1:
@@ -344,54 +373,53 @@ def _configure_keepalived(
             "[yellow]Warning:[/yellow] At least 2 total nodes (1 peer) recommended for HA"
         )
 
-    return KeepalivedConfig(
+    return dataclasses.replace(
+        current,
         peers=peers,
-        interface=answers["interface"],
+        interface=answers["interface"].strip(),
         use_multicast=answers["use_multicast"],
         advert_int=int(answers["advert_int"]),
     )
 
 
-def _configure_bgp(current: BGPConfig, local_ip: str) -> BGPConfig:
+def _configure_bgp(current: BGPConfig) -> BGPConfig:
     """Configure BGP settings."""
     questions = [
         inquirer.Text(
             "local_as",
             message="Local AS number",
-            default=str(current.local_as or 65001),
+            default=str(current.local_as),
             validate=lambda _, x: x.isdigit() and 1 <= int(x) <= 4294967295,
         ),
         inquirer.Text(
             "peer_as",
             message="Peer AS number (router)",
-            default=str(current.peer_as or 65000),
+            default=str(current.peer_as),
             validate=lambda _, x: x.isdigit() and 1 <= int(x) <= 4294967295,
         ),
         inquirer.Text(
             "neighbors",
             message="BGP neighbor IP(s) (comma-separated)",
-            default=",".join(current.neighbors) if current.neighbors else "",
+            default=",".join(current.neighbors),
+            validate=lambda _, x: all(_validate_ip(n.strip()) for n in x.split(",") if n.strip()),
         ),
         inquirer.Text(
             "router_id",
-            message="Router ID",
-            default=current.router_id or local_ip,
+            message="Router ID (empty = this node's IP)",
+            default=current.router_id,
+            validate=lambda _, x: _ip_or_empty(x),
         ),
         inquirer.Text(
             "local_address",
-            message="Local address",
-            default=current.local_address or local_ip,
+            message="Local address (empty = this node's IP)",
+            default=current.local_address,
+            validate=lambda _, x: _ip_or_empty(x),
         ),
         inquirer.Text(
             "hold_time",
-            message="Hold time (seconds)",
-            default=str(current.hold_time or 3),
-            validate=lambda _, x: x.isdigit() and int(x) >= 1,
-        ),
-        inquirer.Confirm(
-            "bfd_enabled",
-            message="Enable BFD (Bidirectional Forwarding Detection)?",
-            default=current.bfd_enabled,
+            message="Hold time (seconds, 0 or 3-65535)",
+            default=str(current.hold_time),
+            validate=lambda _, x: x.isdigit() and (int(x) == 0 or 3 <= int(x) <= 65535),
         ),
     ]
 
@@ -399,22 +427,14 @@ def _configure_bgp(current: BGPConfig, local_ip: str) -> BGPConfig:
     if not answers:
         raise KeyboardInterrupt
 
-    # Parse neighbors
-    neighbors = [n.strip() for n in answers["neighbors"].split(",") if n.strip()]
-
-    # Validate neighbors
-    for neighbor in neighbors:
-        if not _validate_ip(neighbor):
-            console.print(f"[yellow]Warning:[/yellow] Invalid IP: {neighbor}")
-
-    return BGPConfig(
+    return dataclasses.replace(
+        current,
         local_as=int(answers["local_as"]),
         peer_as=int(answers["peer_as"]),
-        neighbors=neighbors,
-        router_id=answers["router_id"],
-        local_address=answers["local_address"],
+        neighbors=[n.strip() for n in answers["neighbors"].split(",") if n.strip()],
+        router_id=answers["router_id"].strip(),
+        local_address=answers["local_address"].strip(),
         hold_time=int(answers["hold_time"]),
-        bfd_enabled=answers["bfd_enabled"],
     )
 
 
@@ -456,8 +476,10 @@ def _configure_vips(
                 console.print(f"[red]Error:[/red] {error_msg}")
                 continue
 
-            # Keep exposure/interface of a VIP that was already configured
-            previous = next((v for v in current if v.address == vip), None)
+            # Keep exposure/interface (and spelling) of a VIP that was already configured
+            previous = next(
+                (v for v in current if v.address == vip or f"{v.address}/32" == vip), None
+            )
             vips.append(previous or VIPConfig(address=vip))
 
     # Validate VIP count for keepalived mode
@@ -549,361 +571,75 @@ def _configure_security(
 
 
 def _configure_backends(current: list[BackendConfig]) -> list[BackendConfig]:
-    """Configure backend server settings."""
+    """Configure backend server settings. Existing groups are prefilled, never dropped."""
+    if current and inquirer.confirm("Keep the current backends unchanged?", default=True):
+        return current
+    if not current and not inquirer.confirm("Configure S3/Ceph RGW backends?", default=False):
+        return current
+
     backends: list[BackendConfig] = []
-
-    # Ask if user wants to configure backends
-    has_backends = inquirer.confirm(
-        "Configure S3/Ceph RGW backends?",
-        default=len(current) > 0,
-    )
-
-    if not has_backends:
-        return backends
-
-    # Configure backend groups
+    pending = list(current)
     while True:
-        backend_name = inquirer.text(
-            message="Backend group name",
-            default=f"s3_backend_{len(backends) + 1}",
-        )
+        base = pending.pop(0) if pending else BackendConfig(name=f"s3_backend_{len(backends) + 1}")
 
+        backend_name = inquirer.text(message="Backend group name", default=base.name)
         servers_str = inquirer.text(
             message="Backend servers (comma-separated, host:port)",
-            default="",
+            default=",".join(base.servers),
         )
-
-        servers = [s.strip() for s in servers_str.split(",") if s.strip()]
-
-        health_path = inquirer.text(
-            message="Health check path",
-            default="/",
-        )
-
+        health_path = inquirer.text(message="Health check path", default=base.health_check_path)
         health_interval = inquirer.text(
             message="Health check interval (ms)",
-            default="1000",
+            default=str(base.health_check_interval),
             validate=lambda _, x: x.isdigit() and int(x) >= 100,
         )
 
         backends.append(
-            BackendConfig(
-                name=backend_name,
-                servers=servers,
-                health_check_path=health_path,
+            dataclasses.replace(
+                base,
+                name=backend_name.strip(),
+                servers=[s.strip() for s in servers_str.split(",") if s.strip()],
+                health_check_path=health_path.strip(),
                 health_check_interval=int(health_interval),
             )
         )
 
-        add_more = inquirer.confirm(
-            "Add another backend group?",
-            default=False,
-        )
-        if not add_more:
+        # Only one backend group is supported, so existing groups are edited but none added
+        if not pending:
             break
 
     return backends
 
 
-def _configure_certs(current: CertConfig) -> CertConfig:
-    """Configure certificate settings."""
-    # Determine default based on current config
-    if current.path:
-        default_method = "file"
-    elif current.route53_enabled:
-        default_method = "route53"
-    elif current.acme_enabled:
-        default_method = "acme"
-    else:
-        default_method = "skip"
+def _configure_certs(current: CertConfig, certs_dir: Path) -> CertConfig:
+    """Configure certificate settings.
 
-    questions = [
-        inquirer.List(
-            "cert_method",
-            message="Certificate method",
-            choices=[
-                ("Provide certificate file path", "file"),
-                ("Let's Encrypt via Route53 DNS-01", "route53"),
-                ("Skip certificate configuration", "skip"),
-            ],
-            default=default_method,
-        ),
-    ]
-
-    answers = inquirer.prompt(questions)
+    Let's Encrypt via Route53 is not offered: no ACME client exists yet, and the option
+    produced a node without an S3 frontend.
+    """
+    answers = inquirer.prompt(
+        [
+            inquirer.List(
+                "cert_method",
+                message="Certificate method",
+                choices=[
+                    ("Provide certificate file path", "file"),
+                    ("No certificate (the S3 frontend is not generated)", "none"),
+                ],
+                default="file" if current.path else "none",
+            ),
+        ]
+    )
     if not answers:
         raise KeyboardInterrupt
 
-    if answers["cert_method"] == "file":
-        # Get default cert path from config
-        from ober.config import OberConfig
-
-        config = OberConfig.load()
-        default_cert_path = str(config.certs_path / "server.pem")
-
-        cert_path = inquirer.text(
-            message="Certificate file path (PEM format, must include private key)",
-            default=current.path or default_cert_path,
-        )
-        return CertConfig(path=cert_path)
-
-    elif answers["cert_method"] == "route53":
-        # Ensure boto3 is installed
-        if not _ensure_boto3_installed():
-            console.print("[red]Error:[/red] Could not install boto3. Please install manually:")
-            console.print("  pip install boto3")
-            return CertConfig()
-        return _configure_route53_acme(current)
-
-    return CertConfig()
-
-
-def _ensure_boto3_installed() -> bool:
-    """Ensure boto3 is installed, install if needed."""
-    import subprocess
-    import sys
-
-    # Check if boto3 is already available
-    try:
-        import boto3  # type: ignore[import-untyped] # noqa: F401
-
-        console.print("[green]boto3 already installed[/green]")
-        return True
-    except ImportError:
-        pass
-
-    # Try to install boto3
-    console.print("[yellow]Installing boto3...[/yellow]")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "boto3"],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode == 0:
-            console.print("[green]boto3 installed successfully[/green]")
-
-            # Verify installation by importing
-            try:
-                import boto3 as _boto3  # type: ignore[import-untyped] # noqa: F401
-
-                console.print("[green]boto3 import verified[/green]")
-                return True
-            except ImportError as e:
-                console.print(f"[red]boto3 installed but import failed: {e}[/red]")
-                return False
-        else:
-            console.print("[red]Failed to install boto3[/red]")
-            console.print(
-                f"[yellow]Command:[/yellow] {sys.executable} -m pip install --upgrade boto3"
-            )
-            if result.stdout:
-                console.print("[yellow]stdout:[/yellow]")
-                console.print(result.stdout)
-            if result.stderr:
-                console.print("[yellow]stderr:[/yellow]")
-                console.print(result.stderr)
-            return False
-    except Exception as e:
-        console.print(f"[red]Error installing boto3: {e}[/red]")
-        return False
-
-
-def _configure_route53_acme(current: CertConfig) -> CertConfig:
-    """Configure Let's Encrypt with Route53 DNS-01 challenge."""
-    # Prompt for AWS profile
-    aws_profile = inquirer.text(
-        message="AWS profile name",
-        default=current.route53_profile or "default",
+    if answers["cert_method"] == "none":
+        return dataclasses.replace(current, path="")
+    cert_path = inquirer.text(
+        message="Certificate file path (PEM format, must include private key)",
+        default=current.path or str(certs_dir / "server.pem"),
     )
-
-    # Try to list hosted zones with profile
-    hosted_zones = _list_route53_hosted_zones(aws_profile)
-
-    # If profile failed, prompt for manual credential entry
-    if not hosted_zones:
-        console.print("[yellow]Warning:[/yellow] Could not find AWS profile or credentials.")
-        use_manual = inquirer.confirm(
-            "Enter credentials manually?",
-            default=True,
-        )
-
-        if use_manual:
-            aws_access_key = inquirer.text(
-                message="AWS Access Key ID",
-            )
-            aws_secret_key = inquirer.password(
-                message="AWS Secret Access Key",
-            )
-            aws_region = inquirer.text(
-                message="AWS Region (e.g., us-east-1)",
-                default="us-east-1",
-            )
-
-            # Try to list zones with manual credentials
-            hosted_zones = _list_route53_hosted_zones_with_creds(
-                aws_access_key, aws_secret_key, aws_region
-            )
-
-            if not hosted_zones:
-                console.print("[red]Error:[/red] Could not authenticate with provided credentials.")
-
-    # Now select/enter zone and domain
-    if hosted_zones:
-        # Build choices from hosted zones
-        zone_choices = [(f"{z['Name']} ({z['Id']})", z["Id"]) for z in hosted_zones]
-
-        if len(hosted_zones) == 1:
-            # Only one zone, use it directly
-            hosted_zone_id = hosted_zones[0]["Id"]
-            zone_name = hosted_zones[0]["Name"].rstrip(".")
-            console.print(f"Using hosted zone: {zone_name} ({hosted_zone_id})")
-        else:
-            # Multiple zones, prompt user to select
-            selected = inquirer.list_input(
-                message="Select Route53 hosted zone",
-                choices=zone_choices,
-                default=current.route53_hosted_zone_id if current.route53_hosted_zone_id else None,
-            )
-            hosted_zone_id = selected
-
-        # Get the domain name from selected zone
-        selected_zone = next((z for z in hosted_zones if z["Id"] == hosted_zone_id), None)
-        zone_name = selected_zone["Name"].rstrip(".") if selected_zone else ""
-
-        domain = inquirer.text(
-            message="Domain name for certificate",
-            default=current.acme_domain or zone_name,
-        )
-    else:
-        # No zones found - get manual input
-        hosted_zone_id = inquirer.text(
-            message="Route53 Hosted Zone ID (e.g., Z1234567890ABC)",
-            default=current.route53_hosted_zone_id,
-        )
-        domain = inquirer.text(
-            message="Domain name for certificate",
-            default=current.acme_domain,
-        )
-
-    acme_email = inquirer.text(
-        message="Email for Let's Encrypt notifications",
-        default=current.acme_email,
-    )
-
-    return CertConfig(
-        acme_enabled=True,
-        acme_email=acme_email,
-        acme_domain=domain,
-        route53_enabled=True,
-        route53_profile=aws_profile,
-        route53_hosted_zone_id=hosted_zone_id,
-    )
-
-
-def _list_route53_hosted_zones(profile: str) -> list[dict[str, str]]:
-    """List Route53 hosted zones using AWS CLI or boto3."""
-    import subprocess
-
-    # Try using AWS CLI first (doesn't require boto3 installed)
-    try:
-        result = subprocess.run(
-            ["aws", "route53", "list-hosted-zones", "--profile", profile, "--output", "json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            import json
-
-            data = json.loads(result.stdout)
-            zones = []
-            for zone in data.get("HostedZones", []):
-                # Extract just the zone ID (remove /hostedzone/ prefix)
-                zone_id = zone["Id"].replace("/hostedzone/", "")
-                zones.append(
-                    {
-                        "Id": zone_id,
-                        "Name": zone["Name"],
-                    }
-                )
-            console.print(f"[green]Found {len(zones)} hosted zone(s) via AWS CLI[/green]")
-            return zones
-        else:
-            console.print(f"[yellow]AWS CLI failed:[/yellow] {result.stderr}")
-    except FileNotFoundError:
-        console.print("[yellow]AWS CLI not found in PATH[/yellow]")
-    except subprocess.TimeoutExpired:
-        console.print("[yellow]AWS CLI timeout[/yellow]")
-    except Exception as e:
-        console.print(f"[yellow]AWS CLI error: {e}[/yellow]")
-
-    # Fallback: try boto3 if available
-    console.print("[yellow]Trying boto3...[/yellow]")
-    try:
-        import boto3  # type: ignore[import-untyped]
-        from botocore.session import Session as BotocoreSession  # type: ignore[import-untyped]
-
-        # Use explicit credentials file path to handle sudo scenarios
-        creds_file = _get_aws_credentials_path()
-        console.print(f"[yellow]Using credentials from: {creds_file}[/yellow]")
-
-        # Create botocore session pointing to the right credentials file
-        botocore_session = BotocoreSession()
-        botocore_session.set_config_variable("credentials_file", str(creds_file))
-
-        session = boto3.Session(profile_name=profile, botocore_session=botocore_session)
-        client = session.client("route53")
-        response = client.list_hosted_zones()
-        zones = []
-        for zone in response.get("HostedZones", []):
-            zone_id = zone["Id"].replace("/hostedzone/", "")
-            zones.append(
-                {
-                    "Id": zone_id,
-                    "Name": zone["Name"],
-                }
-            )
-        console.print(f"[green]Found {len(zones)} hosted zone(s) via boto3[/green]")
-        return zones
-    except Exception as e:
-        console.print(f"[yellow]boto3 error: {e}[/yellow]")
-
-    console.print("[yellow]Warning:[/yellow] Could not list Route53 hosted zones.")
-    console.print("[yellow]You can enter the hosted zone ID manually.[/yellow]")
-    return []
-
-
-def _list_route53_hosted_zones_with_creds(
-    access_key: str, secret_key: str, region: str
-) -> list[dict[str, str]]:
-    """List Route53 hosted zones using explicit AWS credentials."""
-    try:
-        import boto3  # type: ignore[import-untyped]
-
-        session = boto3.Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region,
-        )
-        client = session.client("route53")
-        response = client.list_hosted_zones()
-        zones = []
-        for zone in response.get("HostedZones", []):
-            zone_id = zone["Id"].replace("/hostedzone/", "")
-            zones.append(
-                {
-                    "Id": zone_id,
-                    "Name": zone["Name"],
-                }
-            )
-        console.print(f"[green]Found {len(zones)} hosted zone(s) with manual credentials[/green]")
-        return zones
-    except Exception as e:
-        console.print(f"[yellow]boto3 error with manual credentials: {e}[/yellow]")
-
-    return []
+    return dataclasses.replace(current, path=str(cert_path).strip())
 
 
 def _print_config_files(config: OberConfig) -> None:
@@ -974,8 +710,8 @@ def _validate_vip(vip: str) -> tuple[bool, str]:
         ip_part, cidr_part = vip.rsplit("/", 1)
         try:
             cidr = int(cidr_part)
-            if not (0 <= cidr <= 32):
-                return False, f"Invalid CIDR prefix: /{cidr_part} (must be 0-32)"
+            if cidr != 32:
+                return False, f"Invalid CIDR prefix: /{cidr_part} (must be a single address (/32))"
         except ValueError:
             return False, f"Invalid CIDR prefix: /{cidr_part}"
     else:
@@ -1005,7 +741,6 @@ def _print_config_summary(config: OberConfig) -> None:
         console.print(f"  Router ID: {config.bgp.router_id}")
         console.print(f"  Local Address: {config.bgp.local_address}")
         console.print(f"  Hold Time: {config.bgp.hold_time}s")
-        console.print(f"  BFD: {'enabled' if config.bgp.bfd_enabled else 'disabled'}")
     else:
         console.print("[cyan]Keepalived:[/cyan]")
         console.print(f"  Peers: {', '.join(config.keepalived.peers) or 'none'}")
@@ -1049,30 +784,28 @@ def _print_config_summary(config: OberConfig) -> None:
                 console.print(f"    - {server}")
         if len(config.backends) > 1:
             console.print(
-                f"  [yellow]Note: only the first backend ({config.backends[0].name}) "
-                "receives S3 traffic.[/yellow]"
+                "  [bold red]Error: only one backend group is supported; apply will fail."
+                "[/bold red]"
             )
     else:
         console.print("  [dim]none configured[/dim]")
         console.print(
-            "  [bold yellow]Warning: no backends configured; the S3 frontend will NOT be "
-            "generated and HAProxy will serve no S3 traffic.[/bold yellow]"
+            "  [bold red]Error: no backends configured; no S3 frontend can be generated, "
+            "so apply will fail.[/bold red]"
         )
 
     console.print()
     console.print("[cyan]Certificates:[/cyan]")
     if config.certs.path:
         console.print(f"  Path: {config.certs.path}")
-    elif config.certs.route53_enabled:
-        console.print("  Method: Let's Encrypt (Route53 DNS-01)")
-        console.print(f"  Domain: {config.certs.acme_domain}")
-        console.print(f"  AWS Profile: {config.certs.route53_profile}")
-        console.print(f"  Hosted Zone: {config.certs.route53_hosted_zone_id}")
-        console.print(f"  Email: {config.certs.acme_email}")
-    elif config.certs.acme_enabled:
-        console.print(f"  ACME: enabled ({config.certs.acme_email})")
     else:
         console.print("  [dim]not configured[/dim]")
+        if config.certs.route53_enabled or config.certs.acme_enabled:
+            console.print("  [yellow]Note: Let's Encrypt/ACME is not implemented yet.[/yellow]")
+        console.print(
+            "  [bold red]Error: no certificate path; no S3 frontend can be generated, "
+            "so apply will fail.[/bold red]"
+        )
 
     console.print()
     console.print("[cyan]Other:[/cyan]")
@@ -1104,10 +837,10 @@ def _apply_configuration(
     # Generate BGP or Keepalived config based on ha_mode
     if config.ha_mode == "bgp":
         _generate_exabgp_config(config)
-        # Configure VIP interface (only for BGP mode - keepalived manages VIPs itself)
-        _configure_vip_interface(config)
     else:
         _generate_keepalived_config(config)
+    # BGP mode puts the VIPs on lo-vip; keepalived mode removes it (keepalived adds the VIPs)
+    _configure_vip_interface(config)
 
     if os.geteuid() == 0 if is_root is None else is_root:
         _ensure_runtime_dir(config, systemd_dir, run_dir)
@@ -1154,9 +887,24 @@ _LOG_VARS_INIT = (
 )
 
 
+def _write_if_changed(path: Path, text: str) -> None:
+    """Write only a changed file, so a no-op apply does not look like a pending reload."""
+    try:
+        if path.read_text() == text:
+            return
+    except OSError:
+        pass
+    path.write_text(text)
+
+
 def _vip_host(address: str) -> str:
     """Return the bare IP of a VIP in CIDR notation."""
     return address.split("/")[0]
+
+
+def _vip_cidr(address: str) -> str:
+    """Return a VIP as ``ip/32`` (netplan rejects a bare address)."""
+    return f"{_vip_host(address)}/32"
 
 
 def _validated_hostnames(names: list[str]) -> list[str]:
@@ -1457,7 +1205,7 @@ def _write_security_lists(config: OberConfig) -> None:
         (config.trusted_path, config.security.trusted_networks, "trusted network"),
         (_internal_path(config), config.security.internal_networks, "internal network"),
     ):
-        path.write_text("".join(f"{line}\n" for line in _valid_networks(entries, label)))
+        _write_if_changed(path, "".join(f"{line}\n" for line in _valid_networks(entries, label)))
     if not config.blocklist_path.exists():
         config.blocklist_path.write_text("")
 
@@ -1481,9 +1229,36 @@ def _generate_haproxy_config(
     else:
         log_line = "    log stdout format raw local0 info"
     hostnames = _validated_hostnames(sec.s3_hostnames)
+    missing = [
+        name
+        for name, value in (
+            ("VIPs", config.vips),
+            ("certificate path", config.certs.path),
+            ("backends", config.backends),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(f"No S3 frontend can be generated: missing {', '.join(missing)}")
+    if len(config.backends) > 1:
+        # shortcut: one backend group only; add vip.backend when several clusters are needed
+        raise ValueError(
+            "Only one backend group is supported, found "
+            + ", ".join(b.name for b in config.backends)
+        )
+    backend_name = config.backends[0].name
+    # health.py and the keepalived check poll 127.0.0.1, so it is always bound
+    stats_addrs = ["127.0.0.1"] + [a for a in config.stats_bind if a != "127.0.0.1"]
+    for addr in stats_addrs:
+        try:
+            ipaddress.ip_address(addr)
+        except ValueError as exc:
+            raise ValueError(f"Invalid stats_bind address: {addr!r}") from exc
 
     internet = [v for v in config.vips if v.exposure == "internet"]
     internal = [v for v in config.vips if v.exposure != "internet"]
+    if internet and any(ipaddress.ip_address(a).is_unspecified for a in stats_addrs):
+        raise ValueError("stats_bind must not be 0.0.0.0 or :: when a VIP has exposure internet")
     # stats/metrics/health have no auth: never answer on an Internet-exposed VIP address
     stats_guard = (
         [
@@ -1525,29 +1300,27 @@ def _generate_haproxy_config(
         "",
         f"# Stats endpoint on port {config.stats_port}",
         "frontend stats",
-        f"    bind *:{config.stats_port}",
+        "    bind " + ",".join(f"{a}:{config.stats_port}" for a in stats_addrs),
         "    no log",
         *stats_guard,
         "    stats enable",
         "    stats uri /stats",
         "    stats refresh 10s",
-        "    http-request use-service prometheus-exporter if { path /metrics }",
         "    monitor-uri /health",
+        # /health fails when no backend server can serve S3
+        f"    monitor fail if {{ nbsrv({backend_name}) lt 1 }}",
+        "    http-request use-service prometheus-exporter if { path /metrics }",
         "",
     ]
 
-    # S3 frontends (only emitted when a backend exists to route to, since HAProxy
-    # refuses to start if default_backend references a missing backend section)
-    if config.vips and config.certs.path and config.backends:
-        backend_name = config.backends[0].name
-        if internal:
-            hosts = [_vip_host(v.address) for v in internal]
-            binds = " ".join(f"{h}:{https_port}" for h in hosts)
-            cfg_lines += _s3_frontend_internal(config, binds, backend_name, hostnames, hosts)
-        if internet:
-            hosts = [_vip_host(v.address) for v in internet]
-            binds = " ".join(f"{h}:{https_port}" for h in hosts)
-            cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames, hosts)
+    if internal:
+        hosts = [_vip_host(v.address) for v in internal]
+        binds = ",".join(f"{h}:{https_port}" for h in hosts)
+        cfg_lines += _s3_frontend_internal(config, binds, backend_name, hostnames, hosts)
+    if internet:
+        hosts = [_vip_host(v.address) for v in internet]
+        binds = ",".join(f"{h}:{https_port}" for h in hosts)
+        cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames, hosts)
 
     # Backends
     for backend in config.backends:
@@ -1565,7 +1338,7 @@ def _generate_haproxy_config(
         cfg_lines.append("")
 
     config.haproxy_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.haproxy_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.haproxy_config_path, "\n".join(cfg_lines))
 
 
 def _generate_exabgp_config(config: OberConfig) -> None:
@@ -1585,8 +1358,9 @@ def _generate_exabgp_config(config: OberConfig) -> None:
         cfg_lines.extend(
             [
                 f"neighbor {neighbor} {{",
-                f"    router-id {config.bgp.router_id};",
-                f"    local-address {config.bgp.local_address};",
+                # 3.8: explicit values, else the node's local_ip override, else auto-detect
+                f"    router-id {config.bgp.router_id or config.node_ip()};",
+                f"    local-address {config.bgp.local_address or config.node_ip()};",
                 f"    local-as {config.bgp.local_as};",
                 f"    peer-as {config.bgp.peer_as};",
                 f"    hold-time {config.bgp.hold_time};",
@@ -1595,21 +1369,7 @@ def _generate_exabgp_config(config: OberConfig) -> None:
                 "        ipv4 unicast;",
                 "    }",
                 "",
-            ]
-        )
-
-        if config.bgp.bfd_enabled:
-            cfg_lines.extend(
-                [
-                    "    bfd {",
-                    "        enabled;",
-                    "    }",
-                    "",
-                ]
-            )
-
-        cfg_lines.extend(
-            [
+                # ExaBGP has no BFD: bgp.bfd_enabled is ignored, failure detection is hold-time
                 "    api {",
                 "        processes [ announce-routes ];",
                 "    }",
@@ -1619,7 +1379,7 @@ def _generate_exabgp_config(config: OberConfig) -> None:
         )
 
     config.bgp_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.bgp_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.bgp_config_path, "\n".join(cfg_lines))
 
 
 def _generate_keepalived_config(config: OberConfig) -> None:
@@ -1627,7 +1387,8 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     from ober.system import SystemInfo
 
     system = SystemInfo()
-    local_ip = system.get_local_ip() or "0.0.0.0"
+    # 3.8: the local_ip override wins over the default-route source address
+    local_ip = config.local_ip or system.get_local_ip() or "0.0.0.0"
     hostname = system.hostname
 
     # Detect interface if not specified
@@ -1635,8 +1396,9 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     if not interface:
         interface = _detect_default_interface()
 
-    # Build all nodes list (self + peers)
-    all_nodes = [local_ip] + config.keepalived.peers
+    # Build all nodes list (self + peers); the same list on every node gives one owner per VIP
+    peers = keepalived_peers(config, local_ip)
+    all_nodes = [local_ip, *peers]
 
     cfg_lines = [
         "# Herr Ober Keepalived Configuration",
@@ -1646,24 +1408,58 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         f"    router_id ober_{hostname}",
         "    vrrp_skip_check_adv_addr",
         "    vrrp_garp_master_delay 1",
+        # keepalived -t fails on track scripts without script security
+        "    enable_script_security",
+        "    script_user root",
         "}",
         "",
-        "# Health check script",
+        "# Health check script (Python entry point, exit 0 = healthy)",
         "vrrp_script chk_haproxy {",
-        f'    script "/usr/bin/curl -sf http://127.0.0.1:{config.stats_port}/health"',
+        f'    script "{sys.executable} -m ober.commands.health --once --timeout 1'
+        f' --port {config.stats_port}"',
         "    interval 2",
+        "    timeout 3",
         "    weight -50  # Reduce priority by 50 if health check fails",
         "    fall 2      # Require 2 failures before marking down",
         "    rise 2      # Require 2 successes before marking up",
         "}",
         "",
+        "# Maintenance flag (ober maintenance on|off): 1 x -100 drops priority below all peers",
+        "track_file ober_maintenance {",
+        f'    file "{config.maintenance_path}"',
+        "    weight -100",
+        "}",
+        "",
     ]
+    track_scripts = ["chk_haproxy"]
+    if config.keepalived.gateway_check:
+        gateway = str(ipaddress.ip_address(config.keepalived.gateway_check))
+        track_scripts.append("chk_gateway")
+        cfg_lines.extend(
+            [
+                "# Gateway reachability: an isolated node goes to FAULT and releases its VIPs",
+                "vrrp_script chk_gateway {",
+                f'    script "/usr/bin/ping -c 1 -W 1 {gateway}"',
+                "    interval 2",
+                "    timeout 2",
+                "    weight 0  # 0 = FAULT state on failure",
+                "    fall 3",
+                "    rise 2",
+                "}",
+                "",
+            ]
+        )
+    notify = (
+        f"{sys.executable} -m ober.commands.maintenance vrrp-notify"
+        f" --state-file {config.vrrp_state_path}"
+    )
 
     # Generate one vrrp_instance per VIP
+    router_ids = vrrp_router_ids([_vip_host(v.address) for v in config.vips])
     for idx, vip_config in enumerate(config.vips):
-        vip = vip_config.address.split("/")[0]  # Strip CIDR notation
+        vip = _vip_host(vip_config.address)
         owner, priority = get_vip_owner(vip, all_nodes, local_ip)
-        router_id = get_vrrp_router_id(vip)
+        router_id = router_ids[vip]
 
         cfg_lines.extend(
             [
@@ -1690,7 +1486,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                     "    unicast_peer {",
                 ]
             )
-            for peer in config.keepalived.peers:
+            for peer in peers:
                 cfg_lines.append(f"        {peer}")
             cfg_lines.extend(
                 [
@@ -1701,15 +1497,17 @@ def _generate_keepalived_config(config: OberConfig) -> None:
 
         cfg_lines.extend(
             [
-                "    # Track interface - demote priority if interface goes down",
-                "    track_interface {",
-                f"        {interface} weight -50",
-                "    }",
-                "",
                 "    # Health check - demote priority if HAProxy is down",
                 "    track_script {",
-                "        chk_haproxy",
+                *(f"        {name}" for name in track_scripts),
                 "    }",
+                "",
+                "    track_file {",
+                "        ober_maintenance",
+                "    }",
+                "",
+                "    # Write VRRP state for ober status",
+                f'    notify "{notify}"',
                 "",
                 "    virtual_ipaddress {",
                 f"        {vip}/32 dev {interface}",
@@ -1720,67 +1518,112 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         )
 
     config.keepalived_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.keepalived_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.keepalived_config_path, "\n".join(cfg_lines))
+    # keepalived ignores a track_file that does not exist when it parses the config
+    if not config.maintenance_path.exists():
+        set_maintenance(config.maintenance_path, False)
 
 
-def _configure_vip_interface(config: OberConfig) -> None:
-    """Configure the VIP dummy interface."""
-    from ober.system import OSFamily, SystemInfo
+def _netplan_vip_yaml(config: OberConfig) -> str:
+    """Return the netplan file that puts all VIPs on the ``lo-vip`` dummy device."""
+    import yaml
+
+    netplan_cfg = {
+        "network": {
+            "version": 2,
+            "dummy-devices": {"lo-vip": {"addresses": [_vip_cidr(v.address) for v in config.vips]}},
+        }
+    }
+    return yaml.dump(netplan_cfg, default_flow_style=False)
+
+
+def _networkd_vip_files(config: OberConfig) -> dict[str, str]:
+    """Return the systemd-networkd files (name -> text) for the ``lo-vip`` dummy device.
+
+    The ``.network`` file matches only ``lo-vip``, so networkd does not touch other links
+    (on Amazon Linux, amazon-ec2-net-utils writes the configs for the ENIs).
+    """
+    addresses = "".join(f"Address={_vip_cidr(v.address)}\n" for v in config.vips)
+    return {
+        "60-lo-vip.netdev": "[NetDev]\nName=lo-vip\nKind=dummy\n",
+        "60-lo-vip.network": (
+            "[Match]\nName=lo-vip\n\n"
+            "[Link]\nRequiredForOnline=no\n\n"
+            f"[Network]\nLinkLocalAddressing=no\n{addresses}"
+        ),
+    }
+
+
+def _configure_vip_interface(
+    config: OberConfig,
+    netplan_path: Path = Path("/etc/netplan/60-vip.yaml"),
+    networkd_dir: Path = Path("/etc/systemd/network"),
+) -> None:
+    """Configure the VIP dummy interface.
+
+    Debian uses netplan and RHEL uses nmcli. When that tool is missing (Amazon Linux has
+    no NetworkManager), systemd-networkd is used.
+
+    Raises:
+        RuntimeError: If no tool is found or a command fails.
+    """
+    from ober.system import OSFamily, SystemInfo, check_command_exists, run_command
 
     system = SystemInfo()
 
-    if not config.vips:
+    if system.os_family == OSFamily.UNKNOWN:
+        return
+    if config.ha_mode != "bgp" or not config.vips:
+        # A lo-vip left from BGP mode keeps every VIP on every node and breaks VRRP failover
+        from ober.commands.uninstall import _remove_vip_interface
+
+        _remove_vip_interface(system, networkd_dir, netplan_path)
         return
 
-    if system.os_family == OSFamily.DEBIAN:
-        # Use netplan
-        netplan_cfg = {
-            "network": {
-                "version": 2,
-                "tunnels": {
-                    "lo-vip": {
-                        "mode": "dummy",
-                        "addresses": [v.address for v in config.vips],
-                    }
-                },
-            }
-        }
-        import yaml
-
-        netplan_path = Path("/etc/netplan/60-vip.yaml")
-        netplan_path.write_text(yaml.dump(netplan_cfg, default_flow_style=False))
-
-        # Apply netplan
-        from ober.system import run_command
-
-        run_command(["netplan", "apply"], check=False)
-
-    elif system.os_family == OSFamily.RHEL:
-        # Use nmcli
-        from ober.system import run_command
-
-        # Create dummy interface
-        run_command(
-            [
-                "nmcli",
-                "connection",
-                "add",
-                "type",
-                "dummy",
-                "ifname",
-                "lo-vip",
-                "con-name",
-                "lo-vip",
-            ],
-            check=False,
-        )
-
-        # Add IP addresses
-        for vip in config.vips:
-            run_command(
-                ["nmcli", "connection", "modify", "lo-vip", "+ipv4.addresses", vip.address],
-                check=False,
+    tool = "netplan" if system.os_family == OSFamily.DEBIAN else "nmcli"
+    if not check_command_exists(tool):
+        if not check_command_exists("networkctl"):
+            raise RuntimeError(
+                f"{tool} or networkctl not found: one is needed to put the VIPs on lo-vip"
             )
+        tool = "networkctl"
 
-        # Bring up the interface
-        run_command(["nmcli", "connection", "up", "lo-vip"], check=False)
+    try:
+        if tool == "netplan":
+            netplan_path.write_text(_netplan_vip_yaml(config))
+            netplan_path.chmod(0o600)  # netplan warns about world-readable files
+            run_command(["netplan", "apply"])
+        elif tool == "nmcli":
+            exists = run_command(["nmcli", "connection", "show", "lo-vip"], check=False)
+            if exists.returncode != 0:
+                run_command(
+                    ["nmcli", "connection", "add", "type", "dummy"]
+                    + ["ifname", "lo-vip", "con-name", "lo-vip"]
+                )
+            # Set the full list, so removed VIPs go away and nothing is added twice
+            addresses = ",".join(_vip_cidr(v.address) for v in config.vips)
+            run_command(
+                ["nmcli", "connection", "modify", "lo-vip", "ipv4.method", "manual"]
+                + ["ipv4.addresses", addresses]
+            )
+            run_command(["nmcli", "connection", "up", "lo-vip"])
+        else:
+            networkd_dir.mkdir(parents=True, exist_ok=True)
+            for name, text in _networkd_vip_files(config).items():
+                (networkd_dir / name).write_text(text)
+                (networkd_dir / name).chmod(0o644)
+            active = run_command(
+                ["systemctl", "is-active", "--quiet", "systemd-networkd"], check=False
+            )
+            run_command(["systemctl", "enable", "--now", "systemd-networkd"])
+            if active.returncode == 0:
+                # reload creates a new netdev and reapplies changed .network files
+                run_command(["networkctl", "reload"])
+            else:
+                # enable pulls in wait-online (Also=); with only lo-vip it waits ~2 min at boot
+                run_command(
+                    ["systemctl", "disable", "systemd-networkd-wait-online.service"], check=False
+                )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(f"VIP interface setup failed: {' '.join(exc.cmd)}: {detail}") from exc

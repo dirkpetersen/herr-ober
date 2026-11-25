@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herr-ober"
-version = "0.3.1"
+version = "0.4.0"
 description = "High-performance S3 ingress controller for Ceph RGW clusters using HAProxy and ExaBGP"
 readme = "README.md"
 license = {text = "MIT"}
@@ -30,13 +30,16 @@ dependencies = [
     "click>=8.1.0",
     "inquirer>=3.1.0",
     "rich>=13.0.0",
-    "python-hostlist>=1.23.0",
     "requests>=2.31.0",
     "pyyaml>=6.0",
     "watchdog>=3.0.0",
 ]
 
 [project.optional-dependencies]
+# ExaBGP for ha_mode: bgp; the tested range (keep in sync with EXABGP_SPEC in bootstrap.py)
+bgp = [
+    "exabgp>=4.2,<5",
+]
 route53 = [
     "boto3>=1.34.0",
 ]

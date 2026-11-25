@@ -4,6 +4,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from ober.config import (
     BackendConfig,
     BGPConfig,
@@ -310,7 +312,262 @@ bgp:
         config = OberConfig(install_path=Path("/custom"))
         assert config.certs_path == Path("/custom/etc/certs")
 
-    def test_whitelist_path(self) -> None:
-        """Test whitelist_path property."""
-        config = OberConfig(install_path=Path("/custom"))
-        assert config.whitelist_path == Path("/custom/etc/haproxy/whitelist.lst")
+
+class TestValidate:
+    """Schema validation of ober.yaml (load never raises, validate reports all)."""
+
+    def _load(self, tmp_path: Path, text: str) -> OberConfig:
+        path = tmp_path / "ober.yaml"
+        path.write_text(text)
+        return OberConfig.load(path)
+
+    def test_defaults_are_valid(self) -> None:
+        assert OberConfig().validate() == ([], [])
+
+    def test_syntax_error_is_one_clear_error(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "ha_mode: bgp\nbgp:\n  local_as: 1\n bad: [\n")
+        errors, _ = config.validate()
+        assert len(errors) == 1
+        assert "YAML syntax error at line" in errors[0]
+        assert config.ha_mode == "bgp"  # defaults stay usable for stop/status/logs
+
+    def test_duplicate_key_is_an_error(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "bgp: {neighbors: [10.0.0.1]}\nstats_port: 1\nbgp: {}\n")
+        errors, _ = config.validate()
+        assert len(errors) == 1
+        assert "line 3" in errors[0] and "duplicate key 'bgp'" in errors[0]
+
+    def test_reports_all_problems(self, tmp_path: Path) -> None:
+        config = self._load(
+            tmp_path,
+            "ha_mode: bgpp\n"
+            "stats_port: 70000\n"
+            "bgp: {local_as: abc, neighbors: [10.0.0.300]}\n"
+            "vips: [{address: 10.0.0.1/40, exposure: public}]\n"
+            "backends: [{name: rgw, servers: '10.1.0.1:7480'}]\n"
+            "security: {allowlist: [not-a-net]}\n",
+        )
+        errors, _ = config.validate()
+        text = "\n".join(errors)
+        for key in (
+            "ha_mode",
+            "stats_port",
+            "bgp.local_as",
+            "bgp.neighbors[0]",
+            "vips[0].address",
+            "vips[0].exposure",
+            "backends[0].servers: must be a list",
+            "security.allowlist[0]",
+        ):
+            assert key in text, key
+
+    def test_bad_section_shape(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "bgp: 5\nvips: 10.0.0.1\nbackends: [rgw]\n")
+        errors, _ = config.validate()
+        assert any(e.startswith("bgp: must be a mapping") for e in errors)
+        assert any(e.startswith("vips: must be a list") for e in errors)
+        assert any(e.startswith("backends[0]: must be a mapping") for e in errors)
+
+    def test_unknown_keys_are_warnings(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "stats_prot: 9000\nbgp: {hold_tme: 9}\n")
+        errors, warnings = config.validate()
+        assert errors == []
+        assert "stats_prot: unknown key (ignored)" in warnings
+        assert "bgp.hold_tme: unknown key (ignored)" in warnings
+
+    def test_save_load_round_trip(self, tmp_path: Path) -> None:
+        config = OberConfig(install_path=tmp_path, local_ip="10.0.0.5")
+        config.vips = [VIPConfig(address="10.0.100.1/32", exposure="internet")]
+        config.save()
+        loaded = OberConfig.load(config.config_path)
+        assert loaded == config
+        assert loaded.validate() == ([], [])
+
+
+def test_node_ip_prefers_override() -> None:
+    assert OberConfig(local_ip="10.9.9.9").node_ip() == "10.9.9.9"
+
+
+def test_health_and_drain_fields_validate(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(
+        "drain_timeout: 0\nbgp: {health_rise: 0, health_fall: 0, health_holddown: -1}\n"
+        "keepalived: {gateway_check: nope}\n"
+    )
+    errors, _ = OberConfig.load(path).validate()
+    text = "\n".join(errors)
+    for key in (
+        "drain_timeout",
+        "bgp.health_rise",
+        "bgp.health_fall",
+        "bgp.health_holddown",
+        "keepalived.gateway_check",
+    ):
+        assert key in text, key
+    good = OberConfig(install_path=tmp_path, drain_timeout=60)
+    good.bgp.health_rise, good.keepalived.gateway_check = 5, "10.0.0.1"
+    good.save()
+    assert OberConfig.load(good.config_path) == good
+
+
+def test_vip_must_be_single_address_and_unique(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text("vips: [{address: 10.0.0.5}, {address: 10.0.0.5/32}, {address: 10.0.0.9/24}]\n")
+    errors, _ = OberConfig.load(path).validate()
+    assert "vips[1].address: is a duplicate, got '10.0.0.5/32'" in errors
+    assert "vips[2].address: must be a single address (/32), got '10.0.0.9/24'" in errors
+    assert not any(e.startswith("vips[0]") for e in errors)
+
+
+def test_save_is_atomic(tmp_path: Path) -> None:
+    """A failed save keeps the old ober.yaml whole and leaves no temp file."""
+    from unittest.mock import patch
+
+    config = OberConfig(install_path=tmp_path, local_ip="10.0.0.5")
+    config.save()
+    before = config.config_path.read_text()
+    config.local_ip = "10.0.0.6"
+    with (
+        patch("ober.config.os.replace", side_effect=OSError("disk full")),
+        pytest.raises(OSError),
+    ):
+        config.save()
+    assert config.config_path.read_text() == before
+    assert [p.name for p in config.config_path.parent.iterdir()] == ["ober.yaml"]
+
+
+def test_security_int_ranges(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(
+        "security: {timeout_client_s: 0, timeout_server_s: 90000, autoban_window_s: 0,"
+        " autoban_ban_s: 0, internet_maxconn: 0, conn_limit_per_ip: -1,"
+        " autoban_auth_failures: -1, autoban_unsigned_failures: -1}\n"
+    )
+    errors, _ = OberConfig.load(path).validate()
+    text = "\n".join(errors)
+    for key in (
+        "timeout_client_s: must be 1-86400",
+        "timeout_server_s: must be 1-86400",
+        "autoban_window_s: must be >= 1",
+        "autoban_ban_s: must be >= 1",
+        "internet_maxconn: must be >= 1",
+        "conn_limit_per_ip: must be >= 0",
+        "autoban_auth_failures: must be >= 0",
+        "autoban_unsigned_failures: must be >= 0",
+    ):
+        assert f"security.{key}" in text, key
+
+
+# The literal ober.yaml that save() on main (before wave 1) writes, plus venv_path (pipx).
+MAIN_OBER_YAML = """\
+install_path: /opt/ober
+ha_mode: bgp
+bgp:
+  local_as: 65001
+  peer_as: 65000
+  neighbors:
+  - 10.0.0.1
+  - 10.0.0.2
+  router_id: 10.0.0.5
+  local_address: 10.0.0.5
+  hold_time: 3
+  bfd_enabled: true
+keepalived:
+  peers:
+  - 10.0.0.6
+  interface: eth0
+  use_multicast: false
+  advert_int: 1
+vips:
+- address: 10.0.100.1/32
+  interface: lo-vip
+  exposure: internal
+- address: 203.0.113.10/32
+  interface: lo-vip
+  exposure: internet
+backends:
+- name: ceph_backends
+  servers:
+  - 10.0.2.1:7480
+  - 10.0.2.2:7480
+  health_check_path: /
+  health_check_interval: 1000
+certs:
+  path: /opt/ober/etc/certs/server.pem
+  acme_enabled: false
+  acme_email: ''
+  acme_domain: ''
+  route53_enabled: false
+  route53_profile: default
+  route53_hosted_zone_id: ''
+log_retention_days: 7
+stats_port: 8404
+security:
+  s3_hostnames: []
+  allowlist_enabled: true
+  allowlist:
+  - 192.0.2.0/24
+  trusted_networks: []
+  internal_networks: []
+  deny_admin_api: true
+  deny_anonymous: false
+  autoban_enabled: true
+  autoban_auth_failures: 50
+  autoban_unsigned_failures: 500
+  autoban_window_s: 60
+  autoban_ban_s: 3600
+  conn_limit_per_ip: 2000
+  internet_maxconn: 20000
+  timeout_client_s: 300
+  timeout_server_s: 600
+  log_target: ''
+watch:
+  syslog_listen: 0.0.0.0:5514
+  api_listen: 0.0.0.0:8405
+  url: ''
+  syslog_allowed_sources: []
+  data_dir: ''
+  sync_interval_s: 30
+  summary_interval_s: 300
+  raw_log_retention_days: 30
+  block_ttl_s: 3600
+  block_ttl_max_s: 604800
+sentinel:
+  enabled: false
+  tenant_id: ''
+  client_id: ''
+  dce_endpoint: ''
+  dcr_immutable_id: ''
+  findings_stream: Custom-OberFindings_CL
+  summary_stream: Custom-OberKeySummary_CL
+mde:
+  enabled: false
+  tenant_id: ''
+  client_id: ''
+  api_base: https://api.securitycenter.microsoft.com
+  min_severity: high
+  action: Block
+  expiry_days: 1
+  max_active_indicators: 1000
+venv_path: /opt/pipx/venvs/herr-ober
+"""
+
+
+def test_main_ober_yaml_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(MAIN_OBER_YAML)
+    config = OberConfig.load(path)
+    assert config.validate() == ([], [])
+    assert config.install_path == Path("/opt/ober")
+    assert config.venv_path == Path("/opt/pipx/venvs/herr-ober")
+    assert config.bgp.neighbors == ["10.0.0.1", "10.0.0.2"]
+    assert config.keepalived.peers == ["10.0.0.6"]
+    assert [(v.address, v.exposure) for v in config.vips] == [
+        ("10.0.100.1/32", "internal"),
+        ("203.0.113.10/32", "internet"),
+    ]
+    assert config.backends[0].servers == ["10.0.2.1:7480", "10.0.2.2:7480"]
+    assert config.certs.path == "/opt/ober/etc/certs/server.pem"
+    assert config.security.allowlist == ["192.0.2.0/24"]
+    assert config.security.timeout_server_s == 600
+    assert config.mde.max_active_indicators == 1000

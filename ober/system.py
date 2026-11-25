@@ -25,6 +25,7 @@ class SystemInfo:
     """System information and detection."""
 
     os_family: OSFamily = OSFamily.UNKNOWN
+    os_id: str = ""
     os_name: str = ""
     os_version: str = ""
     os_codename: str = ""
@@ -44,6 +45,7 @@ class SystemInfo:
             os_id = os_release.get("ID", "").lower()
             os_id_like = os_release.get("ID_LIKE", "").lower()
 
+            self.os_id = os_id
             self.os_name = os_release.get("NAME", "Unknown")
             self.os_version = os_release.get("VERSION_ID", "")
             self.os_codename = os_release.get("VERSION_CODENAME", "")
@@ -51,7 +53,8 @@ class SystemInfo:
             if os_id in ("ubuntu", "debian") or "debian" in os_id_like:
                 self.os_family = OSFamily.DEBIAN
             elif (
-                os_id in ("rhel", "centos", "rocky", "almalinux", "fedora") or "rhel" in os_id_like
+                os_id in ("rhel", "centos", "rocky", "almalinux", "fedora", "amzn")
+                or "rhel" in os_id_like
             ):
                 self.os_family = OSFamily.RHEL
 
@@ -74,6 +77,8 @@ class SystemInfo:
         """Check if OS is supported."""
         if self.os_family == OSFamily.UNKNOWN:
             return False
+        if self.os_id == "amzn":
+            return self.os_version == "2027"  # 2023 ships python3 3.9, the package needs 3.12
         if self.os_family == OSFamily.RHEL:
             try:
                 major_version = int(self.os_version.split(".")[0])

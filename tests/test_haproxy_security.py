@@ -435,11 +435,11 @@ def test_bucket_only_for_known_hosts(tmp_path: Path, cert_pem: Path, short_sock:
     assert "-m str 10.0.100.1 }" in text
 
 
-def test_no_backend_no_frontends(tmp_path: Path, cert_pem: Path, short_sock: Path) -> None:
+def test_no_backend_is_an_error(tmp_path: Path, cert_pem: Path, short_sock: Path) -> None:
     config = make_config(tmp_path, cert_pem)
     config.backends = []
-    text = generate(config, short_sock)
-    assert "frontend s3_" not in text
+    with pytest.raises(ValueError, match="No S3 frontend"):
+        generate(config, short_sock)
 
 
 # -- haproxy -c ----------------------------------------------------------------------------

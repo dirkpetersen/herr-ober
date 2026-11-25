@@ -245,6 +245,7 @@ def launch(**security: Any) -> Iterator[Proxy]:
         ]
         config.certs = CertConfig(path=str(pem))
         config.stats_port = free_port()
+        config.stats_bind = [INTERNAL_IP]  # 127.0.0.1 (the internet VIP here) is always bound
         settings: dict[str, Any] = {
             "s3_hostnames": [HOST],
             "allowlist": ["127.0.0.0/24"],  # 127.0.1.x is outside: default deny
@@ -261,10 +262,13 @@ def launch(**security: Any) -> Iterator[Proxy]:
         sock = root / "h.sock"
         _write_security_lists(config)
         _generate_haproxy_config(config, socket_path=sock, https_port=port)
+        # maxconn 100000 needs ~200k FDs; a non-root CI user cannot raise its limit that high.
+        cfg = config.haproxy_config_path
+        cfg.write_text(cfg.read_text().replace("    maxconn 100000\n", "    maxconn 10000\n", 1))
 
         # Probe with a trusted source so the main scenarios start clean
         proc = subprocess.Popen(
-            [HAPROXY, "-db", "-q", "-f", str(config.haproxy_config_path)],
+            [HAPROXY, "-db", "-f", str(config.haproxy_config_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
