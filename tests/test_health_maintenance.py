@@ -3,7 +3,7 @@
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -16,6 +16,7 @@ from ober.commands.maintenance import (
     record_vrrp_state,
     set_maintenance,
 )
+from ober.config import OberConfig
 
 
 def _feed(h: Hysteresis, probes: str, maint: bool = False, now: float = 100.0) -> list[bool]:
@@ -181,3 +182,90 @@ class TestKeepalivedChecks:
     def test_gateway_check_rejects_non_ip(self, temp_dir: Path) -> None:
         with pytest.raises(ValueError):
             self._generate(temp_dir, "10.0.0.1; rm -rf /")
+
+
+class TestStopDrain:
+    """`ober stop` and `restart --hard`: maintenance, rotation wait, drain."""
+
+    def _config(self, temp_dir: Path, mode: str) -> OberConfig:
+        config = OberConfig(install_path=temp_dir)
+        config.ha_mode = mode
+        config.drain_timeout = 3
+        return config
+
+    def test_drain_bgp_waits_for_withdraw_and_connections(self, temp_dir: Path) -> None:
+        from ober.commands import service
+
+        config = self._config(temp_dir, "bgp")
+        config.health_state_path.parent.mkdir(parents=True)
+        config.health_state_path.write_text('{"announced": [], "updated": 1}')
+        conns = iter([4, 1, 0])
+        runtime = MagicMock()
+        runtime.send.side_effect = lambda _c: f"Name: HAProxy\nCurrConns: {next(conns)}\n"
+        with (
+            patch.object(service, "HAProxyRuntime", return_value=runtime),
+            patch.object(service.time, "sleep") as sleep,
+        ):
+            assert service._drain(config, ha_active=True) is True
+        assert is_maintenance(config.maintenance_path)
+        assert sleep.call_count == 2
+
+    def test_drain_keeps_maintenance_set_by_operator(self, temp_dir: Path) -> None:
+        from ober.commands import service
+
+        config = self._config(temp_dir, "keepalived")
+        set_maintenance(config.maintenance_path, True)
+        config.vrrp_state_path.parent.mkdir(parents=True)
+        config.vrrp_state_path.write_text('{"VI_1": "MASTER"}')
+        runtime = MagicMock()
+        runtime.send.side_effect = OSError("no socket")
+        with (
+            patch.object(service, "HAProxyRuntime", return_value=runtime),
+            patch.object(service.time, "sleep") as sleep,
+        ):
+            assert service._drain(config, ha_active=True) is False
+        # VIP never moved: waited the full rotation timeout, then went on
+        assert sleep.call_count == service.ROTATION_TIMEOUT
+
+    def test_stop_clears_only_its_own_maintenance(
+        self, cli_runner: CliRunner, temp_dir: Path
+    ) -> None:
+        config = self._config(temp_dir, "bgp")
+        svc = MagicMock(is_active=True)
+
+        def drain(cfg: OberConfig, _ha: bool) -> bool:
+            set_maintenance(cfg.maintenance_path, True)
+            return True
+
+        with (
+            patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
+            patch("ober.commands.service.OberConfig.load", return_value=config),
+            patch("ober.commands.service.ServiceInfo.from_service_name", return_value=svc),
+            patch("ober.commands.service.run_command") as run,
+            patch("ober.commands.service._drain", side_effect=drain),
+        ):
+            result = cli_runner.invoke(main, ["stop"])
+        assert result.exit_code == 0, result.output
+        assert not is_maintenance(config.maintenance_path)
+        cmds = [c.args[0] for c in run.call_args_list]
+        assert cmds.index(["systemctl", "stop", "ober-http"]) < cmds.index(
+            ["systemctl", "stop", "ober-bgp"]
+        )
+
+    def test_restart_hard_drains_first(self, cli_runner: CliRunner, temp_dir: Path) -> None:
+        config = self._config(temp_dir, "bgp")
+        svc = MagicMock(is_active=True, is_enabled=True)
+        order: list[str] = []
+        with (
+            patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
+            patch("ober.commands.service.OberConfig.load", return_value=config),
+            patch("ober.commands.service.ServiceInfo.from_service_name", return_value=svc),
+            patch(
+                "ober.commands.service.run_command",
+                side_effect=lambda c, **_: order.append(" ".join(c)) or MagicMock(returncode=0),
+            ),
+            patch("ober.commands.service._drain", side_effect=lambda *_: order.append("drain")),
+        ):
+            result = cli_runner.invoke(main, ["restart", "--hard"])
+        assert result.exit_code == 0, result.output
+        assert order.index("drain") < order.index("systemctl restart ober-http")

@@ -92,6 +92,7 @@ def _service_env(ha_mode: str, check_rc: int = 0, reload_fails: bool = False) ->
         patch("ober.commands.service.ServiceInfo.from_service_name", return_value=svc),
         patch("ober.commands.service.run_command", side_effect=fake_run),
         patch("ober.commands.service.time.sleep"),
+        patch("ober.commands.service._drain", return_value=False),
     ]
     return calls, patches
 

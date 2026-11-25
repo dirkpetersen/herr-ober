@@ -2,14 +2,80 @@
 """Ober service commands - start, stop, restart."""
 
 import time
+from collections.abc import Callable
 
 import click
 from rich.console import Console
 
+from ober.commands.maintenance import is_maintenance, read_json, set_maintenance
 from ober.config import OberConfig
 from ober.system import ServiceInfo, SystemInfo, run_command
+from ober.watch.runtime import HAProxyRuntime
 
 console = Console()
+
+ROTATION_TIMEOUT = 15  # seconds to wait for the BGP withdraw or the VIP move
+
+
+def _wait_until(cond: Callable[[], bool], timeout: int) -> bool:
+    """Poll cond once a second for up to timeout seconds."""
+    for _ in range(max(0, timeout)):
+        if cond():
+            return True
+        time.sleep(1)
+    return cond()
+
+
+def _out_of_rotation(config: OberConfig) -> bool:
+    """True when this node announces no route (BGP) or owns no VIP (keepalived)."""
+    if config.ha_mode == "bgp":
+        return read_json(config.health_state_path).get("announced") == []
+    return "MASTER" not in read_json(config.vrrp_state_path).values()
+
+
+def _curr_conns(runtime: HAProxyRuntime) -> int:
+    """Current client connections from 'show info' (the CLI connection is not counted)."""
+    for line in runtime.send("show info").splitlines():
+        if line.startswith("CurrConns:"):
+            return int(line.split(":", 1)[1])
+    raise OSError("no CurrConns in 'show info'")
+
+
+def _drain(config: OberConfig, ha_active: bool) -> bool:
+    """Enter maintenance, wait until the node is out of rotation, then drain connections.
+
+    Returns:
+        True when this call turned maintenance on, so the caller turns it off again.
+    """
+    was_on = is_maintenance(config.maintenance_path)
+    set_maintenance(config.maintenance_path, True)
+    if ha_active:
+        console.print("Maintenance on, waiting for this node to leave rotation...")
+        if _wait_until(lambda: _out_of_rotation(config), ROTATION_TIMEOUT):
+            console.print("[green]Node is out of rotation[/green]")
+        else:
+            console.print(
+                f"[yellow]Warning:[/yellow] node still in rotation after {ROTATION_TIMEOUT}s"
+                " (no peer to take over?), continuing"
+            )
+
+    console.print(f"Draining connections (up to {config.drain_timeout}s)...")
+    runtime = HAProxyRuntime(config.admin_socket_path, timeout=2)
+    left = -1
+
+    def idle() -> bool:
+        nonlocal left
+        left = _curr_conns(runtime)
+        return left == 0
+
+    try:
+        if _wait_until(idle, config.drain_timeout):
+            console.print("[green]All connections closed[/green]")
+        else:
+            console.print(f"[yellow]Warning:[/yellow] {left} connections still open, stopping")
+    except (OSError, ValueError) as e:
+        console.print(f"[yellow]Warning:[/yellow] cannot read connections ({e}), not draining")
+    return not was_on
 
 
 @click.command()
@@ -102,8 +168,9 @@ def start(ctx: click.Context) -> None:
 def stop(ctx: click.Context, force: bool) -> None:
     """Stop Ober services.
 
-    Performs graceful shutdown: withdraws BGP routes first,
-    waits for connections to drain, then stops HAProxy.
+    Performs graceful shutdown: enters maintenance (BGP withdraw or VRRP
+    priority drop), waits until the node is out of rotation, waits up to
+    drain_timeout seconds for open connections to close, then stops.
     Use --force for immediate shutdown.
     """
     parent_ctx = ctx.obj
@@ -122,27 +189,10 @@ def stop(ctx: click.Context, force: bool) -> None:
     ka_service = ServiceInfo.from_service_name("ober-ha")
     http_service = ServiceInfo.from_service_name("ober-http")
 
-    if not force:
-        # Graceful shutdown: stop HA service first
-        if config.ha_mode == "bgp" and bgp_service.is_active:
-            console.print("Withdrawing BGP routes...")
-            try:
-                run_command(["systemctl", "stop", "ober-bgp"])
-                console.print("[green]Stopped ober-bgp (routes withdrawn)[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-bgp: {e}")
-        elif config.ha_mode == "keepalived" and ka_service.is_active:
-            console.print("Releasing VIPs...")
-            try:
-                run_command(["systemctl", "stop", "ober-ha"])
-                console.print("[green]Stopped ober-ha (VIPs released)[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-ha: {e}")
-
-        # Wait for connections to drain
-        if http_service.is_active:
-            console.print("Waiting for connections to drain (5s)...")
-            time.sleep(5)
+    clear_maintenance = False
+    if not force and http_service.is_active:
+        ha_active = bgp_service.is_active if config.ha_mode == "bgp" else ka_service.is_active
+        clear_maintenance = _drain(config, ha_active)
 
     # Stop HAProxy
     if http_service.is_active:
@@ -175,6 +225,10 @@ def stop(ctx: click.Context, force: bool) -> None:
         run_command(["systemctl", "stop", "ober-blocklist.timer"], check=False)
     except Exception as e:
         console.print(f"[yellow]Warning:[/yellow] Failed to stop ober-blocklist.timer: {e}")
+
+    # Only clear maintenance that stop itself set, so 'ober start' brings the node back
+    if clear_maintenance:
+        set_maintenance(config.maintenance_path, False)
 
     console.print()
     console.print("[bold green]Services stopped![/bold green]")
@@ -233,6 +287,8 @@ def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
     _check_config(ctx, _haproxy_check_cmd(config), "HAProxy")
 
     if hard:
+        ha_active = ServiceInfo.from_service_name(ha_unit).is_active
+        clear_maintenance = _drain(config, ha_active)
         console.print("Restarting Ober services...")
         try:
             run_command(["systemctl", "restart", "ober-http"])
@@ -240,6 +296,9 @@ def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
         except Exception as e:
             console.print(f"[red]Failed to restart ober-http:[/red] {e}")
             ctx.exit(1)
+        finally:
+            if clear_maintenance:
+                set_maintenance(config.maintenance_path, False)
 
         # The restart of ober-http also stops (BindsTo) and restarts the HA unit; make sure
         # it runs again, also on older units without WantedBy=ober-http.service.
