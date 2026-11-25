@@ -138,8 +138,11 @@ def _activate(config: OberConfig, timeout: int, ha_changed: bool) -> str | None:
         result = run_command(cmd, check=False)
         if result.returncode != 0:
             return f"{' '.join(cmd)} failed:\n{result.stdout}{result.stderr}"
-    if config.ha_mode == "bgp" and ha_changed:
-        console.print("[yellow]The ExaBGP config changed: run 'ober restart --hard'.[/yellow]")
+    if config.ha_mode == "bgp" and ServiceInfo.from_service_name("ober-bgp").is_active:
+        # The VIP list is not in the ExaBGP config: the health process re-reads it on SIGHUP
+        run_command(["pkill", "-HUP", "-f", "ober[.]commands[.]health"], check=False)
+        if ha_changed:
+            console.print("[yellow]The ExaBGP config changed: run 'ober restart --hard'.[/yellow]")
 
     if not was_healthy:  # a gate that could never pass would roll back every change
         console.print("[yellow]Warning:[/yellow] /health was failing before; no health gate.")

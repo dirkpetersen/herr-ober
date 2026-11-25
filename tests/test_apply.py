@@ -80,6 +80,7 @@ def test_apply_reloads_and_keeps_snapshot(node: dict[str, Any]) -> None:
     assert result.exit_code == 0, result.output
     assert "+    server rgw3_7480 rgw3:7480" in result.output
     assert ["systemctl", "reload", "ober-http"] in node["cmds"]
+    assert ["pkill", "-HUP", "-f", "ober[.]commands[.]health"] in node["cmds"]  # VIP re-read
     assert "rgw3_7480" in config.haproxy_config_path.read_text()
     base, applied = ap._snapshots(config)  # first apply: the baseline plus the new state
     assert "rgw2_7480" in (base / "haproxy/haproxy.cfg").read_text()
