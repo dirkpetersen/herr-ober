@@ -209,6 +209,8 @@ class OberConfig:
     certs: CertConfig = field(default_factory=CertConfig)
     log_retention_days: int = 7
     stats_port: int = 8404
+    # Extra addresses for stats/metrics/health; 127.0.0.1 is always bound
+    stats_bind: list[str] = field(default_factory=list)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     watch: WatchConfig = field(default_factory=WatchConfig)
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
@@ -367,6 +369,7 @@ class OberConfig:
 
         self.log_retention_days = data.get("log_retention_days", 7)
         self.stats_port = data.get("stats_port", 8404)
+        self.stats_bind = data.get("stats_bind", [])
 
         self.security = _section_from_dict(SecurityConfig, data.get("security"))
         self.watch = _section_from_dict(WatchConfig, data.get("watch"))
@@ -430,6 +433,7 @@ class OberConfig:
             },
             "log_retention_days": self.log_retention_days,
             "stats_port": self.stats_port,
+            "stats_bind": self.stats_bind,
             "security": asdict(self.security),
             "watch": asdict(self.watch),
             "sentinel": asdict(self.sentinel),
