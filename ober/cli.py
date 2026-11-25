@@ -137,6 +137,7 @@ from ober.commands.doctor import doctor  # noqa: E402
 from ober.commands.health import health  # noqa: E402
 from ober.commands.logs import logs  # noqa: E402
 from ober.commands.maintenance import maintenance  # noqa: E402
+from ober.commands.metrics import metrics  # noqa: E402
 from ober.commands.service import restart, start, stop  # noqa: E402
 from ober.commands.status import status  # noqa: E402
 from ober.commands.sync import sync  # noqa: E402
@@ -157,6 +158,7 @@ main.add_command(doctor)
 main.add_command(health)
 main.add_command(logs)
 main.add_command(maintenance)
+main.add_command(metrics)
 main.add_command(restart)
 main.add_command(start)
 main.add_command(status)

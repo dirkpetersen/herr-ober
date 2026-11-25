@@ -1,0 +1,90 @@
+# Prometheus alert rules for Herr Ober.
+# Metrics: `ober metrics --output <textfile dir>/ober.prom` (node_exporter textfile collector)
+# and HAProxy's own exporter on :8404/metrics. Set the job and instance labels in your scrape
+# config; the rules below only compare nodes by `instance`.
+groups:
+  - name: ober
+    rules:
+      - alert: OberNodeCritical
+        expr: ober_check_level >= 2
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }}: ober status is CRIT"
+          description: "Run 'ober status' on the node."
+
+      - alert: OberMetricsStale
+        expr: time() - node_textfile_mtime_seconds{file=~".*ober.prom"} > 300
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: ober.prom not updated for 5 minutes"
+
+      - alert: OberVipNotAnnounced
+        expr: sum by (vip) (ober_vip_announced) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "VIP {{ $labels.vip }} is announced by no node"
+
+      - alert: OberHealthyButNotAnnouncing
+        expr: ober_vip_announced == 0 and on (instance) ober_maintenance == 0 and on (instance) ober_check_level < 2
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} is healthy but does not announce {{ $labels.vip }}"
+
+      - alert: OberAnnouncingWhileHttpDown
+        expr: ober_vip_announced == 1 and on (instance) ober_service_active{unit="ober-http"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} announces {{ $labels.vip }} but HAProxy is down"
+
+      - alert: OberVipNoMaster
+        expr: sum by (vip) (ober_vrrp_master) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "VIP {{ $labels.vip }} is held (VRRP MASTER) by no node"
+
+      - alert: OberVipSplitBrain
+        expr: sum by (vip) (ober_vrrp_master) > 1
+        for: 30s
+        labels: {severity: critical}
+        annotations:
+          summary: "VIP {{ $labels.vip }} is VRRP MASTER on {{ $value }} nodes"
+
+      - alert: OberBackendsDegraded
+        expr: ober_backend_servers_up / ober_backend_servers < 0.5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: under half of the RGW servers in {{ $labels.backend }} are UP"
+
+      - alert: OberBackendsDown
+        expr: ober_backend_servers_up == 0 and ober_backend_servers > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }}: no RGW server in {{ $labels.backend }} is UP"
+
+      - alert: OberCertExpiresSoon
+        expr: ober_cert_remaining_seconds < 21 * 86400
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: certificate expires in {{ $value | humanizeDuration }}"
+
+      - alert: OberConfigDrift
+        expr: count(count by (hash) (ober_config_info)) > 1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "haproxy.cfg differs between nodes; run 'ober cluster status' and 'ober push'"
+
+      - alert: OberVersionDrift
+        expr: count(count by (ober, haproxy, exabgp, keepalived) (ober_version_info)) > 1
+        for: 1d
+        labels: {severity: info}
+        annotations:
+          summary: "Nodes run different ober, HAProxy, ExaBGP or keepalived versions"
