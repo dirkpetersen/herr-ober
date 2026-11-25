@@ -26,6 +26,7 @@ from ober.config import (
     VIPConfig,
     exit_if_invalid,
     server_name,
+    write_atomic,
 )
 from ober.system import SystemInfo
 
@@ -895,7 +896,7 @@ def _write_if_changed(path: Path, text: str) -> None:
             return
     except OSError:
         pass
-    path.write_text(text)
+    write_atomic(path, text)  # HAProxy or keepalived may start while we write
 
 
 def _vip_host(address: str) -> str:
