@@ -456,3 +456,118 @@ def test_security_int_ranges(tmp_path: Path) -> None:
         "autoban_unsigned_failures: must be >= 0",
     ):
         assert f"security.{key}" in text, key
+
+
+# The literal ober.yaml that save() on main (before wave 1) writes, plus venv_path (pipx).
+MAIN_OBER_YAML = """\
+install_path: /opt/ober
+ha_mode: bgp
+bgp:
+  local_as: 65001
+  peer_as: 65000
+  neighbors:
+  - 10.0.0.1
+  - 10.0.0.2
+  router_id: 10.0.0.5
+  local_address: 10.0.0.5
+  hold_time: 3
+  bfd_enabled: true
+keepalived:
+  peers:
+  - 10.0.0.6
+  interface: eth0
+  use_multicast: false
+  advert_int: 1
+vips:
+- address: 10.0.100.1/32
+  interface: lo-vip
+  exposure: internal
+- address: 203.0.113.10/32
+  interface: lo-vip
+  exposure: internet
+backends:
+- name: ceph_backends
+  servers:
+  - 10.0.2.1:7480
+  - 10.0.2.2:7480
+  health_check_path: /
+  health_check_interval: 1000
+certs:
+  path: /opt/ober/etc/certs/server.pem
+  acme_enabled: false
+  acme_email: ''
+  acme_domain: ''
+  route53_enabled: false
+  route53_profile: default
+  route53_hosted_zone_id: ''
+log_retention_days: 7
+stats_port: 8404
+security:
+  s3_hostnames: []
+  allowlist_enabled: true
+  allowlist:
+  - 192.0.2.0/24
+  trusted_networks: []
+  internal_networks: []
+  deny_admin_api: true
+  deny_anonymous: false
+  autoban_enabled: true
+  autoban_auth_failures: 50
+  autoban_unsigned_failures: 500
+  autoban_window_s: 60
+  autoban_ban_s: 3600
+  conn_limit_per_ip: 2000
+  internet_maxconn: 20000
+  timeout_client_s: 300
+  timeout_server_s: 600
+  log_target: ''
+watch:
+  syslog_listen: 0.0.0.0:5514
+  api_listen: 0.0.0.0:8405
+  url: ''
+  syslog_allowed_sources: []
+  data_dir: ''
+  sync_interval_s: 30
+  summary_interval_s: 300
+  raw_log_retention_days: 30
+  block_ttl_s: 3600
+  block_ttl_max_s: 604800
+sentinel:
+  enabled: false
+  tenant_id: ''
+  client_id: ''
+  dce_endpoint: ''
+  dcr_immutable_id: ''
+  findings_stream: Custom-OberFindings_CL
+  summary_stream: Custom-OberKeySummary_CL
+mde:
+  enabled: false
+  tenant_id: ''
+  client_id: ''
+  api_base: https://api.securitycenter.microsoft.com
+  min_severity: high
+  action: Block
+  expiry_days: 1
+  max_active_indicators: 1000
+venv_path: /opt/pipx/venvs/herr-ober
+"""
+
+
+def test_main_ober_yaml_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(MAIN_OBER_YAML)
+    config = OberConfig.load(path)
+    assert config.validate() == ([], [])
+    assert config.install_path == Path("/opt/ober")
+    assert config.venv_path == Path("/opt/pipx/venvs/herr-ober")
+    assert config.bgp.neighbors == ["10.0.0.1", "10.0.0.2"]
+    assert config.keepalived.peers == ["10.0.0.6"]
+    assert [(v.address, v.exposure) for v in config.vips] == [
+        ("10.0.100.1/32", "internal"),
+        ("203.0.113.10/32", "internet"),
+    ]
+    assert config.backends[0].servers == ["10.0.2.1:7480", "10.0.2.2:7480"]
+    assert config.certs.path == "/opt/ober/etc/certs/server.pem"
+    assert config.security.allowlist == ["192.0.2.0/24"]
+    assert config.security.timeout_server_s == 600
+    assert config.mde.max_active_indicators == 1000
