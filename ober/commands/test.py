@@ -372,6 +372,15 @@ def _test_certificate(cert_path: str) -> dict[str, Any]:
             "message": f"File not found: {cert_path}",
         }
 
+    if path.is_dir():  # HAProxy "crt <dir>" loads every PEM file in it
+        expiry = check_cert_expiry(path)
+        return {
+            "name": "Certificate",
+            "passed": expiry["level"] != "crit" and any(path.glob("*.pem")),
+            "message": f"Certificate directory, {expiry['message']}",
+            "expiry": expiry["level"],
+        }
+
     # Check if file contains both cert and key (PEM format for HAProxy)
     try:
         content = path.read_text()
