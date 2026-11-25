@@ -200,6 +200,7 @@ def test_upgrade_rerenders_units_and_reenables_ha_unit(temp_dir: Path) -> None:
         patch.object(up, "ServiceInfo") as svc,
         patch.object(up, "run_command") as run,
         patch.object(up, "_allow_haproxy_backend_ports") as sebool,
+        patch.object(up, "_own_state_dir"),
     ):
         svc.from_service_name.return_value.is_enabled = True
         up._rerender_units(config)
@@ -267,3 +268,12 @@ def test_selinux_boolean_set_unless_disabled() -> None:
     ):
         bs._allow_haproxy_backend_ports()
     run.assert_not_called()
+
+
+def test_state_dir_owned_by_exabgp_user(temp_dir: Path) -> None:
+    # ExaBGP drops to nobody, and so does the health process that writes ober-health.json
+    config = OberConfig(install_path=temp_dir)
+    with patch.object(bs.os, "chown") as chown:
+        bs._own_state_dir(config)
+    nobody = bs.pwd.getpwnam("nobody")
+    chown.assert_called_once_with(config.health_state_path.parent, nobody.pw_uid, nobody.pw_gid)

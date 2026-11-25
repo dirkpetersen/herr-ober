@@ -2,6 +2,8 @@
 """Ober bootstrap command - automated installation."""
 
 import contextlib
+import os
+import pwd
 import re
 import sys
 import venv
@@ -281,6 +283,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
         # Step 5: Create systemd services
         task = progress.add_task("Creating systemd services...", total=None)
         _create_systemd_services(config, venv_path)
+        _own_state_dir(config)
         progress.update(task, completed=True, description="[green]Created systemd services[/green]")
 
         # Step 6: Create initial config templates
@@ -340,6 +343,18 @@ def _install_packages(system: SystemInfo) -> None:
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])
     elif system.os_family == OSFamily.RHEL:
         run_command(["dnf", "install", "-y", "haproxy", "keepalived", "iputils"])
+
+
+def _own_state_dir(config: OberConfig) -> None:
+    """Give the state dir to 'nobody', the user ExaBGP and its health process drop to.
+
+    The health process writes ober-health.json there. Root processes (the keepalived notify
+    hook, ober status) can still write and read it.
+    """
+    state_dir = config.health_state_path.parent
+    state_dir.mkdir(parents=True, exist_ok=True)
+    nobody = pwd.getpwnam("nobody")
+    os.chown(state_dir, nobody.pw_uid, nobody.pw_gid)
 
 
 def _allow_haproxy_backend_ports() -> None:

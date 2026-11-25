@@ -19,9 +19,11 @@ for name in "${INGRESS_NODES[@]}"; do
 done
 
 log "Provisioning helper"
-lab_ssh helper sudo bash -s -- "$GOBGP_VERSION" "$HELPER_IP" "${NODE_IPS# }" <<'EOF'
+NODE_CSV="${NODE_IPS# }"
+# ssh joins its arguments with spaces, so pass the list as one comma-separated word
+lab_ssh helper sudo bash -s -- "$GOBGP_VERSION" "$HELPER_IP" "${NODE_CSV// /,}" <<'EOF'
 set -euo pipefail
-GOBGP_VERSION="$1"; HELPER_IP="$2"; read -r -a NODE_IPS <<<"$3"
+GOBGP_VERSION="$1"; HELPER_IP="$2"; IFS=, read -r -a NODE_IPS <<<"$3"
 dnf -y -q install python3-pip tar jq iproute >/dev/null
 
 # S3 backends: two moto servers, one per port.
