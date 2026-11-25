@@ -1247,6 +1247,8 @@ def _generate_haproxy_config(
 
     internet = [v for v in config.vips if v.exposure == "internet"]
     internal = [v for v in config.vips if v.exposure != "internet"]
+    if internet and any(ipaddress.ip_address(a).is_unspecified for a in stats_addrs):
+        raise ValueError("stats_bind must not be 0.0.0.0 or :: when a VIP has exposure internet")
     # stats/metrics/health have no auth: never answer on an Internet-exposed VIP address
     stats_guard = (
         [

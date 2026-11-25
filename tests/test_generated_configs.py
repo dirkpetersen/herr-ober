@@ -269,3 +269,15 @@ def test_no_vips_removes_nmcli_lo_vip(sample_config: OberConfig) -> None:
     sample_config.vips = []
     calls = _vip_iface(sample_config, "RHEL")
     assert calls == [["nmcli", "connection", "delete", "lo-vip"]]
+
+
+def test_stats_bind_wildcard_rejected_with_internet_vip(sample_config: OberConfig) -> None:
+    sample_config.stats_bind = ["0.0.0.0"]
+    _generate_haproxy_config(sample_config)  # internal VIPs only: allowed
+    assert sample_config.validate()[0] == []
+    sample_config.vips[0].exposure = "internet"
+    with pytest.raises(ValueError, match="stats_bind must not be 0.0.0.0"):
+        _generate_haproxy_config(sample_config)
+    assert any(
+        e.startswith("stats_bind[0]: must not be 0.0.0.0") for e in sample_config.validate()[0]
+    )

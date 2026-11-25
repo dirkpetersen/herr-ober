@@ -564,6 +564,14 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
     )
     need(_in_range(cfg.stats_port, 1, max_port), "stats_port", "must be 1-65535", cfg.stats_port)
     each("stats_bind", cfg.stats_bind, _is_ip, "must be an IP address")
+    if any(v.exposure == "internet" for v in cfg.vips):
+        # stats/metrics have no auth: a wildcard bind answers on every address of the node
+        each(
+            "stats_bind",
+            cfg.stats_bind,
+            lambda a: not _is_ip(a) or not ipaddress.ip_address(a).is_unspecified,
+            "must not be 0.0.0.0 or :: when a VIP has exposure internet",
+        )
     need(
         _in_range(cfg.log_retention_days, 1, 36500),
         "log_retention_days",
