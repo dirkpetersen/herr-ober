@@ -2,6 +2,7 @@
 """Ober bootstrap command - automated installation."""
 
 import contextlib
+import re
 import sys
 import venv
 from pathlib import Path
@@ -12,7 +13,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ober import config as ober_config
 from ober.config import OberConfig
-from ober.system import OSFamily, SystemInfo, run_command
+from ober.system import OSFamily, SystemInfo, check_command_exists, run_command
 
 console = Console()
 
@@ -49,6 +50,13 @@ net.ipv4.ip_nonlocal_bind = 1
 
 # Local Port Range
 net.ipv4.ip_local_port_range = 1024 65535
+
+# Connection tracking: a stateful firewall tracks every client and RGW connection.
+# The kernel default (often 262144) fills at this rate and then drops new connections.
+# 1M entries use at most about 320 MB. nf_conntrack is loaded at boot (modules-load.d).
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_buckets = 262144
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
 
 # Panic on OOM (Trigger Watchdog faster)
 vm.panic_on_oom = 1
@@ -136,8 +144,13 @@ WantedBy=multi-user.target
 @click.command()
 @click.argument("path", required=False, type=click.Path())
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompts")
+@click.option(
+    "--firewall",
+    is_flag=True,
+    help="Enable ufw or firewalld and allow only SSH, 443/tcp and VRRP.",
+)
 @click.pass_context
-def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
+def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -> None:
     """Bootstrap Ober installation.
 
     Automatically installs HAProxy, ExaBGP, applies kernel tuning,
@@ -264,10 +277,17 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool) -> None:
         _configure_watchdog()
         progress.update(task, completed=True, description="[green]Configured watchdog[/green]")
 
-        # Step 8: Open firewall ports
-        task = progress.add_task("Opening firewall ports...", total=None)
-        _open_firewall_ports(system)
-        progress.update(task, completed=True, description="[green]Opened firewall ports[/green]")
+        # Step 8: Host firewall, only when asked for
+        if firewall:
+            task = progress.add_task("Configuring firewall...", total=None)
+            _open_firewall_ports()
+            progress.update(task, completed=True, description="[green]Configured firewall[/green]")
+
+    if not firewall:
+        console.print(
+            "[yellow]Note:[/yellow] firewall not changed. Allow inbound 443/tcp and, in "
+            "keepalived mode, VRRP (IP protocol 112), or re-run with --firewall."
+        )
 
     console.print()
     console.print("[bold green]Bootstrap complete![/bold green]")
@@ -282,8 +302,11 @@ def _apply_kernel_tuning() -> None:
     """Apply kernel tuning parameters."""
     sysctl_path = Path("/etc/sysctl.d/99-herr-ober.conf")
     sysctl_path.write_text(KERNEL_TUNING)
+    # Load nf_conntrack before systemd-sysctl at boot, so the conntrack keys apply
+    Path("/etc/modules-load.d/herr-ober.conf").write_text("nf_conntrack\n")
 
     # Apply immediately
+    run_command(["modprobe", "nf_conntrack"], check=False)
     run_command(["sysctl", "--system"], check=False)
 
 
@@ -514,77 +537,62 @@ def _configure_watchdog() -> None:
                 f.write("ShutdownWatchdogSec=2min\n")
 
 
-def _open_firewall_ports(system: SystemInfo) -> None:
-    """Open firewall ports 80 (HTTP), 443 (HTTPS), and VRRP protocol."""
-    if system.os_family == OSFamily.DEBIAN:
-        # Ubuntu/Debian uses ufw or iptables
-        # First check if ufw is available and active
-        result = run_command(["which", "ufw"], check=False)
-        if result.returncode == 0:
-            # Try to enable ufw if not already enabled
-            run_command(["ufw", "--force", "enable"], check=False)
-            # Open ports
-            run_command(["ufw", "allow", "80/tcp"], check=False)
-            run_command(["ufw", "allow", "443/tcp"], check=False)
-            # Allow VRRP protocol (IP protocol 112) for keepalived
-            # ufw doesn't support raw IP protocols, so use iptables for VRRP
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "112", "-j", "ACCEPT"],
-                check=False,
+def _ssh_ports() -> list[str]:
+    """Ports sshd listens on (``sshd -T``), else 22."""
+    try:
+        result = run_command(["sshd", "-T"], check=False)
+    except OSError:
+        return ["22"]
+    ports = re.findall(r"^port (\d+)$", result.stdout or "", re.MULTILINE)
+    return sorted(set(ports)) or ["22"]
+
+
+def _firewall_commands() -> list[list[str]] | None:
+    """Commands that allow SSH first, then 443/tcp and VRRP, and then enable the firewall.
+
+    All rules are persistent and safe to add again. Port 80 is not opened (HAProxy binds only
+    443). BGP needs no inbound rule (ExaBGP connects out, replies are tracked). The stats port
+    stays closed (health checks are local). Returns None when neither ufw nor firewalld exists.
+    """
+    ssh = _ssh_ports()
+    if check_command_exists("ufw"):
+        return [
+            *(["ufw", "allow", f"{port}/tcp"] for port in ssh),
+            ["ufw", "allow", "443/tcp"],
+            ["ufw", "allow", "proto", "vrrp", "from", "any", "to", "any"],
+            ["ufw", "--force", "enable"],
+        ]
+    if check_command_exists("firewall-cmd"):
+        running = run_command(["systemctl", "is-active", "--quiet", "firewalld"], check=False)
+        # firewall-offline-cmd edits the permanent config before firewalld first starts
+        tool = (
+            ["firewall-cmd", "--permanent"] if running.returncode == 0 else ["firewall-offline-cmd"]
+        )
+        rules = [f"--add-port={port}/tcp" for port in ssh]
+        rules += ["--add-service=https", "--add-protocol=vrrp"]
+        last = (
+            ["firewall-cmd", "--reload"]
+            if running.returncode == 0
+            else ["systemctl", "enable", "--now", "firewalld"]
+        )
+        return [*([*tool, rule] for rule in rules), last]
+    return None
+
+
+def _open_firewall_ports() -> None:
+    """Enable the host firewall with only the ports Herr Ober needs (``--firewall``).
+
+    Raises:
+        click.ClickException: A rule failed; the firewall is then not enabled.
+    """
+    commands = _firewall_commands()
+    if commands is None:
+        console.print("[yellow]Warning:[/yellow] neither ufw nor firewalld found; skipped.")
+        return
+    for cmd in commands:
+        result = run_command(cmd, check=False)
+        if result.returncode != 0:
+            raise click.ClickException(
+                f"'{' '.join(cmd)}' failed ({result.stderr.strip()}); the firewall was not "
+                "enabled by ober. Check SSH access before you enable it by hand."
             )
-        else:
-            # Fall back to iptables if ufw is not available
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"],
-                check=False,
-            )
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
-                check=False,
-            )
-            # Allow VRRP protocol (IP protocol 112) for keepalived
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "112", "-j", "ACCEPT"],
-                check=False,
-            )
-            # Save iptables rules
-            run_command(["iptables-save"], check=False)
-    elif system.os_family == OSFamily.RHEL:
-        # RHEL 10+ uses firewalld
-        # Check if firewalld is available
-        result = run_command(["which", "firewall-cmd"], check=False)
-        if result.returncode == 0:
-            # Enable firewalld if not running
-            run_command(["systemctl", "start", "firewalld"], check=False)
-            run_command(["systemctl", "enable", "firewalld"], check=False)
-            # Open ports
-            run_command(["firewall-cmd", "--permanent", "--add-port=80/tcp"], check=False)
-            run_command(["firewall-cmd", "--permanent", "--add-port=443/tcp"], check=False)
-            # Allow VRRP protocol for keepalived
-            run_command(
-                [
-                    "firewall-cmd",
-                    "--permanent",
-                    '--add-rich-rule=rule protocol value="vrrp" accept',
-                ],
-                check=False,
-            )
-            # Reload firewall
-            run_command(["firewall-cmd", "--reload"], check=False)
-        else:
-            # Fall back to iptables if firewalld is not available
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"],
-                check=False,
-            )
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"],
-                check=False,
-            )
-            # Allow VRRP protocol (IP protocol 112) for keepalived
-            run_command(
-                ["iptables", "-A", "INPUT", "-p", "112", "-j", "ACCEPT"],
-                check=False,
-            )
-            # Save iptables rules (for RHEL)
-            run_command(["iptables-save"], check=False)
