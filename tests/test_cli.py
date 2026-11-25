@@ -200,18 +200,6 @@ class TestHealthCommand:
         assert "health" in result.output.lower()
 
 
-class TestSyncCommand:
-    """Tests for sync command."""
-
-    def test_sync_help(self, cli_runner: CliRunner) -> None:
-        """Test sync --help."""
-        result = cli_runner.invoke(main, ["sync", "--help"])
-        assert result.exit_code == 0
-        assert "--routers" in result.output
-        assert "--frontend-http" in result.output
-        assert "--backend-http" in result.output
-
-
 class TestTestCommand:
     """Tests for test command."""
 

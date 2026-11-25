@@ -19,7 +19,6 @@ from ober.commands.doctor import (
     _check_root,
     _check_service,
 )
-from ober.commands.sync import expand_hostlist, resolve_host
 from ober.commands.test import _test_backend, _test_bgp_neighbor, _test_certificate
 from ober.config import OberConfig
 from ober.system import OSFamily, SystemInfo
@@ -113,47 +112,6 @@ class TestDoctorChecks:
         with patch("ober.commands.doctor.check_command_exists", return_value=True):
             result = _check_network_tools()
             assert result["passed"] is True
-
-
-class TestSyncFunctions:
-    """Tests for sync command helper functions."""
-
-    def test_expand_hostlist_simple(self) -> None:
-        """Test hostlist expansion with simple list."""
-        result = expand_hostlist("host1,host2,host3")
-        assert result == ["host1", "host2", "host3"]
-
-    def test_expand_hostlist_with_hostlist_module(self) -> None:
-        """Test hostlist expansion with hostlist module."""
-        # Test the actual hostlist module
-        result = expand_hostlist("node[01-03]")
-        assert "node01" in result or result == ["node[01-03]"]
-
-    def test_expand_hostlist_shadowed_module_falls_back(self) -> None:
-        """A stale 'hostlist' package without expand_hostlist must not crash."""
-        import sys
-        import types
-
-        with patch.dict(sys.modules, {"hostlist": types.ModuleType("hostlist")}):
-            assert expand_hostlist("a, b") == ["a", "b"]
-
-    def test_resolve_host_ip(self) -> None:
-        """Test resolve_host with IP address."""
-        result = resolve_host("10.0.0.1")
-        assert result == "10.0.0.1"
-
-    def test_resolve_host_localhost(self) -> None:
-        """Test resolve_host with localhost."""
-        result = resolve_host("localhost")
-        assert result in ["127.0.0.1", "::1", None]  # Depends on system config
-
-    def test_resolve_host_invalid(self) -> None:
-        """Test resolve_host with invalid hostname."""
-        # Use a definitely invalid format
-        result = resolve_host("not-a-valid-hostname-12345.invalid")
-        # May return None or raise error depending on DNS config
-        # If it resolves (some networks have catch-all DNS), that's ok
-        assert result is None or isinstance(result, str)
 
 
 class TestTestCommand:
@@ -490,67 +448,6 @@ class TestUpgradeCommand:
             mock_run.return_value = MagicMock(returncode=1, stdout="")
             result = _check_exabgp_update(config)
             assert result["current"] == "4.2.20"
-
-
-class TestSyncCommand:
-    """Tests for sync command."""
-
-    def test_sync_requires_root(self, cli_runner: CliRunner) -> None:
-        """Test sync command requires root access."""
-        with patch("ober.cli.SystemInfo") as mock_system:
-            mock_instance = MagicMock()
-            mock_instance.is_root = False
-            mock_system.return_value = mock_instance
-
-            result = cli_runner.invoke(main, ["sync", "--routers", "10.0.0.1"])
-            assert "requires root" in result.output.lower() or result.exit_code != 0
-
-    def test_process_hostlist(self) -> None:
-        """Test _process_hostlist function."""
-        from ober.commands.sync import _process_hostlist
-
-        with (
-            patch("ober.commands.sync.expand_hostlist", return_value=["10.0.0.1", "10.0.0.2"]),
-            patch("ober.commands.sync.resolve_host", side_effect=lambda x: x),
-        ):
-            result = _process_hostlist("10.0.0.1,10.0.0.2", "test")
-            assert result == ["10.0.0.1", "10.0.0.2"]
-
-    def test_process_hostlist_with_failures(self) -> None:
-        """Test _process_hostlist with resolution failures."""
-        from ober.commands.sync import _process_hostlist
-
-        with (
-            patch("ober.commands.sync.expand_hostlist", return_value=["good", "bad"]),
-            patch("ober.commands.sync.resolve_host", side_effect=["10.0.0.1", None]),
-        ):
-            result = _process_hostlist("good,bad", "test")
-            assert result == ["10.0.0.1"]
-
-    def test_write_whitelists(self, temp_dir: Path) -> None:
-        """Test _write_whitelists function."""
-        from ober.commands.sync import _write_whitelists
-
-        config = OberConfig(install_path=temp_dir)
-        config.ensure_directories()
-
-        data = {
-            "routers": ["10.0.0.1", "10.0.0.2"],
-            "frontend_http": ["192.168.1.1"],
-        }
-
-        _write_whitelists(config, data)
-
-        # Check files were created
-        routers_file = temp_dir / "etc" / "haproxy" / "routers.lst"
-        frontend_file = temp_dir / "etc" / "haproxy" / "frontend-http.lst"
-
-        assert routers_file.exists()
-        assert frontend_file.exists()
-
-        routers_content = routers_file.read_text()
-        assert "10.0.0.1" in routers_content
-        assert "10.0.0.2" in routers_content
 
 
 class TestUninstallCommand:
@@ -1213,20 +1110,6 @@ class TestUninstallCommandEdgeCases:
             assert "uninstalling" in result.output.lower() or "stopping" in result.output.lower()
 
 
-class TestSyncCommandEdgeCases:
-    """Edge case tests for sync command."""
-
-    def test_expand_hostlist_simple_ip(self) -> None:
-        """Test expanding a simple IP address."""
-        result = expand_hostlist("10.0.0.1")
-        assert result == ["10.0.0.1"]
-
-    def test_expand_hostlist_comma_separated(self) -> None:
-        """Test expanding comma-separated hosts."""
-        result = expand_hostlist("host1,host2")
-        assert result == ["host1", "host2"]
-
-
 class TestHealthSignalHandler:
     """Tests for health command signal handling."""
 
@@ -1378,28 +1261,6 @@ class TestUpgradeCommandMoreTests:
 
             result = cli_runner.invoke(main, ["upgrade", "--check-only"])
             # Should show available updates
-            assert result.exit_code == 0
-
-
-class TestSyncCommandMoreTests:
-    """Additional tests for sync command."""
-
-    def test_sync_routers_only(self, cli_runner: CliRunner) -> None:
-        """Test sync with only routers option."""
-        with (
-            patch("ober.cli.SystemInfo") as mock_system,
-            patch("ober.commands.sync.OberConfig.load") as mock_config,
-            patch("ober.commands.sync._process_hostlist", return_value=["10.0.0.1"]),
-            patch("ober.commands.sync._write_whitelists"),
-        ):
-            mock_instance = MagicMock()
-            mock_instance.is_root = True
-            mock_system.return_value = mock_instance
-
-            config_mock = MagicMock()
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["sync", "--routers", "10.0.0.1"])
             assert result.exit_code == 0
 
 
@@ -2194,3 +2055,12 @@ class TestWatchLifecycle:
 
         for unit in ("ober-watch.service", "ober-blocklist.service", "ober-blocklist.timer"):
             assert unit in stopped and unit in disabled and unit in removed
+
+
+def test_sync_is_deprecated_and_writes_nothing(cli_runner: CliRunner, tmp_path: Path) -> None:
+    """4.5: ober sync wrote files that no config read; it now only explains that."""
+    with patch.dict("os.environ", {"OBER_INSTALL_PATH": str(tmp_path)}):
+        result = cli_runner.invoke(main, ["sync", "--routers", "switch[01-02]"])
+    assert result.exit_code == 1
+    assert "security.allowlist" in result.output
+    assert not any(tmp_path.rglob("*.lst"))
