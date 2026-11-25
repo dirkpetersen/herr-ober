@@ -111,6 +111,38 @@ class TestStatusCheck:
         assert out.startswith("OBER OK")
         assert "\n" not in out
 
+    def test_bgp_session_down_warns(
+        self, cli_runner: CliRunner, node: OberConfig, healthy: None
+    ) -> None:
+        node.bgp.neighbors = ["10.0.0.1", "10.0.0.2"]
+        node.save()
+        write_state(node, status.HEALTH_STATE_FILE, {"announced": [f"{VIP1}/32", f"{VIP2}/32"]})
+        sessions = {"10.0.0.1": True, "10.0.0.2": False}
+        with patch.object(status, "bgp_sessions", return_value=sessions):
+            code, out = run_check(cli_runner)
+            human = cli_runner.invoke(main, ["status"]).output
+        assert code == 1
+        assert "BGP neighbor 10.0.0.2: no established session" in out
+        assert "10.0.0.1:" not in out
+        assert "BGP 10.0.0.2: not established" in human
+        with patch.object(status, "bgp_sessions", return_value=None):
+            code, out = run_check(cli_runner)
+        assert code == 1 and "BGP session state unknown" in out
+
+    def test_bgp_sessions_parses_ss(self) -> None:
+        from unittest.mock import MagicMock
+
+        ss = "0 0 10.0.0.5:41234 10.0.0.1:179\n0 0 [::ffff:10.0.0.5]:179 [::ffff:10.0.0.3]:5\n"
+        with patch.object(
+            status.subprocess, "run", return_value=MagicMock(returncode=0, stdout=ss)
+        ):
+            got = status.bgp_sessions(["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+        assert got == {"10.0.0.1": True, "10.0.0.2": False, "10.0.0.3": True}
+        with patch.object(status.subprocess, "run", side_effect=OSError):
+            assert status.bgp_sessions(["10.0.0.1"]) is None
+        with patch.object(status.subprocess, "run", return_value=MagicMock(returncode=1)):
+            assert status.bgp_sessions(["10.0.0.1"]) is None
+
     def test_missing_health_state_is_unknown_warn(
         self, cli_runner: CliRunner, node: OberConfig, healthy: None
     ) -> None:

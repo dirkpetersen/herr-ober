@@ -93,7 +93,11 @@ def collect_status(config: OberConfig, config_error: str | None = None) -> dict[
     if config.ha_mode == "bgp":
         from ober.system import get_exabgp_version
 
-        result["bgp"] = {"version": get_exabgp_version()}
+        neighbors = list(config.bgp.neighbors)
+        result["bgp"] = {
+            "version": get_exabgp_version(),
+            "sessions": bgp_sessions(neighbors) if neighbors else {},
+        }
     else:
         from ober.system import get_keepalived_version
 
@@ -157,6 +161,26 @@ def local_ipv4_addresses() -> set[str] | None:
         if "inet" in parts[:-1]:
             addrs.add(parts[parts.index("inet") + 1].split("/")[0])
     return addrs
+
+
+def bgp_sessions(neighbors: list[str]) -> dict[str, bool] | None:
+    """Return per neighbor whether a TCP session on port 179 is established, None if unknown."""
+    try:
+        out = subprocess.run(
+            ["ss", "-Htn", "state", "established", "( sport = :179 or dport = :179 )"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    hosts = set()
+    for line in out.stdout.splitlines():
+        for field in line.split()[2:]:  # Recv-Q Send-Q Local:Port Peer:Port
+            hosts.add(field.rsplit(":", 1)[0].strip("[]").removeprefix("::ffff:"))
+    return {n: n in hosts for n in neighbors}
 
 
 def _expected_owner(config: OberConfig, vip: str) -> str:
@@ -246,6 +270,13 @@ def evaluate(result: dict[str, Any]) -> dict[str, Any]:
     if cert and cert["level"] != "ok":
         problems.append((cert["level"].upper(), f"certificate: {cert['message']}"))
 
+    sessions = result.get("bgp", {}).get("sessions", {})
+    if sessions is None:
+        problems.append(("WARN", "BGP session state unknown (ss failed)"))
+    for neighbor, up in (sessions or {}).items():
+        if not up:
+            problems.append(("WARN", f"BGP neighbor {neighbor}: no established session"))
+
     for vip in result["vips"]:
         addr = vip["address"]
         if "announced" in vip:
@@ -310,6 +341,12 @@ def _print_status(result: dict[str, Any]) -> None:
     console.print(f"[bold]HAProxy:[/bold] {result['haproxy']['version'] or 'not installed'}")
     if "bgp" in result:
         console.print(f"[bold]ExaBGP:[/bold] {result['bgp']['version'] or 'not installed'}")
+        sessions = result["bgp"]["sessions"]
+        if sessions is None:
+            console.print("[bold]BGP sessions:[/bold] [dim]unknown (ss failed)[/dim]")
+        for neighbor, up in (sessions or {}).items():
+            state = "[green]established[/green]" if up else "[red]not established[/red]"
+            console.print(f"[bold]BGP {neighbor}:[/bold] {state}")
     else:
         ka_ver = result["keepalived"]["version"] or "not installed"
         console.print(f"[bold]Keepalived:[/bold] {ka_ver}")
