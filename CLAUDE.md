@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Herr Ober ("Head Waiter") is a high-performance (50GB/s+) S3 ingress controller for Ceph RGW clusters on Proxmox VMs. HAProxy 3.3 (AWS-LC) does SSL offloading; HA is provided by one of two **mutually exclusive** modes selected via `ha_mode` in config:
+Herr Ober ("Head Waiter") is a high-performance (50GB/s+) S3 ingress controller for Ceph RGW clusters on Proxmox VMs. HAProxy 3.3 does SSL offloading (PPA and distro builds use OpenSSL, not AWS-LC; `ober doctor` shows which); HA is provided by one of two **mutually exclusive** modes selected via `ha_mode` in config:
 
 - **BGP/ECMP (`ha_mode: bgp`)** - ExaBGP announces shared VIP(s); upstream router ECMPs across nodes.
 - **Keepalived (`ha_mode: keepalived`)** - one VIP per node with VRRP failover; DNS round-robin (managed by the user, out of scope) spreads clients.
