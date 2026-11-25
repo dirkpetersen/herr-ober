@@ -87,3 +87,9 @@ These were not in the list above. Each one is the default the work used.
   `systemctl reload ober-http` does not save it first.
 - **PPA (9.4):** when `ppa:vbernat/haproxy-3.3` cannot be added, bootstrap warns and uses the
   distro HAProxy instead of failing (Ubuntu 26.04 has no PPA build but ships 3.2).
+- **Apply (2.2, 2.5):** `ober apply` is a new command; `ober config --non-interactive` plus
+  `ober restart` still work. A failed apply keeps the edit in `ober.yaml` (so it can be fixed and
+  applied again) and puts back the generated files. Snapshots hold the applied state, 20 are
+  kept. Not covered: certificates, the blocklist and the `lo-vip` network files. The health gate
+  is skipped when `/health` was failing before the apply, because it could never pass. An
+  ExaBGP config change still needs `ober restart --hard` (only a message, no automatic restart).

@@ -128,6 +128,7 @@ def main(ctx: Context, json_output: bool, quiet: bool, verbose: bool) -> None:
 
 
 # Import subcommands (must be after main group is defined)
+from ober.commands.apply import apply, rollback  # noqa: E402
 from ober.commands.backend import backend  # noqa: E402
 from ober.commands.bootstrap import bootstrap  # noqa: E402
 from ober.commands.config import config  # noqa: E402
@@ -144,7 +145,9 @@ from ober.commands.upgrade import upgrade  # noqa: E402
 from ober.commands.watch import blocklist, watch  # noqa: E402
 
 # Register commands
+main.add_command(apply)
 main.add_command(backend)
+main.add_command(rollback)
 main.add_command(bootstrap)
 main.add_command(config)
 main.add_command(doctor)
