@@ -51,7 +51,7 @@ sudo su -
 apt install -y pipx
 # Install globally (outside /root): the systemd units use ProtectHome=true
 export PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin
-pipx install herr-ober
+pipx install 'herr-ober[bgp]'   # [bgp] pins ExaBGP to the tested 4.2.x series
 ober bootstrap
 ```
 
@@ -65,6 +65,7 @@ The one-liner also writes `/etc/profile.d/herr-ober.sh`, which exports `PIPX_HOM
 `python-hostlist`, reinstall into a clean venv so a stale `hostlist` package cannot break `ober sync`:
 ```bash
 PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx reinstall herr-ober
+sudo ober upgrade   # installs ExaBGP again if the reinstall removed it, and rewrites the units
 ```
 
 ### 3. Configure
@@ -122,6 +123,7 @@ ober config [--dry-run]   # Interactive configuration wizard (choose BGP or Keep
 ober sync                 # Update external system whitelists
 ober status               # Show current state (--json for scripting)
 ober start|stop|restart   # Service management (stop gracefully withdraws routes/releases VIPs)
+                          # restart = validated zero-downtime reload; restart --hard = full restart
 ober logs [-f] [-n N]     # View logs (--service http|bgp|ha|all to filter)
 ober doctor               # Diagnostic checks
 ober test                 # Test BGP connectivity without starting services
