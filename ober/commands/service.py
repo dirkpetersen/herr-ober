@@ -38,6 +38,10 @@ def start(ctx: click.Context) -> None:
 
     console.print("Starting Ober services...")
 
+    # Disable the other mode's unit first: its ober-http.service.wants link would start it too
+    other = "ober-ha" if config.ha_mode == "bgp" else "ober-bgp"
+    run_command(["systemctl", "disable", "--now", other], check=False)
+
     # Enable and start HAProxy
     try:
         run_command(["systemctl", "enable", "ober-http"])
@@ -176,19 +180,39 @@ def stop(ctx: click.Context, force: bool) -> None:
     console.print("[bold green]Services stopped![/bold green]")
 
 
+def _check_config(ctx: click.Context, cmd: list[str], name: str) -> None:
+    """Run a config check and exit 1 with its output when it fails."""
+    try:
+        result = run_command(cmd, check=False)
+    except Exception as e:
+        console.print(f"[red]Cannot check the {name} configuration:[/red] {e}")
+        ctx.exit(1)
+    if result.returncode != 0:
+        console.print(f"[red]The {name} configuration is not valid. Nothing was changed.[/red]")
+        console.print(result.stdout + result.stderr, markup=False)
+        ctx.exit(1)
+
+
+def _haproxy_check_cmd(config: OberConfig) -> list[str]:
+    return ["/usr/sbin/haproxy", "-c", "-f", str(config.haproxy_config_path)]
+
+
 @click.command()
 @click.option(
-    "--reload-only",
+    "--hard",
     is_flag=True,
-    help="Only reload HAProxy config (zero-downtime).",
+    help="Full restart: drops all connections and the BGP session or VIPs.",
 )
+@click.option("--reload-only", is_flag=True, hidden=True, help="Deprecated: this is the default.")
 @click.pass_context
-def restart(ctx: click.Context, reload_only: bool) -> None:
-    """Restart Ober services.
+def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
+    """Restart Ober services with a validated, zero-downtime reload.
 
-    By default performs a full restart. Use --reload-only for
-    zero-downtime HAProxy config reload.
+    By default validates the HAProxy config and reloads HAProxy without downtime (and
+    keepalived in keepalived mode). A failed check or reload keeps the running process.
+    Use --hard for a full restart, for example to load a new ExaBGP config or binary.
     """
+    del reload_only  # kept so old scripts keep working
     parent_ctx = ctx.obj
     system = parent_ctx.system if parent_ctx else SystemInfo()
 
@@ -197,29 +221,19 @@ def restart(ctx: click.Context, reload_only: bool) -> None:
         console.print("Run with: sudo ober restart")
         ctx.exit(1)
 
-    if reload_only:
-        console.print("Reloading HAProxy configuration...")
-        http_service = ServiceInfo.from_service_name("ober-http")
+    config = OberConfig.load()
+    ha_unit = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
 
-        if not http_service.is_active:
-            console.print("[yellow]Warning:[/yellow] HAProxy is not running. Starting instead.")
-            ctx.invoke(start)
-            return
+    if not ServiceInfo.from_service_name("ober-http").is_active:
+        console.print("[yellow]Warning:[/yellow] HAProxy is not running. Starting instead.")
+        ctx.invoke(start)
+        return
 
-        try:
-            run_command(["systemctl", "reload", "ober-http"])
-            console.print("[green]HAProxy configuration reloaded (zero-downtime)[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to reload HAProxy:[/red] {e}")
-            console.print("Attempting full restart...")
-            run_command(["systemctl", "restart", "ober-http"])
+    # Never stop a working HAProxy for a config it cannot load
+    _check_config(ctx, _haproxy_check_cmd(config), "HAProxy")
 
-    else:
+    if hard:
         console.print("Restarting Ober services...")
-
-        config = OberConfig.load()
-
-        # Restart HAProxy
         try:
             run_command(["systemctl", "restart", "ober-http"])
             console.print("[green]Restarted ober-http (HAProxy)[/green]")
@@ -227,26 +241,39 @@ def restart(ctx: click.Context, reload_only: bool) -> None:
             console.print(f"[red]Failed to restart ober-http:[/red] {e}")
             ctx.exit(1)
 
-        # Wait for HAProxy to be ready
-        time.sleep(1)
+        # The restart of ober-http also stops (BindsTo) and restarts the HA unit; make sure
+        # it runs again, also on older units without WantedBy=ober-http.service.
+        if ServiceInfo.from_service_name(ha_unit).is_enabled:
+            try:
+                run_command(["systemctl", "start", ha_unit])
+                console.print(f"[green]Started {ha_unit}[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Warning:[/yellow] Failed to start {ha_unit}: {e}")
+        console.print()
+        console.print("[bold green]Services restarted![/bold green]")
+        return
 
-        # Restart BGP or Keepalived based on ha_mode
-        if config.ha_mode == "bgp":
-            bgp_service = ServiceInfo.from_service_name("ober-bgp")
-            if bgp_service.is_enabled:
-                try:
-                    run_command(["systemctl", "restart", "ober-bgp"])
-                    console.print("[green]Restarted ober-bgp (ExaBGP)[/green]")
-                except Exception as e:
-                    console.print(f"[yellow]Warning:[/yellow] Failed to restart ober-bgp: {e}")
-        else:
-            ka_service = ServiceInfo.from_service_name("ober-ha")
-            if ka_service.is_enabled:
-                try:
-                    run_command(["systemctl", "restart", "ober-ha"])
-                    console.print("[green]Restarted ober-ha (Keepalived)[/green]")
-                except Exception as e:
-                    console.print(f"[yellow]Warning:[/yellow] Failed to restart ober-ha: {e}")
+    try:
+        run_command(["systemctl", "reload", "ober-http"])
+    except Exception as e:
+        # No fallback to a restart: it would load the same config and take the node down
+        console.print(f"[red]Failed to reload HAProxy, the running process is kept:[/red] {e}")
+        console.print("See 'journalctl -u ober-http' for details.")
+        ctx.exit(1)
+    console.print("[green]HAProxy configuration reloaded (zero-downtime)[/green]")
 
-    console.print()
-    console.print("[bold green]Services restarted![/bold green]")
+    if config.ha_mode == "keepalived":
+        if ServiceInfo.from_service_name("ober-ha").is_active:
+            _check_config(
+                ctx,
+                ["/usr/sbin/keepalived", "-t", "-f", str(config.keepalived_config_path)],
+                "keepalived",
+            )
+            try:
+                run_command(["systemctl", "reload", "ober-ha"])
+                console.print("[green]Keepalived configuration reloaded[/green]")
+            except Exception as e:
+                console.print(f"[red]Failed to reload ober-ha:[/red] {e}")
+                ctx.exit(1)
+    else:
+        console.print("[dim]ExaBGP keeps running. Use 'ober restart --hard' for BGP changes.[/dim]")
