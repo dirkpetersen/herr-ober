@@ -31,7 +31,7 @@ CI (`.github/workflows/test.yml`, Python 3.12, 3.13 and 3.14) runs `ruff check .
 
 **CLI (`ober/cli.py`)**: Click group `main` builds a `Context` (verbose/quiet/json_output, `config`, `system: SystemInfo`) and registers subcommands from `ober/commands/` (one file per command; `start`/`stop`/`restart` share `service.py`). Commands use `@click.pass_context` and read the shared object via `ctx.obj` (may be `None`, so they fall back to `SystemInfo()`). The `pass_context` helper in `cli.py` is not used by commands. Most commands also call `OberConfig.load()` themselves instead of using `ctx.obj.config`.
 
-**Config (`ober/config.py`)**: Dataclasses `OberConfig` → `BGPConfig`, `KeepalivedConfig`, `VIPConfig` (list), `BackendConfig` (list), `CertConfig`. `_load_from_file()` and `save()` map each field by hand, so **a new config field must be added in the dataclass, `_load_from_file`, and `save`**. All file paths are properties derived from `install_path` (`config_path`, `haproxy_config_path`, `bgp_config_path`, `keepalived_config_path`, `certs_path`, `whitelist_path`, all under `<install_path>/etc/`). Secrets go to `~/.ober/login` (mode 600) via `load_secrets()`/`save_secrets()`.
+**Config (`ober/config.py`)**: Dataclasses `OberConfig` → `BGPConfig`, `KeepalivedConfig`, `VIPConfig` (list, each with `exposure: internal|internet`), `BackendConfig` (list), `CertConfig`, `SecurityConfig`, `WatchConfig`, `SentinelConfig`, `MDEConfig`. `_load_from_file()` and `save()` map each field by hand, so **a new config field must be added in the dataclass, `_load_from_file`, and `save`**. All file paths are properties derived from `install_path` (`config_path`, `haproxy_config_path`, `allowlist_path`, `trusted_path`, `blocklist_path`, `admin_socket_path`, and others). Secrets go to `~/.ober/login` (mode 600) via `load_secrets()`/`save_secrets()`.
 
 **System (`ober/system.py`)**: `SystemInfo` detects OS family (DEBIAN/RHEL), version, root, hostname, local IP. `ServiceInfo.from_service_name()` wraps systemd. Shell calls go through `run_command()`.
 
@@ -65,6 +65,17 @@ Bootstrap in a venv (pipx, the recommended setup) defaults to the existing point
 - `get_vrrp_router_id()` gives `virtual_router_id` = md5(VIP) % 255 + 1.
 - Unicast is the default (`unicast_src_ip` + `unicast_peer`); multicast is optional. No VRRP auth.
 - `chk_haproxy` track_script curls `/health` (weight -50, fall/rise 2), plus `track_interface` weight -50.
+
+### Security monitoring (`ober watch`, `ober blocklist`)
+
+Full user docs: `docs/security-monitoring.md`. Sentinel setup: `deploy/sentinel/`. Two paths:
+
+- **Data path (proxy nodes)**: HAProxy does all per-request work. For internet VIPs, `commands/config.py` emits allowlist/trusted/blocklist `src -f` file checks, per-IP auto-ban counters and limits. It sends one redacted JSON log line per request over UDP syslog (`security.log_target`). The allowlist/trusted files are rewritten from config on every apply. The blocklist file is only created when missing, because `ober blocklist sync` owns it at runtime.
+- **Analysis path (one host, `ober/watch/`)**: `daemon.py` receives syslog on an asyncio loop. Parse (`parser.py`), rules (`rules.py`) and summaries run there. Anything that blocks (disk in `store.py`, Sentinel/MDE sinks) runs on worker threads behind bounded queues that drop and count when full. Keep the receive path free of disk and network calls. `server.py` serves the blocklist API (default `:8405`). Raw logs never leave the host; only findings and per-access-key summaries go to Sentinel.
+- `models.py` holds the contracts. `LOG_FIELDS` must match the HAProxy log format in `commands/config.py`. Rule state uses LRU-bounded dicts so a flood of source IPs cannot exhaust memory.
+- Proxy nodes pull the list with `ober blocklist sync` (systemd timer) and apply it via the HAProxy runtime socket (`runtime.py`, `/run/ober/`). Automatic blocks are single IPs from internet VIPs only, never trusted or internal ranges.
+- Tokens `OBER_WATCH_TOKEN` (read) and `OBER_WATCH_ADMIN_TOKEN` (write) come from `~/.ober/login`. Units (`ober-watch`, `ober-blocklist.{service,timer}`) are templates in `watch/units.py` with `ProtectHome=read-only` so root can read its secrets.
+- Tests for this live in `tests/test_watch_*.py` with helpers in `tests/watch_util.py`. `tests/test_haproxy_live.py` runs a real HAProxy and skips when `haproxy` or `openssl` is not installed.
 
 ### Systemd safety links
 
