@@ -198,6 +198,16 @@ def get_haproxy_version() -> str | None:
     return None
 
 
+def get_haproxy_tls_library() -> str | None:
+    """The SSL library HAProxy runs on, from ``haproxy -vv`` (e.g. "OpenSSL 3.0.13 ...")."""
+    try:
+        result = subprocess.run(["haproxy", "-vv"], capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    match = re.search(r"^Running on SSL library version : (.+)$", result.stdout, re.M)
+    return match.group(1).strip() if match else None
+
+
 def get_exabgp_version() -> str | None:
     """Get installed ExaBGP version.
 

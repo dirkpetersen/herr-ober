@@ -8,7 +8,7 @@
 
 **High-Performance S3 Ingress Controller (BGP/ECMP or VRRP)**
 
-Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.3 (AWS-LC)** for SSL offloading with two HA modes:
+Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.3** (the Ubuntu PPA and distro builds use OpenSSL; `ober doctor` shows the TLS library) for SSL offloading with two HA modes:
 
 - **BGP/ECMP Mode** - Uses **ExaBGP** for Layer 3 HA via BGP (requires BGP-capable router)
 - **Keepalived Mode** - Uses **VRRP** for VIP failover (no BGP required)
