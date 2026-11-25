@@ -286,7 +286,8 @@ class OberConfig:
     @property
     def maintenance_path(self) -> Path:
         """Maintenance flag file ("1" = on, "0" or missing = off), also a keepalived track_file."""
-        return self.install_path / "etc" / "maintenance"
+        # In the state dir: ober-ha can only watch (track_file) a path in its ReadWritePaths
+        return self.install_path / "var" / "run" / "maintenance"
 
     @property
     def health_state_path(self) -> Path:

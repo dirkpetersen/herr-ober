@@ -250,7 +250,9 @@ def test_uninstall_removes_kernel_tuning_files(tmp_path: Path) -> None:
 
 def test_http_unit_allows_selinux_domain_switch(temp_dir: Path) -> None:
     # NoNewPrivileges blocks init_t -> haproxy_t; HAProxy then cannot create /run/ober sockets
-    assert "NoNewPrivileges=true" not in _units(temp_dir)["ober-http.service"]
+    units = _units(temp_dir)
+    assert "NoNewPrivileges=true" not in units["ober-http.service"]
+    assert "NoNewPrivileges=true" not in units["ober-ha.service"]  # VRRP raw socket, ping
 
 
 def test_selinux_boolean_set_unless_disabled() -> None:

@@ -144,8 +144,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=1s
 
-# Security
-NoNewPrivileges=true
+# Security. No NoNewPrivileges: on SELinux hosts it blocks the switch to keepalived_t, and
+# then keepalived cannot open its VRRP raw socket or run ping for chk_gateway.
 ProtectSystem=strict
 ProtectHome={protect_home}
 # /run for the PID file; state_dir for the VRRP state that the notify hook writes
