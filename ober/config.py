@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Configuration management for Ober."""
 
+import contextlib
 import ipaddress
 import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin
@@ -430,8 +432,7 @@ class OberConfig:
         if self._venv_path_override is not None:
             data["venv_path"] = str(self._venv_path_override)
 
-        with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        write_atomic(path, yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     def ensure_directories(self) -> None:
         """Create all required directories."""
@@ -448,6 +449,23 @@ class OberConfig:
             dirs.append(self.install_path / "venv")
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write a file with tmp-plus-rename, so readers never see a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # a crash must not leave an empty file after the rename
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -524,11 +542,13 @@ def _is_network(value: Any) -> bool:
         return False
 
 
-def _is_ipv4_interface(value: Any) -> bool:
+def _is_single_ipv4(value: Any) -> bool:
+    """A VIP: one IPv4 address, bare or /32 (a wider prefix adds a connected route)."""
     try:
-        return ipaddress.ip_interface(value).version == 4
+        iface = ipaddress.ip_interface(value)
     except (TypeError, ValueError):
         return False
+    return iface.version == 4 and iface.network.prefixlen == 32
 
 
 def _is_hostport(value: Any) -> bool:
@@ -562,6 +582,14 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
     )
     need(_in_range(cfg.stats_port, 1, max_port), "stats_port", "must be 1-65535", cfg.stats_port)
     each("stats_bind", cfg.stats_bind, _is_ip, "must be an IP address")
+    if any(v.exposure == "internet" for v in cfg.vips):
+        # stats/metrics have no auth: a wildcard bind answers on every address of the node
+        each(
+            "stats_bind",
+            cfg.stats_bind,
+            lambda a: not _is_ip(a) or not ipaddress.ip_address(a).is_unspecified,
+            "must not be 0.0.0.0 or :: when a VIP has exposure internet",
+        )
     need(
         _in_range(cfg.log_retention_days, 1, 36500),
         "log_retention_days",
@@ -607,9 +635,9 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
     for i, vip in enumerate(cfg.vips):
         key = f"vips[{i}]"
         need(
-            _is_ipv4_interface(vip.address),
+            _is_single_ipv4(vip.address),
             f"{key}.address",
-            "must be an IPv4 address or CIDR",
+            "must be a single address (/32)",
             vip.address,
         )
         need(
@@ -618,8 +646,9 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
             "must be internal or internet",
             vip.exposure,
         )
-        need(vip.address not in seen, f"{key}.address", "is a duplicate", vip.address)
-        seen.add(str(vip.address))
+        ip = str(vip.address).split("/")[0]
+        need(ip not in seen, f"{key}.address", "is a duplicate", vip.address)
+        seen.add(ip)
 
     for i, backend in enumerate(cfg.backends):
         key = f"backends[{i}]"
@@ -645,6 +674,19 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
         )
 
     sec = cfg.security
+    for key, low, high in (
+        ("timeout_client_s", 1, 86400),
+        ("timeout_server_s", 1, 86400),
+        ("autoban_window_s", 1, 2**31 - 1),
+        ("autoban_ban_s", 1, 2**31 - 1),
+        ("internet_maxconn", 1, 2**31 - 1),
+        ("conn_limit_per_ip", 0, 2**31 - 1),
+        ("autoban_auth_failures", 0, 2**31 - 1),
+        ("autoban_unsigned_failures", 0, 2**31 - 1),
+    ):
+        value = getattr(sec, key)
+        what = f"must be {low}-{high}" if high == 86400 else f"must be >= {low}"
+        need(_in_range(value, low, high), f"security.{key}", what, value)
     for key in ("allowlist", "trusted_networks", "internal_networks"):
         each(f"security.{key}", getattr(sec, key), _is_network, "must be an IP or CIDR")
     need(

@@ -78,7 +78,7 @@ class SystemInfo:
         if self.os_family == OSFamily.UNKNOWN:
             return False
         if self.os_id == "amzn":
-            return self.os_version in ("2023", "2027")
+            return self.os_version == "2027"  # 2023 ships python3 3.9, the package needs 3.12
         if self.os_family == OSFamily.RHEL:
             try:
                 major_version = int(self.os_version.split(".")[0])

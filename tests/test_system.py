@@ -73,10 +73,10 @@ class TestSystemInfo:
         assert info.is_supported is False
 
     @pytest.mark.parametrize(
-        ("version", "supported"), [("2023", True), ("2027", True), ("2", False), ("", False)]
+        ("version", "supported"), [("2023", False), ("2027", True), ("2", False), ("", False)]
     )
     def test_amazon_linux(self, version: str, supported: bool) -> None:
-        """Amazon Linux is in the RHEL family; only 2023 and 2027 are supported."""
+        """Amazon Linux is in the RHEL family; only 2027 is supported (2023 has python3 3.9)."""
         content = f'ID="amzn"\nID_LIKE="fedora"\nNAME="Amazon Linux"\nVERSION_ID="{version}"\n'
         with (
             patch("ober.system.Path") as mock_path,

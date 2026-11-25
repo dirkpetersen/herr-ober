@@ -11,7 +11,7 @@ from ober.commands.config import (
     _generate_haproxy_config,
     _netplan_vip_yaml,
 )
-from ober.config import BackendConfig, CertConfig, OberConfig
+from ober.config import BackendConfig, CertConfig, OberConfig, VIPConfig
 
 
 def _refs_and_sections(text: str) -> tuple[set[str], set[str]]:
@@ -140,6 +140,8 @@ def _vip_iface(
         patch("ober.system.SystemInfo", return_value=system),
         patch("ober.system.check_command_exists", side_effect=lambda t: t in tools),
         patch("ober.system.run_command", side_effect=run),
+        patch("ober.commands.uninstall.run_command", side_effect=run),
+        patch("ober.commands.uninstall.check_command_exists", side_effect=lambda t: t in tools),
     ):
         _configure_vip_interface(
             config,
@@ -172,6 +174,7 @@ def test_networkd_without_nmcli_running(sample_config: OberConfig) -> None:
     calls = _vip_iface(sample_config, "RHEL", tools=("networkctl",), active_rc=0)
     assert ["systemctl", "enable", "--now", "systemd-networkd"] in calls
     assert calls[-1] == ["networkctl", "reload"]
+    assert not any("systemd-networkd-wait-online.service" in c for c in calls)
     assert not any(c[0] == "nmcli" for c in calls)
     net = sample_config.install_path / "network"
     assert (net / "60-lo-vip.netdev").read_text() == "[NetDev]\nName=lo-vip\nKind=dummy\n"
@@ -185,7 +188,10 @@ def test_networkd_without_nmcli_running(sample_config: OberConfig) -> None:
 
 def test_networkd_not_running_is_started_without_reload(sample_config: OberConfig) -> None:
     calls = _vip_iface(sample_config, "RHEL", tools=("networkctl",), active_rc=3)
-    assert calls[-1] == ["systemctl", "enable", "--now", "systemd-networkd"]
+    assert calls[-2:] == [
+        ["systemctl", "enable", "--now", "systemd-networkd"],
+        ["systemctl", "disable", "systemd-networkd-wait-online.service"],
+    ]
 
 
 def test_networkd_failure_is_reported(sample_config: OberConfig) -> None:
@@ -233,3 +239,62 @@ def test_config_command_exits_1_on_render_error(
     assert result.exit_code == 1
     assert "No S3 frontend" in result.output
     assert "Configuration applied" not in result.output
+
+
+def test_bare_vip_is_rendered_as_slash_32(sample_config: OberConfig) -> None:
+    import yaml
+
+    from ober.commands.config import _networkd_vip_files
+
+    sample_config.vips = [VIPConfig(address="10.0.100.1")]
+    data = yaml.safe_load(_netplan_vip_yaml(sample_config))
+    assert data["network"]["dummy-devices"]["lo-vip"]["addresses"] == ["10.0.100.1/32"]
+    assert "Address=10.0.100.1/32\n" in _networkd_vip_files(sample_config)["60-lo-vip.network"]
+    calls = _vip_iface(sample_config, "RHEL")
+    assert "10.0.100.1/32" in next(c for c in calls if c[2:3] == ["modify"])
+
+
+def test_keepalived_mode_removes_lo_vip(sample_config: OberConfig) -> None:
+    """A lo-vip left from BGP mode would keep every VIP on every node."""
+    sample_config.ha_mode = "keepalived"
+    netplan = sample_config.install_path / "60-vip.yaml"
+    net = sample_config.install_path / "network"
+    net.mkdir()
+    netplan.write_text("x")
+    (net / "60-lo-vip.netdev").write_text("x")
+    calls = _vip_iface(sample_config, "DEBIAN")
+    assert not netplan.exists() and not list(net.iterdir())
+    assert ["netplan", "apply"] in calls and ["networkctl", "delete", "lo-vip"] in calls
+    # Nothing left: no command runs (idempotent)
+    assert _vip_iface(sample_config, "DEBIAN") == []
+
+
+def test_no_vips_removes_nmcli_lo_vip(sample_config: OberConfig) -> None:
+    sample_config.vips = []
+    calls = _vip_iface(sample_config, "RHEL")
+    assert calls == [["nmcli", "connection", "delete", "lo-vip"]]
+
+
+def test_stats_bind_wildcard_rejected_with_internet_vip(sample_config: OberConfig) -> None:
+    sample_config.stats_bind = ["0.0.0.0"]
+    _generate_haproxy_config(sample_config)  # internal VIPs only: allowed
+    assert sample_config.validate()[0] == []
+    sample_config.vips[0].exposure = "internet"
+    with pytest.raises(ValueError, match="stats_bind must not be 0.0.0.0"):
+        _generate_haproxy_config(sample_config)
+    assert any(
+        e.startswith("stats_bind[0]: must not be 0.0.0.0") for e in sample_config.validate()[0]
+    )
+
+
+def test_unchanged_haproxy_config_is_not_rewritten(sample_config: OberConfig) -> None:
+    import os
+
+    _generate_haproxy_config(sample_config)
+    path = sample_config.haproxy_config_path
+    os.utime(path, (1, 1))
+    _generate_haproxy_config(sample_config)
+    assert path.stat().st_mtime == 1
+    sample_config.stats_port = 9000
+    _generate_haproxy_config(sample_config)
+    assert path.stat().st_mtime > 1

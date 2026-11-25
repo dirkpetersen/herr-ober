@@ -223,4 +223,6 @@ def test_keepalived_one_owner_per_vip(cluster: list[OberConfig]) -> None:
         per_node.append({vip: (vrid, prio) for vrid, prio, vip in blocks})
     for vip in (v.address for v in VIPS):
         assert len({node[vip][0] for node in per_node}) == 1
+    assert len({vrid for vrid, _ in per_node[0].values()}) == len(VIPS)  # no VRID collision
+    for vip in (v.address for v in VIPS):
         assert sorted(node[vip][1] for node in per_node) == ["100", "90", "90"]

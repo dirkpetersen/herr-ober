@@ -66,6 +66,30 @@ def get_vrrp_router_id(vip: str) -> int:
     return (int(hashlib.md5(vip.encode()).hexdigest(), 16) % 255) + 1
 
 
+def vrrp_router_ids(vips: list[str]) -> dict[str, int]:
+    """Give each VIP a unique ``virtual_router_id`` (1-255), the same on all nodes.
+
+    Over the sorted VIPs, each one takes its md5 ID, or the next free ID on a collision.
+
+    Raises:
+        ValueError: More than 255 VIPs.
+    """
+    ids: dict[str, int] = {}
+    for vip in sorted(set(vips)):
+        if len(ids) == 255:
+            raise ValueError("keepalived supports at most 255 VIPs (virtual_router_id 1-255)")
+        vrid = get_vrrp_router_id(vip)
+        while vrid in ids.values():
+            vrid = vrid % 255 + 1
+        ids[vip] = vrid
+    return ids
+
+
+def keepalived_peers(config: OberConfig, local_ip: str) -> list[str]:
+    """Peers without duplicates and without this node (one ober.yaml can list all nodes)."""
+    return [p for p in dict.fromkeys(config.keepalived.peers) if p != local_ip]
+
+
 def _parse_hostlist(hostlist: str) -> list[str]:
     """Parse comma-separated hostlist, supporting Slurm hostlist syntax.
 
@@ -686,8 +710,8 @@ def _validate_vip(vip: str) -> tuple[bool, str]:
         ip_part, cidr_part = vip.rsplit("/", 1)
         try:
             cidr = int(cidr_part)
-            if not (0 <= cidr <= 32):
-                return False, f"Invalid CIDR prefix: /{cidr_part} (must be 0-32)"
+            if cidr != 32:
+                return False, f"Invalid CIDR prefix: /{cidr_part} (must be a single address (/32))"
         except ValueError:
             return False, f"Invalid CIDR prefix: /{cidr_part}"
     else:
@@ -813,10 +837,10 @@ def _apply_configuration(
     # Generate BGP or Keepalived config based on ha_mode
     if config.ha_mode == "bgp":
         _generate_exabgp_config(config)
-        # Configure VIP interface (only for BGP mode - keepalived manages VIPs itself)
-        _configure_vip_interface(config)
     else:
         _generate_keepalived_config(config)
+    # BGP mode puts the VIPs on lo-vip; keepalived mode removes it (keepalived adds the VIPs)
+    _configure_vip_interface(config)
 
     if os.geteuid() == 0 if is_root is None else is_root:
         _ensure_runtime_dir(config, systemd_dir, run_dir)
@@ -863,9 +887,24 @@ _LOG_VARS_INIT = (
 )
 
 
+def _write_if_changed(path: Path, text: str) -> None:
+    """Write only a changed file, so a no-op apply does not look like a pending reload."""
+    try:
+        if path.read_text() == text:
+            return
+    except OSError:
+        pass
+    path.write_text(text)
+
+
 def _vip_host(address: str) -> str:
     """Return the bare IP of a VIP in CIDR notation."""
     return address.split("/")[0]
+
+
+def _vip_cidr(address: str) -> str:
+    """Return a VIP as ``ip/32`` (netplan rejects a bare address)."""
+    return f"{_vip_host(address)}/32"
 
 
 def _validated_hostnames(names: list[str]) -> list[str]:
@@ -1166,7 +1205,7 @@ def _write_security_lists(config: OberConfig) -> None:
         (config.trusted_path, config.security.trusted_networks, "trusted network"),
         (_internal_path(config), config.security.internal_networks, "internal network"),
     ):
-        path.write_text("".join(f"{line}\n" for line in _valid_networks(entries, label)))
+        _write_if_changed(path, "".join(f"{line}\n" for line in _valid_networks(entries, label)))
     if not config.blocklist_path.exists():
         config.blocklist_path.write_text("")
 
@@ -1218,6 +1257,8 @@ def _generate_haproxy_config(
 
     internet = [v for v in config.vips if v.exposure == "internet"]
     internal = [v for v in config.vips if v.exposure != "internet"]
+    if internet and any(ipaddress.ip_address(a).is_unspecified for a in stats_addrs):
+        raise ValueError("stats_bind must not be 0.0.0.0 or :: when a VIP has exposure internet")
     # stats/metrics/health have no auth: never answer on an Internet-exposed VIP address
     stats_guard = (
         [
@@ -1297,7 +1338,7 @@ def _generate_haproxy_config(
         cfg_lines.append("")
 
     config.haproxy_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.haproxy_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.haproxy_config_path, "\n".join(cfg_lines))
 
 
 def _generate_exabgp_config(config: OberConfig) -> None:
@@ -1338,7 +1379,7 @@ def _generate_exabgp_config(config: OberConfig) -> None:
         )
 
     config.bgp_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.bgp_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.bgp_config_path, "\n".join(cfg_lines))
 
 
 def _generate_keepalived_config(config: OberConfig) -> None:
@@ -1355,8 +1396,9 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     if not interface:
         interface = _detect_default_interface()
 
-    # Build all nodes list (self + peers)
-    all_nodes = [local_ip] + config.keepalived.peers
+    # Build all nodes list (self + peers); the same list on every node gives one owner per VIP
+    peers = keepalived_peers(config, local_ip)
+    all_nodes = [local_ip, *peers]
 
     cfg_lines = [
         "# Herr Ober Keepalived Configuration",
@@ -1413,10 +1455,11 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     )
 
     # Generate one vrrp_instance per VIP
+    router_ids = vrrp_router_ids([_vip_host(v.address) for v in config.vips])
     for idx, vip_config in enumerate(config.vips):
-        vip = vip_config.address.split("/")[0]  # Strip CIDR notation
+        vip = _vip_host(vip_config.address)
         owner, priority = get_vip_owner(vip, all_nodes, local_ip)
-        router_id = get_vrrp_router_id(vip)
+        router_id = router_ids[vip]
 
         cfg_lines.extend(
             [
@@ -1443,7 +1486,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                     "    unicast_peer {",
                 ]
             )
-            for peer in config.keepalived.peers:
+            for peer in peers:
                 cfg_lines.append(f"        {peer}")
             cfg_lines.extend(
                 [
@@ -1475,7 +1518,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         )
 
     config.keepalived_config_path.parent.mkdir(parents=True, exist_ok=True)
-    config.keepalived_config_path.write_text("\n".join(cfg_lines))
+    _write_if_changed(config.keepalived_config_path, "\n".join(cfg_lines))
     # keepalived ignores a track_file that does not exist when it parses the config
     if not config.maintenance_path.exists():
         set_maintenance(config.maintenance_path, False)
@@ -1488,7 +1531,7 @@ def _netplan_vip_yaml(config: OberConfig) -> str:
     netplan_cfg = {
         "network": {
             "version": 2,
-            "dummy-devices": {"lo-vip": {"addresses": [v.address for v in config.vips]}},
+            "dummy-devices": {"lo-vip": {"addresses": [_vip_cidr(v.address) for v in config.vips]}},
         }
     }
     return yaml.dump(netplan_cfg, default_flow_style=False)
@@ -1500,7 +1543,7 @@ def _networkd_vip_files(config: OberConfig) -> dict[str, str]:
     The ``.network`` file matches only ``lo-vip``, so networkd does not touch other links
     (on Amazon Linux, amazon-ec2-net-utils writes the configs for the ENIs).
     """
-    addresses = "".join(f"Address={v.address}\n" for v in config.vips)
+    addresses = "".join(f"Address={_vip_cidr(v.address)}\n" for v in config.vips)
     return {
         "60-lo-vip.netdev": "[NetDev]\nName=lo-vip\nKind=dummy\n",
         "60-lo-vip.network": (
@@ -1528,7 +1571,13 @@ def _configure_vip_interface(
 
     system = SystemInfo()
 
-    if not config.vips or system.os_family == OSFamily.UNKNOWN:
+    if system.os_family == OSFamily.UNKNOWN:
+        return
+    if config.ha_mode != "bgp" or not config.vips:
+        # A lo-vip left from BGP mode keeps every VIP on every node and breaks VRRP failover
+        from ober.commands.uninstall import _remove_vip_interface
+
+        _remove_vip_interface(system, networkd_dir, netplan_path)
         return
 
     tool = "netplan" if system.os_family == OSFamily.DEBIAN else "nmcli"
@@ -1552,7 +1601,7 @@ def _configure_vip_interface(
                     + ["ifname", "lo-vip", "con-name", "lo-vip"]
                 )
             # Set the full list, so removed VIPs go away and nothing is added twice
-            addresses = ",".join(v.address for v in config.vips)
+            addresses = ",".join(_vip_cidr(v.address) for v in config.vips)
             run_command(
                 ["nmcli", "connection", "modify", "lo-vip", "ipv4.method", "manual"]
                 + ["ipv4.addresses", addresses]
@@ -1570,6 +1619,11 @@ def _configure_vip_interface(
             if active.returncode == 0:
                 # reload creates a new netdev and reapplies changed .network files
                 run_command(["networkctl", "reload"])
+            else:
+                # enable pulls in wait-online (Also=); with only lo-vip it waits ~2 min at boot
+                run_command(
+                    ["systemctl", "disable", "systemd-networkd-wait-online.service"], check=False
+                )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         raise RuntimeError(f"VIP interface setup failed: {' '.join(exc.cmd)}: {detail}") from exc

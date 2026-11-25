@@ -95,6 +95,31 @@ class TestCertExpiry:
     def test_fresh_cert_has_about_100_days(self, pem_cert: Path) -> None:
         assert check_cert_expiry(pem_cert)["days_left"] in (99, 100)
 
+    def test_directory_reports_worst_pem(self, pem_cert: Path, temp_dir: Path) -> None:
+        import shutil
+
+        certs = temp_dir / "certs"
+        certs.mkdir()
+        assert check_cert_expiry(certs)["level"] == "warn"  # empty directory
+        shutil.copy(pem_cert, certs / "a.pem")
+        result = check_cert_expiry(certs)
+        assert result["level"] == "ok" and result["message"].startswith("a.pem: ")
+        (certs / "b.pem").write_text("garbage")
+        result = check_cert_expiry(certs)
+        assert result["level"] == "crit" and result["message"].startswith("b.pem: ")
+
+    def test_permission_denied_is_warn(self, pem_cert: Path) -> None:
+        import os
+
+        if os.geteuid() == 0:
+            pytest.skip("root can read any file")
+        pem_cert.chmod(0)
+        try:
+            result = check_cert_expiry(pem_cert)
+        finally:
+            pem_cert.chmod(0o600)
+        assert result["level"] == "warn" and "run as root" in result["message"]
+
     def test_unreadable(self, temp_dir: Path) -> None:
         result = check_cert_expiry(temp_dir / "missing.pem")
         assert result["level"] == "crit" and result["days_left"] is None
@@ -110,6 +135,38 @@ class TestStatusCheck:
         assert code == 0, out
         assert out.startswith("OBER OK")
         assert "\n" not in out
+
+    def test_bgp_session_down_warns(
+        self, cli_runner: CliRunner, node: OberConfig, healthy: None
+    ) -> None:
+        node.bgp.neighbors = ["10.0.0.1", "10.0.0.2"]
+        node.save()
+        write_state(node, status.HEALTH_STATE_FILE, {"announced": [f"{VIP1}/32", f"{VIP2}/32"]})
+        sessions = {"10.0.0.1": True, "10.0.0.2": False}
+        with patch.object(status, "bgp_sessions", return_value=sessions):
+            code, out = run_check(cli_runner)
+            human = cli_runner.invoke(main, ["status"]).output
+        assert code == 1
+        assert "BGP neighbor 10.0.0.2: no established session" in out
+        assert "10.0.0.1:" not in out
+        assert "BGP 10.0.0.2: not established" in human
+        with patch.object(status, "bgp_sessions", return_value=None):
+            code, out = run_check(cli_runner)
+        assert code == 1 and "BGP session state unknown" in out
+
+    def test_bgp_sessions_parses_ss(self) -> None:
+        from unittest.mock import MagicMock
+
+        ss = "0 0 10.0.0.5:41234 10.0.0.1:179\n0 0 [::ffff:10.0.0.5]:179 [::ffff:10.0.0.3]:5\n"
+        with patch.object(
+            status.subprocess, "run", return_value=MagicMock(returncode=0, stdout=ss)
+        ):
+            got = status.bgp_sessions(["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+        assert got == {"10.0.0.1": True, "10.0.0.2": False, "10.0.0.3": True}
+        with patch.object(status.subprocess, "run", side_effect=OSError):
+            assert status.bgp_sessions(["10.0.0.1"]) is None
+        with patch.object(status.subprocess, "run", return_value=MagicMock(returncode=1)):
+            assert status.bgp_sessions(["10.0.0.1"]) is None
 
     def test_missing_health_state_is_unknown_warn(
         self, cli_runner: CliRunner, node: OberConfig, healthy: None

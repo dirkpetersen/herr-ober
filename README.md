@@ -13,7 +13,7 @@ Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress co
 - **BGP/ECMP Mode** - Uses **ExaBGP** for Layer 3 HA via BGP (requires BGP-capable router)
 - **Keepalived Mode** - Uses **VRRP** for VIP failover (no BGP required)
 
-**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM), and Amazon Linux 2023/2027 on EC2
+**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2
 
 ---
 
@@ -58,7 +58,7 @@ ober bootstrap
 The one-liner also writes `/etc/profile.d/herr-ober.sh`, which exports `PIPX_HOME` and
 `PIPX_BIN_DIR`, so a later `pipx upgrade herr-ober` in a new root shell finds the global install.
 
-**Amazon Linux 2023/2027:** there is no pipx package, so the one-liner installs pipx into its
+**Amazon Linux 2027:** there is no pipx package, so the one-liner installs pipx into its
 own venv at `/opt/pipx-tool` and then works as on the other systems. You can also install into
 a plain venv outside `/root` and `/home` (as `lab/aws/deploy.sh` does):
 ```bash
@@ -167,7 +167,9 @@ uses another NIC.
 
 `ober bootstrap` changes no firewall unless you add `--firewall`. With it, bootstrap allows the
 SSH port(s) from `sshd -T` first, then 443/tcp and VRRP, and then enables ufw (Debian/Ubuntu) or
-firewalld (RHEL). All rules are persistent. Port 80, BGP and the stats port are not opened.
+firewalld (RHEL). When the firewall is already active, bootstrap adds only 443/tcp and VRRP and
+keeps your SSH rules. If `sshd -T` fails, bootstrap stops before it changes the firewall. All
+rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every
 client and RGW connection.
 

@@ -34,11 +34,11 @@ class TestVIPValidation:
         assert is_valid is True
         assert error == ""
 
-    def test_validate_vip_valid_ip_with_cidr_24(self) -> None:
-        """Test validation of valid IP with /24 CIDR."""
+    def test_validate_vip_rejects_cidr_24(self) -> None:
+        """A /24 on lo-vip adds a connected route that blackholes replies."""
         is_valid, error = _validate_vip("10.0.0.1/24")
-        assert is_valid is True
-        assert error == ""
+        assert is_valid is False
+        assert "must be a single address (/32)" in error
 
     def test_validate_vip_invalid_ip(self) -> None:
         """Test validation of invalid IP address."""
@@ -538,3 +538,56 @@ def temp_dir() -> Path:
 def cli_runner() -> CliRunner:
     """Create a CLI runner."""
     return CliRunner()
+
+
+def test_same_peer_list_on_all_nodes_gives_one_owner(temp_dir: Path) -> None:
+    """One ober.yaml lists all nodes (self included): each VIP still has exactly one owner."""
+    import re
+
+    from ober.commands.config import _generate_keepalived_config
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    vips = ["192.168.1.100", "192.168.1.101", "192.168.1.102", "192.168.1.103"]
+    priorities: dict[str, list[int]] = {v: [] for v in vips}
+    for node in nodes:
+        config = OberConfig(install_path=temp_dir / node, local_ip=node)
+        config.ha_mode = "keepalived"
+        config.keepalived = KeepalivedConfig(peers=[*nodes, nodes[0]], interface="eth0")
+        config.vips = [VIPConfig(address=v) for v in vips]
+        config.ensure_directories()
+        _generate_keepalived_config(config)
+        text = config.keepalived_config_path.read_text()
+        for block in text.split("vrrp_instance ")[1:]:
+            vip = re.search(r"virtual_ipaddress \{\s+(\S+)/32", block)
+            prio = re.search(r"priority (\d+)", block)
+            assert vip and prio
+            priorities[vip.group(1)].append(int(prio.group(1)))
+            peers = re.search(r"unicast_peer \{([^}]*)\}", block)
+            assert peers and peers.group(1).split() == [n for n in nodes if n != node]
+    for vip, prios in priorities.items():
+        assert sorted(prios) == [90, 90, 100], vip
+
+
+def test_status_expected_owner_matches_generator() -> None:
+    from ober.commands.status import _expected_owner
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    owners = set()
+    for node in nodes:
+        config = OberConfig(local_ip=node, keepalived=KeepalivedConfig(peers=nodes))
+        owners.add(_expected_owner(config, "192.168.1.100"))
+    assert owners == {get_vip_owner("192.168.1.100", nodes, "")[0]}
+
+
+def test_vrrp_router_ids_are_unique() -> None:
+    from ober.commands.config import vrrp_router_ids
+
+    assert get_vrrp_router_id("10.0.0.2") == get_vrrp_router_id("10.0.0.6")
+    ids = vrrp_router_ids(["10.0.0.6", "10.0.0.2"])
+    assert ids == vrrp_router_ids(["10.0.0.2", "10.0.0.6"])  # same on every node
+    assert ids["10.0.0.2"] == get_vrrp_router_id("10.0.0.2")
+    assert ids["10.0.0.6"] != ids["10.0.0.2"]
+    many = vrrp_router_ids([f"10.0.{i // 250}.{i % 250}" for i in range(255)])
+    assert sorted(many.values()) == list(range(1, 256))
+    with pytest.raises(ValueError, match="at most 255"):
+        vrrp_router_ids([f"10.1.{i // 250}.{i % 250}" for i in range(256)])

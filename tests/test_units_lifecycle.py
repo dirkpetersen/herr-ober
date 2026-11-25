@@ -228,3 +228,18 @@ def test_restart_keepalived_checks_before_haproxy_reload() -> None:
     result, calls = _invoke(["restart"], ha_mode="keepalived", check_rc=1)
     assert result.exit_code == 1
     assert ["systemctl", "reload", "ober-http"] not in calls
+
+
+def test_uninstall_removes_kernel_tuning_files(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from ober.commands import uninstall
+
+    sysctl, modules = tmp_path / "99-herr-ober.conf", tmp_path / "herr-ober.conf"
+    sysctl.write_text("x")
+    modules.write_text("nf_conntrack\n")
+    with patch.object(uninstall, "run_command") as run:
+        uninstall._remove_kernel_tuning(sysctl, modules)
+        uninstall._remove_kernel_tuning(sysctl, modules)  # nothing left: no error
+    assert not sysctl.exists() and not modules.exists()
+    assert run.call_count == 1
