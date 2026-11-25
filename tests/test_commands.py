@@ -509,10 +509,32 @@ class TestUninstallCommand:
         system = SystemInfo()
         system.os_family = OSFamily.RHEL
 
-        with patch("ober.commands.uninstall.run_command") as mock_run:
-            _remove_vip_interface(system)
+        with (
+            patch("ober.commands.uninstall.check_command_exists", return_value=True),
+            patch("ober.commands.uninstall.run_command") as mock_run,
+        ):
+            _remove_vip_interface(system, networkd_dir=Path("/nonexistent"))
             # Should call nmcli
             assert mock_run.called
+
+    def test_remove_vip_interface_networkd(self, tmp_path: Path) -> None:
+        """Amazon Linux: no nmcli; the networkd files are removed and the link deleted."""
+        from ober.commands.uninstall import _remove_vip_interface
+        from ober.system import OSFamily
+
+        system = SystemInfo()
+        system.os_family = OSFamily.RHEL
+        for name in ("60-lo-vip.netdev", "60-lo-vip.network"):
+            (tmp_path / name).write_text("x")
+
+        with (
+            patch("ober.commands.uninstall.check_command_exists", return_value=False),
+            patch("ober.commands.uninstall.run_command") as mock_run,
+        ):
+            _remove_vip_interface(system, networkd_dir=tmp_path)
+        assert not list(tmp_path.iterdir())
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        assert cmds == [["networkctl", "delete", "lo-vip"], ["networkctl", "reload"]]
 
 
 class TestHealthCommand:

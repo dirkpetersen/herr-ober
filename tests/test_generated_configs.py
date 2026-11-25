@@ -106,7 +106,14 @@ def test_exabgp_health_uses_running_interpreter(sample_config: OberConfig) -> No
     assert str(sample_config.venv_path / "bin" / "python") not in text
 
 
-def _vip_iface(config: OberConfig, family: str, show_rc: int = 0, fail: bool = False) -> list:
+def _vip_iface(
+    config: OberConfig,
+    family: str,
+    show_rc: int = 0,
+    fail: bool = False,
+    tools: tuple[str, ...] = ("netplan", "nmcli", "networkctl"),
+    active_rc: int = 0,
+) -> list:
     """Run _configure_vip_interface with mocks and return the commands it ran."""
     import subprocess
     from pathlib import Path
@@ -118,7 +125,12 @@ def _vip_iface(config: OberConfig, family: str, show_rc: int = 0, fail: bool = F
 
     def run(cmd: list[str], check: bool = True, **_: object) -> MagicMock:
         calls.append(cmd)
-        rc = show_rc if cmd[:3] == ["nmcli", "connection", "show"] else int(fail)
+        if cmd[:3] == ["nmcli", "connection", "show"]:
+            rc = show_rc
+        elif cmd[:2] == ["systemctl", "is-active"]:
+            rc = active_rc
+        else:
+            rc = int(fail)
         if rc and check:
             raise subprocess.CalledProcessError(rc, cmd, stderr="boom")
         return MagicMock(returncode=rc)
@@ -126,10 +138,14 @@ def _vip_iface(config: OberConfig, family: str, show_rc: int = 0, fail: bool = F
     system = MagicMock(os_family=OSFamily[family])
     with (
         patch("ober.system.SystemInfo", return_value=system),
-        patch("ober.system.check_command_exists", return_value=True),
+        patch("ober.system.check_command_exists", side_effect=lambda t: t in tools),
         patch("ober.system.run_command", side_effect=run),
     ):
-        _configure_vip_interface(config, netplan_path=Path(config.install_path) / "60-vip.yaml")
+        _configure_vip_interface(
+            config,
+            netplan_path=Path(config.install_path) / "60-vip.yaml",
+            networkd_dir=Path(config.install_path) / "network",
+        )
     return calls
 
 
@@ -150,6 +166,36 @@ def test_nmcli_creates_missing_connection(sample_config: OberConfig) -> None:
 def test_vip_interface_failure_is_reported(sample_config: OberConfig) -> None:
     with pytest.raises(RuntimeError, match="netplan apply: boom"):
         _vip_iface(sample_config, "DEBIAN", fail=True)
+
+
+def test_networkd_without_nmcli_running(sample_config: OberConfig) -> None:
+    calls = _vip_iface(sample_config, "RHEL", tools=("networkctl",), active_rc=0)
+    assert ["systemctl", "enable", "--now", "systemd-networkd"] in calls
+    assert calls[-1] == ["networkctl", "reload"]
+    assert not any(c[0] == "nmcli" for c in calls)
+    net = sample_config.install_path / "network"
+    assert (net / "60-lo-vip.netdev").read_text() == "[NetDev]\nName=lo-vip\nKind=dummy\n"
+    network = (net / "60-lo-vip.network").read_text()
+    assert "[Match]\nName=lo-vip\n" in network
+    assert "Address=10.0.100.1/32\nAddress=10.0.100.2/32\n" in network
+    # Run again: same files, no error (idempotent)
+    _vip_iface(sample_config, "RHEL", tools=("networkctl",))
+    assert (net / "60-lo-vip.network").read_text() == network
+
+
+def test_networkd_not_running_is_started_without_reload(sample_config: OberConfig) -> None:
+    calls = _vip_iface(sample_config, "RHEL", tools=("networkctl",), active_rc=3)
+    assert calls[-1] == ["systemctl", "enable", "--now", "systemd-networkd"]
+
+
+def test_networkd_failure_is_reported(sample_config: OberConfig) -> None:
+    with pytest.raises(RuntimeError, match="systemctl enable --now systemd-networkd: boom"):
+        _vip_iface(sample_config, "RHEL", tools=("networkctl",), fail=True)
+
+
+def test_no_vip_tool_is_reported(sample_config: OberConfig) -> None:
+    with pytest.raises(RuntimeError, match="nmcli or networkctl not found"):
+        _vip_iface(sample_config, "RHEL", tools=())
 
 
 def test_netplan_written_and_applied(sample_config: OberConfig) -> None:
