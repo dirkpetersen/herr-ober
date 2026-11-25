@@ -26,7 +26,8 @@ set -euo pipefail
 GOBGP_VERSION="$1"; HELPER_IP="$2"; IFS=, read -r -a NODE_IPS <<<"$3"
 dnf -y -q install python3-pip tar jq iproute >/dev/null
 
-# S3 backends: two moto servers, one per port.
+# S3 backends: two moto servers, one per port. They share no state, so for a data test
+# list only one of them in ober.yaml backends.
 if [ ! -x /opt/lab/bin/moto_server ]; then
     python3 -m venv /opt/lab
     /opt/lab/bin/pip -q install 'moto[server]' awscli
@@ -37,6 +38,8 @@ for port in 9001 9002; do
 Description=lab S3 backend (moto) on $port
 After=network-online.target
 [Service]
+# moto reads the first label of an unknown Host header as a bucket name
+Environment=MOTO_S3_CUSTOM_ENDPOINTS=https://s3.lab.internal
 ExecStart=/opt/lab/bin/moto_server -H 0.0.0.0 -p $port
 Restart=always
 [Install]

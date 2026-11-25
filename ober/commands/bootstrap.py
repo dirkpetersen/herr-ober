@@ -53,6 +53,11 @@ net.ipv4.ip_nonlocal_bind = 1
 # Local Port Range
 net.ipv4.ip_local_port_range = 1024 65535
 
+# VIPs on lo-vip (BGP mode): answer ARP only for addresses on the receiving interface and
+# use a source address of that interface, so a node never claims a VIP on its LAN.
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.all.arp_announce = 2
+
 # Connection tracking: a stateful firewall tracks every client and RGW connection.
 # The kernel default (often 262144) fills at this rate and then drops new connections.
 # 1M entries use at most about 320 MB. nf_conntrack is loaded at boot (modules-load.d).
@@ -334,10 +339,12 @@ def _install_packages(system: SystemInfo) -> None:
     if system.os_family == OSFamily.DEBIAN:
         # Add HAProxy PPA for latest version (3.3+ with AWS-LC) on Ubuntu
         if "ubuntu" in system.os_name.lower():
-            run_command(
-                ["add-apt-repository", "-y", "ppa:vbernat/haproxy-3.3"],
-                check=False,
-            )
+            ppa = run_command(["add-apt-repository", "-y", "ppa:vbernat/haproxy-3.3"], check=False)
+            if ppa.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
+                console.print(
+                    "[yellow]Warning:[/yellow] cannot add ppa:vbernat/haproxy-3.3, using the "
+                    "distro HAProxy. Check its version with 'haproxy -v'."
+                )
         run_command(["apt-get", "update"], check=False)
         # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])

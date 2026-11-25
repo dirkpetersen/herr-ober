@@ -164,6 +164,16 @@ class TestTestCommand:
         assert result["expiry"] == "ok"
         assert "days left" in result["message"]
 
+    def test_certificate_directory(self, pem_cert: Path, temp_dir: Path) -> None:
+        """HAProxy 'crt <dir>': the test checks the PEM files in it."""
+        certs = temp_dir / "certs"
+        certs.mkdir()
+        (certs / "s3.pem").write_text(pem_cert.read_text())
+        assert _test_certificate(str(certs))["passed"] is True
+        empty = temp_dir / "empty"
+        empty.mkdir()
+        assert _test_certificate(str(empty))["passed"] is False
+
     def test_certificate_unparsable(self, temp_dir: Path) -> None:
         """A PEM with markers but no real certificate fails the expiry check."""
         cert_path = temp_dir / "cert.pem"
