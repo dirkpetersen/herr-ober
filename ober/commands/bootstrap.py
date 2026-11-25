@@ -332,9 +332,10 @@ def _install_packages(system: SystemInfo) -> None:
                 check=False,
             )
         run_command(["apt-get", "update"], check=False)
-        run_command(["apt-get", "install", "-y", "haproxy", "keepalived"])
+        # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
+        run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])
     elif system.os_family == OSFamily.RHEL:
-        run_command(["dnf", "install", "-y", "haproxy", "keepalived"])
+        run_command(["dnf", "install", "-y", "haproxy", "keepalived", "iputils"])
 
 
 def _disable_distro_units() -> None:
