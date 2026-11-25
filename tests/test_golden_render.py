@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -95,7 +96,9 @@ def render(root: Path, cert: Path, mode: str, node: int) -> OberConfig:
         neighbors=["10.10.0.1", "10.10.0.2"], router_id=ip, local_address=ip, bfd_enabled=True
     )
     # interface "" = the default route interface; keepalived -t fails on a missing one
-    config.keepalived = KeepalivedConfig(peers=[n for n in NODES if n != ip])
+    config.keepalived = KeepalivedConfig(
+        peers=[n for n in NODES if n != ip], gateway_check="10.10.0.1"
+    )
     _write_security_lists(config)
     _generate_haproxy_config(config, socket_path=root / "h.sock")
     if mode == "bgp":
@@ -107,7 +110,12 @@ def render(root: Path, cert: Path, mode: str, node: int) -> OberConfig:
     else:
         system = MagicMock(hostname=f"node{node + 1}")
         system.get_local_ip.return_value = ip
-        with patch("ober.system.SystemInfo", return_value=system):
+        # Script security refuses scripts on a path a non-root user can write (a CI or
+        # test venv); production venvs are root-owned, so check with a root-owned python
+        with (
+            patch("ober.system.SystemInfo", return_value=system),
+            patch.object(sys, "executable", "/usr/bin/python3"),
+        ):
             _generate_keepalived_config(config)
     return config
 
@@ -177,6 +185,9 @@ def test_keepalived_check(cluster: list[OberConfig]) -> None:
     if os.geteuid() != 0:
         pytest.skip("keepalived -t needs root to accept the root script_user")
     for config in cluster:
+        text = config.keepalived_config_path.read_text()
+        for needed in ("enable_script_security", "chk_gateway", "track_file", "notify"):
+            assert needed in text
         _run([keepalived, "-t", "-f", str(config.keepalived_config_path)])
 
 

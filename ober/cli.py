@@ -120,8 +120,11 @@ def main(ctx: Context, json_output: bool, quiet: bool, verbose: bool) -> None:
     ctx.quiet = quiet
     ctx.verbose = verbose
 
-    # Load config if it exists
-    ctx.config = OberConfig.load()
+    # Load config if it exists. A broken config must not break stop, status or logs.
+    try:
+        ctx.config = OberConfig.load()
+    except Exception:
+        ctx.config = None
 
 
 # Import subcommands (must be after main group is defined)
@@ -130,6 +133,7 @@ from ober.commands.config import config  # noqa: E402
 from ober.commands.doctor import doctor  # noqa: E402
 from ober.commands.health import health  # noqa: E402
 from ober.commands.logs import logs  # noqa: E402
+from ober.commands.maintenance import maintenance  # noqa: E402
 from ober.commands.service import restart, start, stop  # noqa: E402
 from ober.commands.status import status  # noqa: E402
 from ober.commands.sync import sync  # noqa: E402
@@ -144,6 +148,7 @@ main.add_command(config)
 main.add_command(doctor)
 main.add_command(health)
 main.add_command(logs)
+main.add_command(maintenance)
 main.add_command(restart)
 main.add_command(start)
 main.add_command(status)
@@ -154,6 +159,32 @@ main.add_command(uninstall)
 main.add_command(upgrade)
 main.add_command(watch)
 main.add_command(blocklist)
+
+
+def _set_json(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    if value:
+        ctx.ensure_object(Context).json_output = True
+
+
+def _add_json_option(cmd: click.Command) -> None:
+    """Accept ``--json`` after the command name too (``ober status --json``)."""
+    if not any("--json" in p.opts for p in cmd.params):
+        cmd.params.append(
+            click.Option(
+                ["--json", "json_flag"],
+                is_flag=True,
+                expose_value=False,
+                callback=_set_json,
+                help="Output in JSON format.",
+            )
+        )
+    if isinstance(cmd, click.Group):
+        for sub in cmd.commands.values():
+            _add_json_option(sub)
+
+
+for _cmd in main.commands.values():
+    _add_json_option(_cmd)
 
 
 if __name__ == "__main__":

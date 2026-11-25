@@ -310,7 +310,99 @@ bgp:
         config = OberConfig(install_path=Path("/custom"))
         assert config.certs_path == Path("/custom/etc/certs")
 
-    def test_whitelist_path(self) -> None:
-        """Test whitelist_path property."""
-        config = OberConfig(install_path=Path("/custom"))
-        assert config.whitelist_path == Path("/custom/etc/haproxy/whitelist.lst")
+
+class TestValidate:
+    """Schema validation of ober.yaml (load never raises, validate reports all)."""
+
+    def _load(self, tmp_path: Path, text: str) -> OberConfig:
+        path = tmp_path / "ober.yaml"
+        path.write_text(text)
+        return OberConfig.load(path)
+
+    def test_defaults_are_valid(self) -> None:
+        assert OberConfig().validate() == ([], [])
+
+    def test_syntax_error_is_one_clear_error(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "ha_mode: bgp\nbgp:\n  local_as: 1\n bad: [\n")
+        errors, _ = config.validate()
+        assert len(errors) == 1
+        assert "YAML syntax error at line" in errors[0]
+        assert config.ha_mode == "bgp"  # defaults stay usable for stop/status/logs
+
+    def test_duplicate_key_is_an_error(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "bgp: {neighbors: [10.0.0.1]}\nstats_port: 1\nbgp: {}\n")
+        errors, _ = config.validate()
+        assert len(errors) == 1
+        assert "line 3" in errors[0] and "duplicate key 'bgp'" in errors[0]
+
+    def test_reports_all_problems(self, tmp_path: Path) -> None:
+        config = self._load(
+            tmp_path,
+            "ha_mode: bgpp\n"
+            "stats_port: 70000\n"
+            "bgp: {local_as: abc, neighbors: [10.0.0.300]}\n"
+            "vips: [{address: 10.0.0.1/40, exposure: public}]\n"
+            "backends: [{name: rgw, servers: '10.1.0.1:7480'}]\n"
+            "security: {allowlist: [not-a-net]}\n",
+        )
+        errors, _ = config.validate()
+        text = "\n".join(errors)
+        for key in (
+            "ha_mode",
+            "stats_port",
+            "bgp.local_as",
+            "bgp.neighbors[0]",
+            "vips[0].address",
+            "vips[0].exposure",
+            "backends[0].servers: must be a list",
+            "security.allowlist[0]",
+        ):
+            assert key in text, key
+
+    def test_bad_section_shape(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "bgp: 5\nvips: 10.0.0.1\nbackends: [rgw]\n")
+        errors, _ = config.validate()
+        assert any(e.startswith("bgp: must be a mapping") for e in errors)
+        assert any(e.startswith("vips: must be a list") for e in errors)
+        assert any(e.startswith("backends[0]: must be a mapping") for e in errors)
+
+    def test_unknown_keys_are_warnings(self, tmp_path: Path) -> None:
+        config = self._load(tmp_path, "stats_prot: 9000\nbgp: {hold_tme: 9}\n")
+        errors, warnings = config.validate()
+        assert errors == []
+        assert "stats_prot: unknown key (ignored)" in warnings
+        assert "bgp.hold_tme: unknown key (ignored)" in warnings
+
+    def test_save_load_round_trip(self, tmp_path: Path) -> None:
+        config = OberConfig(install_path=tmp_path, local_ip="10.0.0.5")
+        config.vips = [VIPConfig(address="10.0.100.1/32", exposure="internet")]
+        config.save()
+        loaded = OberConfig.load(config.config_path)
+        assert loaded == config
+        assert loaded.validate() == ([], [])
+
+
+def test_node_ip_prefers_override() -> None:
+    assert OberConfig(local_ip="10.9.9.9").node_ip() == "10.9.9.9"
+
+
+def test_health_and_drain_fields_validate(tmp_path: Path) -> None:
+    path = tmp_path / "ober.yaml"
+    path.write_text(
+        "drain_timeout: 0\nbgp: {health_rise: 0, health_fall: 0, health_holddown: -1}\n"
+        "keepalived: {gateway_check: nope}\n"
+    )
+    errors, _ = OberConfig.load(path).validate()
+    text = "\n".join(errors)
+    for key in (
+        "drain_timeout",
+        "bgp.health_rise",
+        "bgp.health_fall",
+        "bgp.health_holddown",
+        "keepalived.gateway_check",
+    ):
+        assert key in text, key
+    good = OberConfig(install_path=tmp_path, drain_timeout=60)
+    good.bgp.health_rise, good.keepalived.gateway_check = 5, "10.0.0.1"
+    good.save()
+    assert OberConfig.load(good.config_path) == good

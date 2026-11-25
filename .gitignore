@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# AWS lab state written by lab/aws/up.sh
+lab/aws/inventory
+lab/aws/ssh_config
+lab/aws/known_hosts

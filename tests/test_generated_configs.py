@@ -162,3 +162,28 @@ def test_stats_bind_roundtrip(sample_config: OberConfig) -> None:
     sample_config.stats_bind = ["10.0.5.1"]
     sample_config.save()
     assert OberConfig.load(sample_config.config_path).stats_bind == ["10.0.5.1"]
+
+
+def test_config_command_exits_1_on_render_error(
+    sample_config: OberConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from ober.cli import main
+
+    sample_config.save()
+    monkeypatch.setenv("OBER_INSTALL_PATH", str(sample_config.install_path))
+    with (
+        patch("ober.cli.SystemInfo") as system,
+        patch(
+            "ober.commands.config._apply_configuration",
+            side_effect=ValueError("No S3 frontend can be generated: missing backends"),
+        ),
+    ):
+        system.return_value.is_root = True
+        result = CliRunner().invoke(main, ["config", "--non-interactive"])
+    assert result.exit_code == 1
+    assert "No S3 frontend" in result.output
+    assert "Configuration applied" not in result.output

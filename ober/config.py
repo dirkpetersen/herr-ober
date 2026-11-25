@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Configuration management for Ober."""
 
+import ipaddress
 import os
-from dataclasses import asdict, dataclass, field
+import re
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args, get_origin
 
+import click
 import yaml
 
 
@@ -20,6 +23,9 @@ class BGPConfig:
     local_address: str = ""
     hold_time: int = 3
     bfd_enabled: bool = True
+    health_rise: int = 3  # good probes in a row before routes are announced
+    health_fall: int = 2  # failed probes in a row before routes are withdrawn
+    health_holddown: int = 5  # seconds after health start before the first announce
 
 
 @dataclass
@@ -109,15 +115,6 @@ class MDEConfig:
     max_active_indicators: int = 1000  # the 15,000 tenant quota is shared with the SOC
 
 
-def _section_from_dict(cls: type[Any], data: dict[str, Any] | None) -> Any:
-    """Build a config dataclass from a dict, ignoring unknown keys."""
-    from dataclasses import fields
-
-    data = data or {}
-    names = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in data.items() if k in names})
-
-
 @dataclass
 class BackendConfig:
     """Backend server configuration."""
@@ -150,6 +147,7 @@ class KeepalivedConfig:
     interface: str = ""  # Network interface for VIP (auto-detected if empty)
     use_multicast: bool = False  # Default: unicast
     advert_int: int = 1  # VRRP advertisement interval (seconds)
+    gateway_check: str = ""  # IP to ping; when unreachable the node goes to FAULT ("" = off)
 
 
 INSTALL_POINTER_PATH = Path("/etc/ober/install_path")
@@ -202,6 +200,9 @@ class OberConfig:
 
     install_path: Path = field(default_factory=_get_default_install_path)
     ha_mode: str = "bgp"  # "bgp" or "keepalived"
+    # This node's IP for keepalived unicast_src_ip and BGP router-id/local-address defaults;
+    # "" = the source address of the default route
+    local_ip: str = ""
     bgp: BGPConfig = field(default_factory=BGPConfig)
     keepalived: KeepalivedConfig = field(default_factory=KeepalivedConfig)
     vips: list[VIPConfig] = field(default_factory=list)
@@ -209,6 +210,7 @@ class OberConfig:
     certs: CertConfig = field(default_factory=CertConfig)
     log_retention_days: int = 7
     stats_port: int = 8404
+    drain_timeout: int = 30  # seconds `ober stop` waits for connections to close
     # Extra addresses for stats/metrics/health; 127.0.0.1 is always bound
     stats_bind: list[str] = field(default_factory=list)
     security: SecurityConfig = field(default_factory=SecurityConfig)
@@ -216,6 +218,8 @@ class OberConfig:
     sentinel: SentinelConfig = field(default_factory=SentinelConfig)
     mde: MDEConfig = field(default_factory=MDEConfig)
     _venv_path_override: Path | None = field(default=None, repr=False)
+    _load_errors: list[str] = field(default_factory=list, repr=False, compare=False)
+    _load_warnings: list[str] = field(default_factory=list, repr=False, compare=False)
 
     @property
     def config_path(self) -> Path:
@@ -249,10 +253,13 @@ class OberConfig:
             return self._venv_path_override
         return self.install_path / "venv"
 
-    @property
-    def whitelist_path(self) -> Path:
-        """Path to HTTP whitelist file."""
-        return self.install_path / "etc" / "haproxy" / "whitelist.lst"
+    def node_ip(self) -> str:
+        """This node's IP: the ``local_ip`` override, else the default-route source address."""
+        if self.local_ip:
+            return self.local_ip
+        from ober.system import SystemInfo
+
+        return SystemInfo().get_local_ip() or "0.0.0.0"
 
     @property
     def allowlist_path(self) -> Path:
@@ -273,6 +280,21 @@ class OberConfig:
     def admin_socket_path(self) -> Path:
         """HAProxy admin socket (local only, root only)."""
         return Path("/run/ober/haproxy.sock")
+
+    @property
+    def maintenance_path(self) -> Path:
+        """Maintenance flag file ("1" = on, "0" or missing = off), also a keepalived track_file."""
+        return self.install_path / "etc" / "maintenance"
+
+    @property
+    def health_state_path(self) -> Path:
+        """Routes announced by the BGP health process (JSON)."""
+        return self.install_path / "var" / "run" / "ober-health.json"
+
+    @property
+    def vrrp_state_path(self) -> Path:
+        """VRRP state per instance, written by the keepalived notify hook (JSON)."""
+        return self.install_path / "var" / "run" / "vrrp-state.json"
 
     @property
     def watch_data_dir(self) -> Path:
@@ -303,82 +325,82 @@ class OberConfig:
         return config
 
     def _load_from_file(self, path: Path) -> None:
-        """Load configuration from a YAML file."""
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
+        """Load configuration from a YAML file.
+
+        Never raises for bad content, so that ``stop``, ``status`` and ``logs`` still work.
+        Problems are kept for ``validate()``; bad sections keep their defaults.
+        """
+        try:
+            with open(path) as f:
+                data = yaml.load(f, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
+        except yaml.MarkedYAMLError as e:
+            mark = e.problem_mark
+            where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+            self._load_errors.append(f"{path}: YAML syntax error{where}: {e.problem}")
+            return
+        except (OSError, yaml.YAMLError) as e:
+            self._load_errors.append(f"{path}: cannot read: {e}")
+            return
+        if data is None:
+            return
+        if not isinstance(data, dict):
+            self._load_errors.append(f"{path}: top level must be a mapping")
+            return
+
+        known = {f.name for f in fields(self) if not f.name.startswith("_")} | {"venv_path"}
+        for key in data:
+            if key not in known:
+                self._load_warnings.append(f"{key}: unknown key (ignored)")
 
         if "install_path" in data:
-            self.install_path = Path(data["install_path"]).expanduser()
-
-        if "ha_mode" in data:
-            self.ha_mode = data["ha_mode"]
-
-        if "bgp" in data:
-            bgp_data = data["bgp"]
-            self.bgp = BGPConfig(
-                local_as=bgp_data.get("local_as", 65001),
-                peer_as=bgp_data.get("peer_as", 65000),
-                neighbors=bgp_data.get("neighbors", []),
-                router_id=bgp_data.get("router_id", ""),
-                local_address=bgp_data.get("local_address", ""),
-                hold_time=bgp_data.get("hold_time", 3),
-                bfd_enabled=bgp_data.get("bfd_enabled", True),
-            )
-
-        if "keepalived" in data:
-            ka_data = data["keepalived"]
-            self.keepalived = KeepalivedConfig(
-                peers=ka_data.get("peers", []),
-                interface=ka_data.get("interface", ""),
-                use_multicast=ka_data.get("use_multicast", False),
-                advert_int=ka_data.get("advert_int", 1),
-            )
-
-        if "vips" in data:
-            self.vips = [
-                VIPConfig(
-                    address=v.get("address", ""),
-                    interface=v.get("interface", "lo-vip"),
-                    exposure=v.get("exposure", "internal"),
-                )
-                for v in data["vips"]
-            ]
-
-        if "backends" in data:
-            self.backends = [
-                BackendConfig(
-                    name=b.get("name", ""),
-                    servers=b.get("servers", []),
-                    health_check_path=b.get("health_check_path", "/"),
-                    health_check_interval=b.get("health_check_interval", 1000),
-                )
-                for b in data["backends"]
-            ]
-
-        if "certs" in data:
-            cert_data = data["certs"]
-            self.certs = CertConfig(
-                path=cert_data.get("path", ""),
-                acme_enabled=cert_data.get("acme_enabled", False),
-                acme_email=cert_data.get("acme_email", ""),
-                acme_domain=cert_data.get("acme_domain", ""),
-                route53_enabled=cert_data.get("route53_enabled", False),
-                route53_profile=cert_data.get("route53_profile", "default"),
-                route53_hosted_zone_id=cert_data.get("route53_hosted_zone_id", ""),
-            )
-
-        self.log_retention_days = data.get("log_retention_days", 7)
-        self.stats_port = data.get("stats_port", 8404)
-        self.stats_bind = data.get("stats_bind", [])
-
-        self.security = _section_from_dict(SecurityConfig, data.get("security"))
-        self.watch = _section_from_dict(WatchConfig, data.get("watch"))
-        self.sentinel = _section_from_dict(SentinelConfig, data.get("sentinel"))
-        self.mde = _section_from_dict(MDEConfig, data.get("mde"))
+            self.install_path = Path(str(data["install_path"])).expanduser()
+        for fld in fields(self):
+            name, kind = fld.name, fld.type
+            if name.startswith("_") or name == "install_path" or name not in data:
+                continue
+            value = data[name]
+            if isinstance(kind, type) and is_dataclass(kind):
+                value = self._section(kind, value, name)
+            elif get_origin(kind) is list and is_dataclass(get_args(kind)[0]):
+                value = self._section_list(get_args(kind)[0], value, name)
+            setattr(self, name, value)
 
         # Load venv_path if specified (for pipx installations)
-        if "venv_path" in data:
-            self._venv_path_override = Path(data["venv_path"])
+        if data.get("venv_path"):
+            self._venv_path_override = Path(str(data["venv_path"]))
+
+    def _section(self, cls: type[Any], data: Any, where: str) -> Any:
+        """Build a config dataclass from a dict; record bad shapes and unknown keys."""
+        if data is None:
+            return cls()
+        if not isinstance(data, dict):
+            self._load_errors.append(f"{where}: must be a mapping, got {data!r}")
+            return cls()
+        names = {f.name for f in fields(cls)}
+        for key in data:
+            if key not in names:
+                self._load_warnings.append(f"{where}.{key}: unknown key (ignored)")
+        return cls(**{k: v for k, v in data.items() if k in names})
+
+    def _section_list(self, cls: type[Any], data: Any, where: str) -> list[Any]:
+        """Build a list of config dataclasses; record items that are not mappings."""
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            self._load_errors.append(f"{where}: must be a list, got {data!r}")
+            return []
+        return [self._section(cls, item, f"{where}[{i}]") for i, item in enumerate(data)]
+
+    def validate(self) -> tuple[list[str], list[str]]:
+        """Check types, enums and address formats.
+
+        Returns:
+            (errors, warnings). All problems are reported, not only the first.
+        """
+        errors = list(self._load_errors)
+        _check_types(self, "", errors)
+        _check_values(self, errors)
+        return errors, list(self._load_warnings)
 
     def save(self, path: Path | None = None) -> None:
         """Save configuration to YAML file.
@@ -391,54 +413,18 @@ class OberConfig:
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        data: dict[str, Any] = {
-            "install_path": str(self.install_path),
-            "ha_mode": self.ha_mode,
-            "bgp": {
-                "local_as": self.bgp.local_as,
-                "peer_as": self.bgp.peer_as,
-                "neighbors": self.bgp.neighbors,
-                "router_id": self.bgp.router_id,
-                "local_address": self.bgp.local_address,
-                "hold_time": self.bgp.hold_time,
-                "bfd_enabled": self.bgp.bfd_enabled,
-            },
-            "keepalived": {
-                "peers": self.keepalived.peers,
-                "interface": self.keepalived.interface,
-                "use_multicast": self.keepalived.use_multicast,
-                "advert_int": self.keepalived.advert_int,
-            },
-            "vips": [
-                {"address": v.address, "interface": v.interface, "exposure": v.exposure}
-                for v in self.vips
-            ],
-            "backends": [
-                {
-                    "name": b.name,
-                    "servers": b.servers,
-                    "health_check_path": b.health_check_path,
-                    "health_check_interval": b.health_check_interval,
-                }
-                for b in self.backends
-            ],
-            "certs": {
-                "path": self.certs.path,
-                "acme_enabled": self.certs.acme_enabled,
-                "acme_email": self.certs.acme_email,
-                "acme_domain": self.certs.acme_domain,
-                "route53_enabled": self.certs.route53_enabled,
-                "route53_profile": self.certs.route53_profile,
-                "route53_hosted_zone_id": self.certs.route53_hosted_zone_id,
-            },
-            "log_retention_days": self.log_retention_days,
-            "stats_port": self.stats_port,
-            "stats_bind": self.stats_bind,
-            "security": asdict(self.security),
-            "watch": asdict(self.watch),
-            "sentinel": asdict(self.sentinel),
-            "mde": asdict(self.mde),
-        }
+        data: dict[str, Any] = {}
+        for fld in fields(self):
+            if fld.name.startswith("_"):
+                continue
+            value = getattr(self, fld.name)
+            if is_dataclass(value):
+                value = asdict(value)  # type: ignore[arg-type]
+            elif isinstance(value, list):
+                value = [asdict(v) if is_dataclass(v) else v for v in value]  # type: ignore[arg-type]
+            elif isinstance(value, Path):
+                value = str(value)
+            data[fld.name] = value
 
         # Save venv_path if it differs from default (e.g., pipx venv)
         if self._venv_path_override is not None:
@@ -461,6 +447,234 @@ class OberConfig:
             dirs.append(self.install_path / "venv")
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate keys; PyYAML silently keeps the last one."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        seen: set[str] = set()
+        for key_node, _ in node.value:
+            key = key_node.value
+            if isinstance(key_node, yaml.ScalarNode) and key in seen:
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"duplicate key {key!r}", key_node.start_mark
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep)
+
+
+_HOSTPORT_RE = re.compile(r"^[A-Za-z0-9.:\[\]-]+:\d{1,5}$")
+
+
+def _type_problem(value: Any, expected: Any) -> str | None:
+    """Return why ``value`` does not match the annotation ``expected``, or None."""
+    if get_origin(expected) is list:
+        if not isinstance(value, list):
+            return "must be a list"
+        item = get_args(expected)[0]
+        if not is_dataclass(item) and not all(_type_problem(v, item) is None for v in value):
+            return f"must be a list of {item.__name__}"
+        return None
+    if expected is bool:
+        ok = isinstance(value, bool)
+    elif expected is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    elif expected is float:
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    elif expected is str:
+        ok = isinstance(value, str)
+    elif expected is Path:
+        ok = isinstance(value, (str, Path))
+    else:
+        return None
+    return None if ok else f"must be {expected.__name__}"
+
+
+def _check_types(obj: Any, where: str, errors: list[str]) -> None:
+    """Check each dataclass field against its annotation, recursing into sections."""
+    for f in fields(obj):
+        if f.name.startswith("_"):
+            continue
+        value, key = getattr(obj, f.name), f"{where}{f.name}"
+        problem = _type_problem(value, f.type)
+        if problem:
+            errors.append(f"{key}: {problem}, got {value!r}")
+        elif is_dataclass(f.type):
+            _check_types(value, f"{key}.", errors)
+        elif get_origin(f.type) is list and is_dataclass(get_args(f.type)[0]):
+            for i, item in enumerate(value):
+                _check_types(item, f"{key}[{i}].", errors)
+
+
+def _is_ip(value: Any) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_network(value: Any) -> bool:
+    try:
+        ipaddress.ip_network(value, strict=False)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_ipv4_interface(value: Any) -> bool:
+    try:
+        return ipaddress.ip_interface(value).version == 4
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_hostport(value: Any) -> bool:
+    if not isinstance(value, str) or not _HOSTPORT_RE.match(value):
+        return False
+    return 1 <= int(value.rsplit(":", 1)[1]) <= 65535
+
+
+def _in_range(value: Any, low: int, high: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+
+
+def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
+    """Check enums, ranges and address formats. Wrong types are reported by _check_types."""
+
+    def need(ok: bool, key: str, what: str, value: Any) -> None:
+        if not ok:
+            errors.append(f"{key}: {what}, got {value!r}")
+
+    def each(key: str, values: Any, ok: Any, what: str) -> None:
+        for i, v in enumerate(values if isinstance(values, list) else []):
+            need(ok(v), f"{key}[{i}]", what, v)
+
+    max_port, max_as = 65535, 4294967295
+    need(cfg.ha_mode in ("bgp", "keepalived"), "ha_mode", "must be bgp or keepalived", cfg.ha_mode)
+    need(
+        cfg.local_ip == "" or _is_ip(cfg.local_ip),
+        "local_ip",
+        "must be an IP or empty",
+        cfg.local_ip,
+    )
+    need(_in_range(cfg.stats_port, 1, max_port), "stats_port", "must be 1-65535", cfg.stats_port)
+    each("stats_bind", cfg.stats_bind, _is_ip, "must be an IP address")
+    need(
+        _in_range(cfg.log_retention_days, 1, 36500),
+        "log_retention_days",
+        "must be >= 1",
+        cfg.log_retention_days,
+    )
+
+    bgp = cfg.bgp
+    need(_in_range(bgp.local_as, 1, max_as), "bgp.local_as", "must be 1-4294967295", bgp.local_as)
+    need(_in_range(bgp.peer_as, 1, max_as), "bgp.peer_as", "must be 1-4294967295", bgp.peer_as)
+    each("bgp.neighbors", bgp.neighbors, _is_ip, "must be an IP address")
+    for key in ("router_id", "local_address"):
+        value = getattr(bgp, key)
+        need(value == "" or _is_ip(value), f"bgp.{key}", "must be an IP or empty", value)
+    need(
+        bgp.hold_time == 0 or _in_range(bgp.hold_time, 3, 65535),
+        "bgp.hold_time",
+        "must be 0 or 3-65535",
+        bgp.hold_time,
+    )
+
+    need(_in_range(bgp.health_rise, 1, 1000), "bgp.health_rise", "must be >= 1", bgp.health_rise)
+    need(_in_range(bgp.health_fall, 1, 1000), "bgp.health_fall", "must be >= 1", bgp.health_fall)
+    need(
+        _in_range(bgp.health_holddown, 0, 86400),
+        "bgp.health_holddown",
+        "must be >= 0",
+        bgp.health_holddown,
+    )
+    need(_in_range(cfg.drain_timeout, 1, 86400), "drain_timeout", "must be > 0", cfg.drain_timeout)
+
+    ka = cfg.keepalived
+    each("keepalived.peers", ka.peers, _is_ip, "must be an IP address")
+    need(
+        ka.gateway_check == "" or _is_ip(ka.gateway_check),
+        "keepalived.gateway_check",
+        "must be an IP or empty",
+        ka.gateway_check,
+    )
+    need(_in_range(ka.advert_int, 1, 255), "keepalived.advert_int", "must be 1-255", ka.advert_int)
+
+    seen: set[str] = set()
+    for i, vip in enumerate(cfg.vips):
+        key = f"vips[{i}]"
+        need(
+            _is_ipv4_interface(vip.address),
+            f"{key}.address",
+            "must be an IPv4 address or CIDR",
+            vip.address,
+        )
+        need(
+            vip.exposure in ("internal", "internet"),
+            f"{key}.exposure",
+            "must be internal or internet",
+            vip.exposure,
+        )
+        need(vip.address not in seen, f"{key}.address", "is a duplicate", vip.address)
+        seen.add(str(vip.address))
+
+    for i, backend in enumerate(cfg.backends):
+        key = f"backends[{i}]"
+        need(
+            isinstance(backend.name, str) and bool(re.match(r"^[A-Za-z0-9_.:-]+$", backend.name)),
+            f"{key}.name",
+            "must be a non-empty name of letters, digits, _ . : -",
+            backend.name,
+        )
+        each(f"{key}.servers", backend.servers, _is_hostport, "must be host:port")
+        need(
+            isinstance(backend.health_check_path, str)
+            and backend.health_check_path.startswith("/"),
+            f"{key}.health_check_path",
+            "must start with /",
+            backend.health_check_path,
+        )
+        need(
+            _in_range(backend.health_check_interval, 100, 3600000),
+            f"{key}.health_check_interval",
+            "must be >= 100 (ms)",
+            backend.health_check_interval,
+        )
+
+    sec = cfg.security
+    for key in ("allowlist", "trusted_networks", "internal_networks"):
+        each(f"security.{key}", getattr(sec, key), _is_network, "must be an IP or CIDR")
+    need(
+        sec.log_target == "" or _is_hostport(sec.log_target),
+        "security.log_target",
+        "must be host:port or empty",
+        sec.log_target,
+    )
+
+    watch = cfg.watch
+    for key in ("syslog_listen", "api_listen"):
+        value = getattr(watch, key)
+        need(_is_hostport(value), f"watch.{key}", "must be host:port", value)
+    each(
+        "watch.syslog_allowed_sources",
+        watch.syslog_allowed_sources,
+        _is_network,
+        "must be an IP or CIDR",
+    )
+
+
+def exit_if_invalid(config: OberConfig, ctx: click.Context) -> None:
+    """Print every problem of ``config`` and exit 1 if there is an error."""
+    errors, warnings = config.validate()
+    for warning in warnings:
+        click.echo(f"Warning: {config.config_path}: {warning}", err=True)
+    if errors:
+        click.echo(f"Error: {config.config_path} is not valid:", err=True)
+        for error in errors:
+            click.echo(f"  - {error}", err=True)
+        ctx.exit(1)
 
 
 def get_secrets_path() -> Path:

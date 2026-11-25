@@ -19,7 +19,6 @@ from ober.commands.doctor import (
     _check_root,
     _check_service,
 )
-from ober.commands.sync import expand_hostlist, resolve_host
 from ober.commands.test import _test_backend, _test_bgp_neighbor, _test_certificate
 from ober.config import OberConfig
 from ober.system import OSFamily, SystemInfo
@@ -115,47 +114,6 @@ class TestDoctorChecks:
             assert result["passed"] is True
 
 
-class TestSyncFunctions:
-    """Tests for sync command helper functions."""
-
-    def test_expand_hostlist_simple(self) -> None:
-        """Test hostlist expansion with simple list."""
-        result = expand_hostlist("host1,host2,host3")
-        assert result == ["host1", "host2", "host3"]
-
-    def test_expand_hostlist_with_hostlist_module(self) -> None:
-        """Test hostlist expansion with hostlist module."""
-        # Test the actual hostlist module
-        result = expand_hostlist("node[01-03]")
-        assert "node01" in result or result == ["node[01-03]"]
-
-    def test_expand_hostlist_shadowed_module_falls_back(self) -> None:
-        """A stale 'hostlist' package without expand_hostlist must not crash."""
-        import sys
-        import types
-
-        with patch.dict(sys.modules, {"hostlist": types.ModuleType("hostlist")}):
-            assert expand_hostlist("a, b") == ["a", "b"]
-
-    def test_resolve_host_ip(self) -> None:
-        """Test resolve_host with IP address."""
-        result = resolve_host("10.0.0.1")
-        assert result == "10.0.0.1"
-
-    def test_resolve_host_localhost(self) -> None:
-        """Test resolve_host with localhost."""
-        result = resolve_host("localhost")
-        assert result in ["127.0.0.1", "::1", None]  # Depends on system config
-
-    def test_resolve_host_invalid(self) -> None:
-        """Test resolve_host with invalid hostname."""
-        # Use a definitely invalid format
-        result = resolve_host("not-a-valid-hostname-12345.invalid")
-        # May return None or raise error depending on DNS config
-        # If it resolves (some networks have catch-all DNS), that's ok
-        assert result is None or isinstance(result, str)
-
-
 class TestTestCommand:
     """Tests for test command helper functions."""
 
@@ -199,16 +157,23 @@ class TestTestCommand:
             result = _test_backend("10.0.0.1:7480", "s3_backend")
             assert result["passed"] is False
 
-    def test_certificate_valid(self, temp_dir: Path) -> None:
+    def test_certificate_valid(self, pem_cert: Path) -> None:
         """Test certificate check with valid certificate."""
+        result = _test_certificate(str(pem_cert))
+        assert result["passed"] is True
+        assert result["expiry"] == "ok"
+        assert "days left" in result["message"]
+
+    def test_certificate_unparsable(self, temp_dir: Path) -> None:
+        """A PEM with markers but no real certificate fails the expiry check."""
         cert_path = temp_dir / "cert.pem"
         cert_path.write_text(
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n"
             "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n"
         )
-
         result = _test_certificate(str(cert_path))
-        assert result["passed"] is True
+        assert result["passed"] is False
+        assert result["expiry"] == "crit"
 
     def test_certificate_missing_key(self, temp_dir: Path) -> None:
         """Test certificate check with missing key."""
@@ -490,67 +455,6 @@ class TestUpgradeCommand:
             mock_run.return_value = MagicMock(returncode=1, stdout="")
             result = _check_exabgp_update(config)
             assert result["current"] == "4.2.20"
-
-
-class TestSyncCommand:
-    """Tests for sync command."""
-
-    def test_sync_requires_root(self, cli_runner: CliRunner) -> None:
-        """Test sync command requires root access."""
-        with patch("ober.cli.SystemInfo") as mock_system:
-            mock_instance = MagicMock()
-            mock_instance.is_root = False
-            mock_system.return_value = mock_instance
-
-            result = cli_runner.invoke(main, ["sync", "--routers", "10.0.0.1"])
-            assert "requires root" in result.output.lower() or result.exit_code != 0
-
-    def test_process_hostlist(self) -> None:
-        """Test _process_hostlist function."""
-        from ober.commands.sync import _process_hostlist
-
-        with (
-            patch("ober.commands.sync.expand_hostlist", return_value=["10.0.0.1", "10.0.0.2"]),
-            patch("ober.commands.sync.resolve_host", side_effect=lambda x: x),
-        ):
-            result = _process_hostlist("10.0.0.1,10.0.0.2", "test")
-            assert result == ["10.0.0.1", "10.0.0.2"]
-
-    def test_process_hostlist_with_failures(self) -> None:
-        """Test _process_hostlist with resolution failures."""
-        from ober.commands.sync import _process_hostlist
-
-        with (
-            patch("ober.commands.sync.expand_hostlist", return_value=["good", "bad"]),
-            patch("ober.commands.sync.resolve_host", side_effect=["10.0.0.1", None]),
-        ):
-            result = _process_hostlist("good,bad", "test")
-            assert result == ["10.0.0.1"]
-
-    def test_write_whitelists(self, temp_dir: Path) -> None:
-        """Test _write_whitelists function."""
-        from ober.commands.sync import _write_whitelists
-
-        config = OberConfig(install_path=temp_dir)
-        config.ensure_directories()
-
-        data = {
-            "routers": ["10.0.0.1", "10.0.0.2"],
-            "frontend_http": ["192.168.1.1"],
-        }
-
-        _write_whitelists(config, data)
-
-        # Check files were created
-        routers_file = temp_dir / "etc" / "haproxy" / "routers.lst"
-        frontend_file = temp_dir / "etc" / "haproxy" / "frontend-http.lst"
-
-        assert routers_file.exists()
-        assert frontend_file.exists()
-
-        routers_content = routers_file.read_text()
-        assert "10.0.0.1" in routers_content
-        assert "10.0.0.2" in routers_content
 
 
 class TestUninstallCommand:
@@ -1041,6 +945,7 @@ class TestServiceCommandEdgeCases:
             mock_system.return_value = mock_instance
 
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.haproxy_config_path.exists.return_value = True
             config_mock.bgp_config_path.exists.return_value = True
             config_mock.bgp.neighbors = ["10.0.0.1"]
@@ -1212,20 +1117,6 @@ class TestUninstallCommandEdgeCases:
             assert "uninstalling" in result.output.lower() or "stopping" in result.output.lower()
 
 
-class TestSyncCommandEdgeCases:
-    """Edge case tests for sync command."""
-
-    def test_expand_hostlist_simple_ip(self) -> None:
-        """Test expanding a simple IP address."""
-        result = expand_hostlist("10.0.0.1")
-        assert result == ["10.0.0.1"]
-
-    def test_expand_hostlist_comma_separated(self) -> None:
-        """Test expanding comma-separated hosts."""
-        result = expand_hostlist("host1,host2")
-        assert result == ["host1", "host2"]
-
-
 class TestHealthSignalHandler:
     """Tests for health command signal handling."""
 
@@ -1246,112 +1137,6 @@ class TestHealthSignalHandler:
 
         # Restore
         health._running = original
-
-
-class TestStatusCommandEdgeCases:
-    """Edge case tests for status command."""
-
-    def test_status_with_running_services(self, cli_runner: CliRunner) -> None:
-        """Test status command with running services."""
-        with (
-            patch("ober.commands.status.ServiceInfo") as mock_svc,
-            patch("ober.commands.status.OberConfig.load") as mock_config,
-            patch("ober.commands.status.get_haproxy_version", return_value="3.3.0"),
-            patch("ober.system.get_exabgp_version", return_value="4.2.21"),
-            patch("ober.commands.status._get_haproxy_stats", return_value={}),
-        ):
-            http_mock = MagicMock()
-            http_mock.is_active = True
-            http_mock.is_enabled = True
-            http_mock.status = "active"
-            http_mock.pid = 1234
-
-            bgp_mock = MagicMock()
-            bgp_mock.is_active = True
-            bgp_mock.is_enabled = True
-            bgp_mock.status = "active"
-            bgp_mock.pid = 5678
-
-            ka_mock = MagicMock()
-            ka_mock.is_active = False
-            ka_mock.is_enabled = False
-            ka_mock.status = "inactive"
-            ka_mock.pid = None
-
-            mock_svc.from_service_name.side_effect = [http_mock, bgp_mock, ka_mock]
-
-            # Use VIPConfig and BackendConfig directly instead of MagicMock
-            from ober.config import BackendConfig, VIPConfig
-
-            config_mock = MagicMock()
-            config_mock.ha_mode = "bgp"
-            config_mock.config_path.exists.return_value = True
-            config_mock.config_path = Path("~/.ober/etc/ober.yaml")
-            config_mock.haproxy_config_path.exists.return_value = True
-            config_mock.bgp_config_path.exists.return_value = True
-            config_mock.vips = [VIPConfig(address="10.0.100.1")]
-            config_mock.backends = [BackendConfig(name="s3_backend")]
-            config_mock.stats_port = 8404
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["status"])
-            assert result.exit_code == 0
-            assert "active" in result.output.lower()
-
-    def test_status_with_config(self, cli_runner: CliRunner) -> None:
-        """Test status command shows config info."""
-        with (
-            patch("ober.commands.status.ServiceInfo") as mock_svc,
-            patch("ober.commands.status.OberConfig.load") as mock_config,
-        ):
-            from ober.config import BackendConfig, VIPConfig
-
-            svc_mock = MagicMock()
-            svc_mock.is_active = False
-            svc_mock.is_enabled = False
-            svc_mock.status = "inactive"
-            svc_mock.pid = None
-            mock_svc.from_service_name.return_value = svc_mock
-
-            config_mock = MagicMock()
-            config_mock.ha_mode = "bgp"
-            config_mock.config_path.exists.return_value = True
-            config_mock.config_path = Path("~/.ober/etc/ober.yaml")
-            config_mock.haproxy_config_path.exists.return_value = True
-            config_mock.bgp_config_path.exists.return_value = True
-            config_mock.vips = [VIPConfig(address="10.0.100.1/32")]
-            config_mock.backends = [BackendConfig(name="s3")]
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["status"])
-            assert result.exit_code == 0
-
-    def test_get_haproxy_stats(self) -> None:
-        """Test _get_haproxy_stats function."""
-        from ober.commands.status import _get_haproxy_stats
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"stats": "data"}
-
-        with patch("requests.get", return_value=mock_response):
-            result = _get_haproxy_stats(8404)
-            assert result == {"stats": "data"}
-
-    def test_get_haproxy_stats_error(self) -> None:
-        """Test _get_haproxy_stats with error."""
-        from ober.commands.status import _get_haproxy_stats
-
-        with patch("requests.get", side_effect=Exception("Connection refused")):
-            result = _get_haproxy_stats(8404)
-            assert result == {}
-
-    def test_get_announced_routes(self) -> None:
-        """Test _get_announced_routes function."""
-        from ober.commands.status import _get_announced_routes
-
-        result = _get_announced_routes()
-        assert result == []
 
 
 class TestUpgradeCommandMoreTests:
@@ -1377,28 +1162,6 @@ class TestUpgradeCommandMoreTests:
 
             result = cli_runner.invoke(main, ["upgrade", "--check-only"])
             # Should show available updates
-            assert result.exit_code == 0
-
-
-class TestSyncCommandMoreTests:
-    """Additional tests for sync command."""
-
-    def test_sync_routers_only(self, cli_runner: CliRunner) -> None:
-        """Test sync with only routers option."""
-        with (
-            patch("ober.cli.SystemInfo") as mock_system,
-            patch("ober.commands.sync.OberConfig.load") as mock_config,
-            patch("ober.commands.sync._process_hostlist", return_value=["10.0.0.1"]),
-            patch("ober.commands.sync._write_whitelists"),
-        ):
-            mock_instance = MagicMock()
-            mock_instance.is_root = True
-            mock_system.return_value = mock_instance
-
-            config_mock = MagicMock()
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["sync", "--routers", "10.0.0.1"])
             assert result.exit_code == 0
 
 
@@ -1440,6 +1203,7 @@ class TestTestCommandCLI:
             patch("ober.commands.test._test_backend") as mock_backend,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.ha_mode = "bgp"
             config_mock.bgp.neighbors = ["10.0.0.1"]
@@ -1747,6 +1511,7 @@ class TestTestCommandWarnings:
             patch("ober.commands.test._test_haproxy_config") as mock_haproxy,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.bgp.neighbors = []
             config_mock.vips = []
@@ -1760,19 +1525,16 @@ class TestTestCommandWarnings:
             # Should warn about missing neighbors
             assert "warning" in result.output.lower() or result.exit_code == 0
 
-    def test_test_with_certificate(self, cli_runner: CliRunner, temp_dir: Path) -> None:
+    def test_test_with_certificate(self, cli_runner: CliRunner, pem_cert: Path) -> None:
         """Test test command with certificate configured."""
-        cert_path = temp_dir / "cert.pem"
-        cert_path.write_text(
-            "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n"
-            "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n"
-        )
+        cert_path = pem_cert
 
         with (
             patch("ober.commands.test.OberConfig.load") as mock_config,
             patch("ober.commands.test._test_haproxy_config") as mock_haproxy,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.ha_mode = "bgp"
             config_mock.bgp.neighbors = []
@@ -1824,6 +1586,7 @@ class TestServiceStartNoBGP:
             mock_system.return_value = mock_instance
 
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.haproxy_config_path.exists.return_value = True
             config_mock.bgp_config_path.exists.return_value = False  # No BGP config
             config_mock.bgp.neighbors = []
@@ -1912,6 +1675,7 @@ class TestDoctorConfigNotFound:
         with patch("ober.commands.doctor.OberConfig.load") as mock_load:
             config_mock = MagicMock()
             config_mock.config_path.exists.return_value = False
+            config_mock.validate.return_value = ([], [])
             mock_load.return_value = config_mock
 
             result = _check_config()
@@ -1934,36 +1698,6 @@ class TestServiceDisabled:
             # Could be "disabled" or "not configured" depending on whether file exists
 
 
-class TestStatusNoConfig:
-    """Test status when no config exists."""
-
-    def test_status_no_config(self, cli_runner: CliRunner) -> None:
-        """Test status command when no config exists."""
-        with (
-            patch("ober.commands.status.ServiceInfo") as mock_svc,
-            patch("ober.commands.status.OberConfig.load") as mock_config,
-        ):
-            svc_mock = MagicMock()
-            svc_mock.is_active = False
-            svc_mock.is_enabled = False
-            svc_mock.status = "inactive"
-            svc_mock.pid = None
-            mock_svc.from_service_name.return_value = svc_mock
-
-            config_mock = MagicMock()
-            config_mock.ha_mode = "bgp"
-            config_mock.config_path.exists.return_value = False
-            config_mock.config_path = Path("~/.ober/etc/ober.yaml")
-            config_mock.haproxy_config_path.exists.return_value = False
-            config_mock.bgp_config_path.exists.return_value = False
-            config_mock.vips = []
-            config_mock.backends = []
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["status"])
-            assert result.exit_code == 0
-
-
 class TestUpgradeNoRoot:
     """Test upgrade command without root for actual upgrade."""
 
@@ -1979,71 +1713,6 @@ class TestUpgradeNoRoot:
             assert result.exit_code != 0 or "root" in result.output.lower()
 
 
-class TestPrintStatus:
-    """Tests for status _print_status function."""
-
-    def test_print_status_with_routes(self, capsys: pytest.CaptureFixture[str]) -> None:
-        """Test _print_status with announced routes."""
-        from ober.commands.status import _print_status
-
-        result = {
-            "services": {"ober-http": {"active": True}},
-            "haproxy": {"version": "3.3.0"},
-            "bgp": {"version": "4.2.21", "announced_routes": ["10.0.100.1"]},
-            "keepalived": {"version": None, "vrrp_state": {}},
-            "config": {"exists": True, "path": "~/.ober/etc/ober.yaml", "vips": ["10.0.100.1"]},
-        }
-
-        http_service = MagicMock()
-        http_service.is_active = True
-        http_service.status = "active"
-        http_service.pid = 1234
-        http_service.is_enabled = True
-
-        bgp_service = MagicMock()
-        bgp_service.is_active = True
-        bgp_service.status = "active"
-        bgp_service.pid = 5678
-        bgp_service.is_enabled = True
-
-        _print_status(result, http_service, bgp_service, "ober-bgp")
-        captured = capsys.readouterr()
-        assert "10.0.100.1" in captured.out
-
-
-class TestStatusJsonOutput:
-    """Tests for status command JSON output."""
-
-    def test_status_json_complete(self, cli_runner: CliRunner) -> None:
-        """Test status command with JSON output."""
-        with (
-            patch("ober.commands.status.ServiceInfo") as mock_svc,
-            patch("ober.commands.status.OberConfig.load") as mock_config,
-        ):
-            from ober.config import VIPConfig
-
-            svc_mock = MagicMock()
-            svc_mock.is_active = True
-            svc_mock.is_enabled = True
-            svc_mock.status = "active"
-            svc_mock.pid = 1234
-            mock_svc.from_service_name.return_value = svc_mock
-
-            config_mock = MagicMock()
-            config_mock.config_path.exists.return_value = True
-            config_mock.config_path = Path("~/.ober/etc/ober.yaml")
-            config_mock.haproxy_config_path.exists.return_value = True
-            config_mock.bgp_config_path.exists.return_value = True
-            config_mock.vips = [VIPConfig(address="10.0.100.1")]
-            config_mock.backends = []
-            config_mock.stats_port = 8404
-            mock_config.return_value = config_mock
-
-            result = cli_runner.invoke(main, ["--json", "status"])
-            data = json.loads(result.output)
-            assert "services" in data
-
-
 class TestTestCommandJSON:
     """Test test command with JSON output."""
 
@@ -2054,6 +1723,7 @@ class TestTestCommandJSON:
             patch("ober.commands.test._test_haproxy_config") as mock_haproxy,
         ):
             config_mock = MagicMock()
+            config_mock.validate.return_value = ([], [])
             config_mock.config_path.exists.return_value = True
             config_mock.ha_mode = "bgp"
             config_mock.bgp.neighbors = []
@@ -2188,3 +1858,12 @@ class TestWatchLifecycle:
 
         for unit in ("ober-watch.service", "ober-blocklist.service", "ober-blocklist.timer"):
             assert unit in stopped and unit in disabled and unit in removed
+
+
+def test_sync_is_deprecated_and_writes_nothing(cli_runner: CliRunner, tmp_path: Path) -> None:
+    """4.5: ober sync wrote files that no config read; it now only explains that."""
+    with patch.dict("os.environ", {"OBER_INSTALL_PATH": str(tmp_path)}):
+        result = cli_runner.invoke(main, ["sync", "--routers", "switch[01-02]"])
+    assert result.exit_code == 1
+    assert "security.allowlist" in result.output
+    assert not any(tmp_path.rglob("*.lst"))

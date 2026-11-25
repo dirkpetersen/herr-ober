@@ -133,12 +133,8 @@ For installation instructions, see [README.md](README.md#quick-start).
 
 **Commands:**
 - `ober bootstrap [path]` - Automated installation (detects OS, installs HAProxy/ExaBGP, applies tuning)
-- `ober config [--dry-run]` - Interactive configuration wizard (grouped sections, idempotent, auto-detects local IP)
-- `ober sync` - Update external system whitelists:
-  - `--routers <hostlist>` - Switches/routers
-  - `--frontend-http <hostlist>` - Frontend systems (Weka) allowed HTTP
-  - `--backend-http <hostlist>` - Backend systems (S3/Ceph)
-  - No options: prompts for all; one option: updates only that category
+- `ober config [--dry-run] [--non-interactive]` - Configuration wizard (prompts prefilled from ober.yaml), or validate and render ober.yaml without prompts
+- `ober sync` - Deprecated, changes nothing; the lists are fields of ober.yaml
 - `ober status` - Show current state (supports `--json`)
 - `ober start/stop/restart` - Service management (stop performs graceful shutdown with BGP withdraw)
 - `ober health <vip>` - Long-running health check process (spawned by ExaBGP, text encoder)
@@ -283,7 +279,7 @@ BGP passwords and other sensitive data. Permissions: 600.
 - `ober health` handles SIGTERM/SIGINT gracefully
 
 ### Validation
-- `ober sync` validates that hostnames/IPs resolve before updating whitelists
+- `ober config`, `ober start` and `ober test` validate ober.yaml and report every problem at once
 - `ober config` validates BGP neighbor reachability, RGW backend connectivity, certificate validity
 
 ### Config Wizard (`ober config`)
