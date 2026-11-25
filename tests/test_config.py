@@ -4,6 +4,8 @@
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from ober.config import (
     BackendConfig,
     BGPConfig,
@@ -415,3 +417,20 @@ def test_vip_must_be_single_address_and_unique(tmp_path: Path) -> None:
     assert "vips[1].address: is a duplicate, got '10.0.0.5/32'" in errors
     assert "vips[2].address: must be a single address (/32), got '10.0.0.9/24'" in errors
     assert not any(e.startswith("vips[0]") for e in errors)
+
+
+def test_save_is_atomic(tmp_path: Path) -> None:
+    """A failed save keeps the old ober.yaml whole and leaves no temp file."""
+    from unittest.mock import patch
+
+    config = OberConfig(install_path=tmp_path, local_ip="10.0.0.5")
+    config.save()
+    before = config.config_path.read_text()
+    config.local_ip = "10.0.0.6"
+    with (
+        patch("ober.config.os.replace", side_effect=OSError("disk full")),
+        pytest.raises(OSError),
+    ):
+        config.save()
+    assert config.config_path.read_text() == before
+    assert [p.name for p in config.config_path.parent.iterdir()] == ["ober.yaml"]

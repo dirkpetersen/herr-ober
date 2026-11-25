@@ -8,18 +8,16 @@ process withdraws all routes while it is on. Keepalived reads the same file as a
 This module also holds the keepalived ``notify`` hook that writes the VRRP state file.
 """
 
-import contextlib
 import fcntl
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import click
 from rich.console import Console
 
-from ober.config import OberConfig
+from ober.config import OberConfig, write_atomic
 from ober.system import SystemInfo
 
 console = Console()
@@ -41,23 +39,6 @@ def is_maintenance(path: Path) -> bool:
 def set_maintenance(path: Path, on: bool) -> None:
     """Write the flag file ("1" or "0"; keepalived needs a number, so "off" keeps the file)."""
     write_atomic(path, "1\n" if on else "0\n")
-
-
-def write_atomic(path: Path, text: str) -> None:
-    """Write a file with tmp-plus-rename, so readers never see a partial file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())  # a crash must not leave an empty file after the rename
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 
 def read_json(path: Path) -> dict[str, Any]:

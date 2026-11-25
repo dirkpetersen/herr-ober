@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Configuration management for Ober."""
 
+import contextlib
 import ipaddress
 import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin
@@ -430,8 +432,7 @@ class OberConfig:
         if self._venv_path_override is not None:
             data["venv_path"] = str(self._venv_path_override)
 
-        with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        write_atomic(path, yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     def ensure_directories(self) -> None:
         """Create all required directories."""
@@ -448,6 +449,23 @@ class OberConfig:
             dirs.append(self.install_path / "venv")
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write a file with tmp-plus-rename, so readers never see a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # a crash must not leave an empty file after the rename
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
