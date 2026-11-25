@@ -19,6 +19,9 @@ Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress co
 
 ## Documentation
 
+The full documentation (getting started, configuration reference, CLI reference, deployment
+and security guides) is at **<https://dirkpetersen.github.io/herr-ober/>**.
+
 For deep internals, kernel tuning, and failure recovery logic, see **[architecture.md](https://github.com/dirkpetersen/herr-ober/blob/main/architecture.md)**.
 For Proxmox host and VM setup (SR-IOV, hugepages, CPU priority, BIOS), see **[docs/proxmox-deployment.md](docs/proxmox-deployment.md)**.
 
@@ -302,7 +305,7 @@ client and RGW connection.
 ober status
 
 # JSON output for monitoring integration
-ober status --json
+ober --json status
 
 # Direct health endpoint
 curl http://127.0.0.1:8404/health
@@ -359,7 +362,7 @@ and **[deploy/sentinel/README.md](deploy/sentinel/README.md)**.
 ```bash
 # Clone and install dev dependencies
 git clone https://github.com/dirkpetersen/herr-ober.git
-cd ober
+cd herr-ober
 pip install -e ".[dev]"
 
 # Run tests

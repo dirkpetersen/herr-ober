@@ -20,10 +20,10 @@ RGW cluster.
 - **What this means:** plain virtio bridging tops out far below that. SR-IOV (or full NIC
   passthrough) is required, together with the VM settings below.
 - **Why KVM, not LXC:**
-  - The proxy terminates TLS for Internet clients, so it needs a hypervisor boundary between it and
-    the host. In the reference deployment the host runs the Ceph that holds every VM's disks.
-  - Herr Ober needs its own kernel sysctls, a watchdog device and the Defender for Endpoint (MDE)
-    kernel sensor. An LXC container can't provide any of these.
+    - The proxy terminates TLS for Internet clients, so it needs a hypervisor boundary between it and
+      the host. In the reference deployment the host runs the Ceph that holds every VM's disks.
+    - Herr Ober needs its own kernel sysctls, a watchdog device and the Defender for Endpoint (MDE)
+      kernel sensor. An LXC container can't provide any of these.
 - **Ceph:** the S3 object store (32 HDD nodes) is a separate cluster. The Proxmox farm's own
   all-flash Ceph runs on the same hosts as ober, so ober must not compete with its OSDs for cores or
   NIC ports.
@@ -84,34 +84,36 @@ The host kernel command line stays as installed. On each of the three hosts:
    active once it's on in the BIOS, which is all VF passthrough needs. Set the performance governor
    at runtime with a small unit (from the `linux-cpupower` package):
 
-   ```ini
-   # /etc/systemd/system/cpu-performance.service
-   [Unit]
-   Description=CPU governor performance
+    ```ini
+    # /etc/systemd/system/cpu-performance.service
+    [Unit]
+    Description=CPU governor performance
 
-   [Service]
-   Type=oneshot
-   ExecStart=/usr/bin/cpupower frequency-set -g performance
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/bin/cpupower frequency-set -g performance
 
-   [Install]
-   WantedBy=multi-user.target
-   ```
+    [Install]
+    WantedBy=multi-user.target
+    ```
 
-   Enable it with `systemctl enable --now cpu-performance`.
+    Enable it with `systemctl enable --now cpu-performance`.
 
-   Proxmox reserves the 1G hugepages itself when the ober VM starts. Start ober first at boot
-   (`startup: order=1`), so that 64 free 1G pages are still available.
+    Proxmox reserves the 1G hugepages itself when the ober VM starts. Start ober first at boot
+    (`startup: order=1`), so that 64 free 1G pages are still available.
+
 2. **VFIO modules.** Add `vfio`, `vfio_iommu_type1` and `vfio_pci` to `/etc/modules`, then run
    `update-initramfs -u -k all`.
 3. **SR-IOV VFs.** Create them on port 1 (ober's port), and persist them across reboots with a udev
    rule or a small systemd unit:
 
-   ```bash
-   echo 4 > /sys/class/net/<pf>/device/sriov_numvfs
-   ip link set <pf> vf 0 mac <fixed-mac> vlan <vlan-id> spoofchk on trust off
-   ```
+    ```bash
+    echo 4 > /sys/class/net/<pf>/device/sriov_numvfs
+    ip link set <pf> vf 0 mac <fixed-mac> vlan <vlan-id> spoofchk on trust off
+    ```
 
-   Set the VLAN on the host, not in the guest, so the VM can't leave its VLAN.
+    Set the VLAN on the host, not in the guest, so the VM can't leave its VLAN.
+
 4. **Resource mappings.** Register each VF under Datacenter → Resource Mappings → PCI Devices (for
    example `ober-front` and `ober-back`), so the VM config refers to names, not PCI addresses.
 5. **Memory sharing.** KSM can stay on for the other VMs; it never merges the ober VM's 1G
