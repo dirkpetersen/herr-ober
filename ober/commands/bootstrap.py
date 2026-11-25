@@ -342,7 +342,17 @@ def _install_packages(system: SystemInfo) -> None:
         # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])
     elif system.os_family == OSFamily.RHEL:
-        run_command(["dnf", "install", "-y", "haproxy", "keepalived", "iputils"])
+        run_command(
+            [
+                "dnf",
+                "install",
+                "-y",
+                "haproxy",
+                "keepalived",
+                "iputils",
+                "policycoreutils-python-utils",
+            ]
+        )
 
 
 def _own_state_dir(config: OberConfig) -> None:
@@ -358,7 +368,7 @@ def _own_state_dir(config: OberConfig) -> None:
 
 
 def _allow_haproxy_backend_ports() -> None:
-    """On SELinux hosts, let haproxy_t connect to RGW and bind the stats port.
+    """On SELinux hosts, let haproxy_t reach RGW and let keepalived run the ober scripts.
 
     Without haproxy_connect_any the policy allows only the http port types, so backends on
     ports such as 7480 or 8080 are refused. No-op when SELinux is off or missing.
@@ -369,6 +379,16 @@ def _allow_haproxy_backend_ports() -> None:
     if result.stdout.strip() == "Disabled":
         return
     run_command(["setsebool", "-P", "haproxy_connect_any", "1"])
+    # shortcut: keepalived_t blocks our check/notify scripts (connect to the stats port, write
+    # the state dir, exec ping, watch the maintenance flag). A permissive keepalived_t is no
+    # weaker than before 0.4, when keepalived ran as init_t. Upgrade: ship a policy module.
+    if check_command_exists("semanage"):
+        run_command(["semanage", "permissive", "-a", "keepalived_t"], check=False)
+    else:
+        console.print(
+            "[yellow]Warning:[/yellow] semanage not found (policycoreutils-python-utils); "
+            "keepalived mode needs 'semanage permissive -a keepalived_t' on SELinux hosts."
+        )
 
 
 def _disable_distro_units() -> None:

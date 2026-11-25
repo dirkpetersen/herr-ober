@@ -262,8 +262,9 @@ def test_selinux_boolean_set_unless_disabled() -> None:
             patch.object(bs, "run_command", return_value=MagicMock(stdout=state + "\n")) as run,
         ):
             bs._allow_haproxy_backend_ports()
-        cmd = ["setsebool", "-P", "haproxy_connect_any", "1"]
-        assert (((cmd,), {}) in [(c.args, c.kwargs) for c in run.call_args_list]) is expected
+        cmds = [c.args[0] for c in run.call_args_list]
+        assert (["setsebool", "-P", "haproxy_connect_any", "1"] in cmds) is expected
+        assert (["semanage", "permissive", "-a", "keepalived_t"] in cmds) is expected
     with (
         patch.object(bs, "check_command_exists", return_value=False),
         patch.object(bs, "run_command") as run,
