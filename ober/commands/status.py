@@ -2,6 +2,7 @@
 """Ober status command - show current state."""
 
 import csv
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from ober import __version__
 from ober.certs import check_cert_expiry
 from ober.commands.maintenance import is_maintenance
 from ober.config import OberConfig
@@ -84,6 +86,8 @@ def collect_status(config: OberConfig, config_error: str | None = None) -> dict[
         "ha_mode": config.ha_mode,
         "services": services,
         "haproxy": {"version": get_haproxy_version()},
+        "ober": {"version": __version__},
+        "config_hash": config_hash(config.haproxy_config_path),
         "config": {
             "path": str(config.config_path),
             "exists": config.config_path.exists(),
@@ -110,6 +114,17 @@ def collect_status(config: OberConfig, config_error: str | None = None) -> dict[
         result["certificate"] = {"path": config.certs.path, **check_cert_expiry(config.certs.path)}
     result["check"] = evaluate(result)
     return result
+
+
+def config_hash(path: Path) -> str | None:
+    """Short sha256 of haproxy.cfg; equal on all nodes unless their configs drifted."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    # The stats bind line may hold this node's own IP (stats_bind), so it is not compared
+    text = "\n".join(line for line in lines if not line.startswith("    bind 127.0.0.1:"))
+    return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
 def _read_json(path: Path) -> Any:

@@ -209,6 +209,9 @@ class OberConfig:
     # This node's IP for keepalived unicast_src_ip and BGP router-id/local-address defaults;
     # "" = the source address of the default route
     local_ip: str = ""
+    # All ingress nodes (IP or SSH host name) for `ober cluster status`; keepalived mode
+    # falls back to local_ip plus the peers
+    nodes: list[str] = field(default_factory=list)
     bgp: BGPConfig = field(default_factory=BGPConfig)
     keepalived: KeepalivedConfig = field(default_factory=KeepalivedConfig)
     vips: list[VIPConfig] = field(default_factory=list)

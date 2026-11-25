@@ -135,6 +135,10 @@ ober bootstrap [path]     # Install and set up everything (--firewall: enable uf
 ober config [--dry-run]   # Interactive configuration wizard (choose BGP or Keepalived mode)
 ober config --non-interactive  # Validate ober.yaml and render all configs, no prompts
 ober status               # Show current state (--json for scripting)
+ober cluster status       # All nodes over SSH: VIP placement, drift (set nodes: in ober.yaml)
+ober apply                # Apply ober.yaml: diff, check, reload, health gate, auto roll back
+ober rollback [--list]    # Go back to the state before the last apply
+ober backend list|drain|maint|ready <server>  # RGW servers on this node
 ober start|stop|restart   # Service management (stop gracefully withdraws routes/releases VIPs)
                           # restart = validated zero-downtime reload; restart --hard = full restart
 ober logs [-f] [-n N]     # View logs (--service http|bgp|ha|all to filter)
