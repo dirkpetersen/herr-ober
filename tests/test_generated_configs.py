@@ -140,6 +140,8 @@ def _vip_iface(
         patch("ober.system.SystemInfo", return_value=system),
         patch("ober.system.check_command_exists", side_effect=lambda t: t in tools),
         patch("ober.system.run_command", side_effect=run),
+        patch("ober.commands.uninstall.run_command", side_effect=run),
+        patch("ober.commands.uninstall.check_command_exists", side_effect=lambda t: t in tools),
     ):
         _configure_vip_interface(
             config,
@@ -246,3 +248,24 @@ def test_bare_vip_is_rendered_as_slash_32(sample_config: OberConfig) -> None:
     assert "Address=10.0.100.1/32\n" in _networkd_vip_files(sample_config)["60-lo-vip.network"]
     calls = _vip_iface(sample_config, "RHEL")
     assert "10.0.100.1/32" in next(c for c in calls if c[2:3] == ["modify"])
+
+
+def test_keepalived_mode_removes_lo_vip(sample_config: OberConfig) -> None:
+    """A lo-vip left from BGP mode would keep every VIP on every node."""
+    sample_config.ha_mode = "keepalived"
+    netplan = sample_config.install_path / "60-vip.yaml"
+    net = sample_config.install_path / "network"
+    net.mkdir()
+    netplan.write_text("x")
+    (net / "60-lo-vip.netdev").write_text("x")
+    calls = _vip_iface(sample_config, "DEBIAN")
+    assert not netplan.exists() and not list(net.iterdir())
+    assert ["netplan", "apply"] in calls and ["networkctl", "delete", "lo-vip"] in calls
+    # Nothing left: no command runs (idempotent)
+    assert _vip_iface(sample_config, "DEBIAN") == []
+
+
+def test_no_vips_removes_nmcli_lo_vip(sample_config: OberConfig) -> None:
+    sample_config.vips = []
+    calls = _vip_iface(sample_config, "RHEL")
+    assert calls == [["nmcli", "connection", "delete", "lo-vip"]]

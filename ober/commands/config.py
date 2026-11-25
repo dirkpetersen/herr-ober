@@ -813,10 +813,10 @@ def _apply_configuration(
     # Generate BGP or Keepalived config based on ha_mode
     if config.ha_mode == "bgp":
         _generate_exabgp_config(config)
-        # Configure VIP interface (only for BGP mode - keepalived manages VIPs itself)
-        _configure_vip_interface(config)
     else:
         _generate_keepalived_config(config)
+    # BGP mode puts the VIPs on lo-vip; keepalived mode removes it (keepalived adds the VIPs)
+    _configure_vip_interface(config)
 
     if os.geteuid() == 0 if is_root is None else is_root:
         _ensure_runtime_dir(config, systemd_dir, run_dir)
@@ -1533,7 +1533,13 @@ def _configure_vip_interface(
 
     system = SystemInfo()
 
-    if not config.vips or system.os_family == OSFamily.UNKNOWN:
+    if system.os_family == OSFamily.UNKNOWN:
+        return
+    if config.ha_mode != "bgp" or not config.vips:
+        # A lo-vip left from BGP mode keeps every VIP on every node and breaks VRRP failover
+        from ober.commands.uninstall import _remove_vip_interface
+
+        _remove_vip_interface(system, networkd_dir, netplan_path)
         return
 
     tool = "netplan" if system.os_family == OSFamily.DEBIAN else "nmcli"
