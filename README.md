@@ -58,8 +58,9 @@ ober bootstrap
 The one-liner also writes `/etc/profile.d/herr-ober.sh`, which exports `PIPX_HOME` and
 `PIPX_BIN_DIR`, so a later `pipx upgrade herr-ober` in a new root shell finds the global install.
 
-**Amazon Linux 2023/2027:** there is no pipx package, so the one-liner does not work. Install
-into a plain venv outside `/root` and `/home` (as `lab/aws/deploy.sh` does):
+**Amazon Linux 2023/2027:** there is no pipx package, so the one-liner installs pipx into its
+own venv at `/opt/pipx-tool` and then works as on the other systems. You can also install into
+a plain venv outside `/root` and `/home` (as `lab/aws/deploy.sh` does):
 ```bash
 sudo python3 -m venv /opt/herr-ober
 sudo /opt/herr-ober/bin/pip install 'herr-ober[bgp]'

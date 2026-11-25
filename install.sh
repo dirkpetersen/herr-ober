@@ -33,11 +33,14 @@ if ! command -v pipx &> /dev/null; then
             apt-get update -qq
             apt-get install -y -qq pipx
             ;;
-        dnf)
-            dnf install -y -q pipx
-            ;;
-        yum)
-            yum install -y -q pipx
+        dnf|yum)
+            # Amazon Linux has no pipx package: put pipx in its own venv instead.
+            if ! $PKG_MANAGER install -y -q pipx; then
+                $PKG_MANAGER install -y -q python3-pip
+                python3 -m venv /opt/pipx-tool
+                /opt/pipx-tool/bin/pip install -q pipx
+                ln -sf /opt/pipx-tool/bin/pipx /usr/local/bin/pipx
+            fi
             ;;
     esac
 fi
