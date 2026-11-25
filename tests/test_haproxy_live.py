@@ -874,3 +874,37 @@ def test_zz_every_datagram_is_clean(proxy: Proxy) -> None:
         assert parse_datagram(raw) is not None
         parsed += 1
     assert parsed > 20
+
+
+def test_drain_survives_reload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ober backend drain + saved server state: a new HAProxy process keeps the drain."""
+    from ober.commands.backend import save_server_state
+    from ober.config import server_name
+
+    with launch() as p:
+        monkeypatch.setattr(OberConfig, "admin_socket_path", property(lambda _self: p.sock))
+        srv = server_name(p.config.backends[0].servers[0])
+        assert p.admin(f"set server s3_backend/{srv} state drain").strip() == ""
+        assert save_server_state(p.config)
+        old = [int(x) for x in p.admin("show info").split("Pid: ")[1].split()[:1]]
+        new = subprocess.Popen(
+            [HAPROXY, "-db", "-f", str(p.config.haproxy_config_path), "-sf", str(old[0])],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.time() + 10
+            state = ""
+            while time.time() < deadline:
+                try:
+                    if f"Pid: {new.pid}" in p.admin("show info"):
+                        state = p.admin("show stat -1 4 -1")
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.2)
+            assert "DRAIN" in state, state
+        finally:
+            new.terminate()
+            new.wait(timeout=5)

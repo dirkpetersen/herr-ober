@@ -44,8 +44,10 @@ class TestConfigGeneration:
         assert f"bind 127.0.0.1:{temp_config.stats_port}" in content
         assert "backend s3_backend" in content
         assert "balance leastconn" in content
-        assert "server srv1 rgw1:7480" in content
-        assert "server srv2 rgw2:7480" in content
+        assert "server rgw1_7480 rgw1:7480" in content
+        assert "default-server check inter 1000ms fall 3 rise 2 slowstart 10s" in content
+        assert "load-server-state-from-file global" in content
+        assert "server rgw2_7480 rgw2:7480" in content
 
     def test_exabgp_config_generation(self, temp_config: OberConfig) -> None:
         """Test that valid ExaBGP config is generated."""

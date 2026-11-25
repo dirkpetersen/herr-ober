@@ -125,6 +125,10 @@ class BackendConfig:
     servers: list[str] = field(default_factory=list)
     health_check_path: str = "/"
     health_check_interval: int = 1000  # milliseconds
+    fall: int = 3  # failed checks before a server is marked down
+    rise: int = 2  # good checks before it is marked up again
+    slowstart_s: int = 10  # ramp-up time for a recovered server (0 = off)
+    maxconn: int = 0  # per-server connection limit, extra requests queue (0 = no limit)
 
 
 @dataclass
@@ -282,6 +286,11 @@ class OberConfig:
     def admin_socket_path(self) -> Path:
         """HAProxy admin socket (local only, root only)."""
         return Path("/run/ober/haproxy.sock")
+
+    @property
+    def server_state_path(self) -> Path:
+        """HAProxy server-state-file: keeps drain/maint across reloads and restarts."""
+        return self.install_path / "var" / "run" / "haproxy-server-state"
 
     @property
     def maintenance_path(self) -> Path:
@@ -552,6 +561,11 @@ def _is_single_ipv4(value: Any) -> bool:
     return iface.version == 4 and iface.network.prefixlen == 32
 
 
+def server_name(address: str) -> str:
+    """Stable HAProxy server name from its address, e.g. ``rgw1:7480`` -> ``rgw1_7480``."""
+    return re.sub(r"[^A-Za-z0-9.-]+", "_", address).strip("_")
+
+
 def _is_hostport(value: Any) -> bool:
     if not isinstance(value, str) or not _HOSTPORT_RE.match(value):
         return False
@@ -672,6 +686,16 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
             f"{key}.health_check_interval",
             "must be >= 100 (ms)",
             backend.health_check_interval,
+        )
+        for name, low in (("fall", 1), ("rise", 1), ("slowstart_s", 0), ("maxconn", 0)):
+            value = getattr(backend, name)
+            need(_in_range(value, low, 1000000), f"{key}.{name}", f"must be >= {low}", value)
+        names = [server_name(str(s)) for s in backend.servers]
+        need(
+            len(names) == len(set(names)),
+            f"{key}.servers",
+            "has duplicates (after mapping to HAProxy server names)",
+            backend.servers,
         )
 
     sec = cfg.security

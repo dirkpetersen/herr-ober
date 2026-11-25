@@ -25,6 +25,7 @@ from ober.config import (
     SecurityConfig,
     VIPConfig,
     exit_if_invalid,
+    server_name,
 )
 from ober.system import SystemInfo
 
@@ -1278,6 +1279,7 @@ def _generate_haproxy_config(
         log_line,
         "    maxconn 100000",
         f"    stats socket {sock} mode 600 level admin",
+        f"    server-state-file {config.server_state_path}",
         "    ssl-default-bind-options ssl-min-ver TLSv1.2",
         "    ssl-default-bind-ciphersuites "
         "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256",
@@ -1290,6 +1292,7 @@ def _generate_haproxy_config(
         "",
         "defaults",
         "    mode http",
+        "    load-server-state-from-file global",
         "    log global",
         "    option dontlognull",
         "    timeout connect 5s",
@@ -1331,10 +1334,17 @@ def _generate_haproxy_config(
                 f"    option httpchk GET {backend.health_check_path}",
             ]
         )
-        for i, server in enumerate(backend.servers):
-            cfg_lines.append(
-                f"    server srv{i + 1} {server} check inter {backend.health_check_interval}ms"
-            )
+        dflt = (
+            f"    default-server check inter {backend.health_check_interval}ms"
+            f" fall {backend.fall} rise {backend.rise}"
+        )
+        if backend.slowstart_s:
+            dflt += f" slowstart {backend.slowstart_s}s"
+        if backend.maxconn:  # requests over the limit wait in the queue (timeout queue)
+            dflt += f" maxconn {backend.maxconn}"
+        cfg_lines.append(dflt)
+        for server in backend.servers:
+            cfg_lines.append(f"    server {server_name(server)} {server}")
         cfg_lines.append("")
 
     config.haproxy_config_path.parent.mkdir(parents=True, exist_ok=True)
