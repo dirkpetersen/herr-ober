@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ober.certs import check_cert_expiry
+from ober.commands.maintenance import is_maintenance
 from ober.commands.status import (
     load_config_safe,
     local_ipv4_addresses,
@@ -71,6 +72,7 @@ def doctor(ctx: click.Context) -> None:
         checks.append(_check_vips(config))
     if config.certs.path:
         checks.append(_check_cert(config.certs.path))
+    checks.append(_check_maintenance(config))
     checks.append(_check_network_tools())
 
     all_passed = not any(c.get("critical") and not c["passed"] for c in checks)
@@ -472,6 +474,18 @@ def _check_cert(path: str) -> dict[str, Any]:
         "status": {"ok": "ok", "warn": "expires soon"}.get(result["level"], "expiring"),
         "message": result["message"],
         "critical": result["level"] == "crit",
+    }
+
+
+def _check_maintenance(config: OberConfig) -> dict[str, Any]:
+    """Warn when the node is in maintenance mode (out of rotation)."""
+    on = is_maintenance(config.maintenance_path)
+    return {
+        "name": "Maintenance mode",
+        "passed": not on,
+        "status": "on" if on else "off",
+        "message": "Node is out of rotation; run 'ober maintenance off'" if on else "",
+        "critical": False,
     }
 
 

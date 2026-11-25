@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ober.certs import check_cert_expiry
+from ober.commands.maintenance import is_maintenance
 from ober.config import OberConfig
 from ober.system import ServiceInfo, SystemInfo, get_haproxy_version
 
@@ -96,6 +97,7 @@ def collect_status(config: OberConfig, config_error: str | None = None) -> dict[
 
         result["keepalived"] = {"version": get_keepalived_version()}
 
+    result["maintenance"] = is_maintenance(config.maintenance_path)
     result["vips"] = _vip_status(config)
     result["backends"] = backend_summary(config)
     if config.certs.path:
@@ -224,6 +226,8 @@ def evaluate(result: dict[str, Any]) -> dict[str, Any]:
     for name, svc in result["services"].items():
         if not svc["active"]:
             problems.append(("CRIT", f"{name} {svc['status']}"))
+    if result.get("maintenance"):
+        problems.append(("WARN", "maintenance mode on (node out of rotation)"))
 
     backends = result["backends"]
     if backends is None:
@@ -307,6 +311,9 @@ def _print_status(result: dict[str, Any]) -> None:
     else:
         ka_ver = result["keepalived"]["version"] or "not installed"
         console.print(f"[bold]Keepalived:[/bold] {ka_ver}")
+
+    if result.get("maintenance"):
+        console.print("[bold yellow]Maintenance mode: on[/bold yellow] (ober maintenance off)")
 
     cfg = result["config"]
     if cfg["error"]:

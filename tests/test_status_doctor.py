@@ -232,6 +232,19 @@ class TestBackendSummary:
         assert "dead: 0/1 servers UP" in check["problems"]
 
 
+def test_maintenance_is_warn() -> None:
+    result = {
+        "config": {"error": None, "exists": True, "path": "x"},
+        "services": {},
+        "vips": [],
+        "backends": {},
+        "maintenance": True,
+    }
+    check = status.evaluate(result)
+    assert check["level"] == "WARN"
+    assert "maintenance mode on (node out of rotation)" in check["problems"]
+
+
 def test_local_ipv4_addresses() -> None:
     out = (
         "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever\n"
