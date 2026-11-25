@@ -265,7 +265,7 @@ def launch(**security: Any) -> Iterator[Proxy]:
 
         # Probe with a trusted source so the main scenarios start clean
         proc = subprocess.Popen(
-            [HAPROXY, "-db", "-q", "-f", str(config.haproxy_config_path)],
+            [HAPROXY, "-db", "-f", str(config.haproxy_config_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
