@@ -229,6 +229,8 @@ class OberConfig:
     _venv_path_override: Path | None = field(default=None, repr=False)
     _load_errors: list[str] = field(default_factory=list, repr=False, compare=False)
     _load_warnings: list[str] = field(default_factory=list, repr=False, compare=False)
+    # Raw content of ober.local.yaml: its keys are saved back there, not to ober.yaml
+    _local: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def config_path(self) -> Path:
@@ -344,22 +346,15 @@ class OberConfig:
 
         Never raises for bad content, so that ``stop``, ``status`` and ``logs`` still work.
         Problems are kept for ``validate()``; bad sections keep their defaults.
+        ``ober.local.yaml`` next to the file, when present, overrides its keys (per-node values
+        such as ``local_ip`` or ``bgp.router_id``, so ober.yaml can be the same on every node).
         """
-        try:
-            with open(path) as f:
-                data = yaml.load(f, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
-        except yaml.MarkedYAMLError as e:
-            mark = e.problem_mark
-            where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
-            self._load_errors.append(f"{path}: YAML syntax error{where}: {e.problem}")
-            return
-        except (OSError, yaml.YAMLError) as e:
-            self._load_errors.append(f"{path}: cannot read: {e}")
-            return
-        if data is None:
-            return
-        if not isinstance(data, dict):
-            self._load_errors.append(f"{path}: top level must be a mapping")
+        data = self._read_mapping(path)
+        local = path.parent / LOCAL_CONFIG_NAME
+        if local.exists():
+            self._local = self._read_mapping(local) or {}
+            data = _merge(data or {}, self._local)
+        if not data:
             return
 
         known = {f.name for f in fields(self) if not f.name.startswith("_")} | {"venv_path"}
@@ -383,6 +378,24 @@ class OberConfig:
         # Load venv_path if specified (for pipx installations)
         if data.get("venv_path"):
             self._venv_path_override = Path(str(data["venv_path"]))
+
+    def _read_mapping(self, path: Path) -> dict[str, Any] | None:
+        """Parse one YAML file; record problems and return None when it is not usable."""
+        try:
+            with open(path) as f:
+                data = yaml.load(f, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
+        except yaml.MarkedYAMLError as e:
+            mark = e.problem_mark
+            where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+            self._load_errors.append(f"{path}: YAML syntax error{where}: {e.problem}")
+            return None
+        except (OSError, yaml.YAMLError) as e:
+            self._load_errors.append(f"{path}: cannot read: {e}")
+            return None
+        if data is not None and not isinstance(data, dict):
+            self._load_errors.append(f"{path}: top level must be a mapping")
+            return None
+        return data
 
     def _section(self, cls: type[Any], data: Any, where: str) -> Any:
         """Build a config dataclass from a dict; record bad shapes and unknown keys."""
@@ -445,6 +458,9 @@ class OberConfig:
         if self._venv_path_override is not None:
             data["venv_path"] = str(self._venv_path_override)
 
+        if self._local:
+            local = _split(data, self._local)
+            write_atomic(path.parent / LOCAL_CONFIG_NAME, yaml.dump(local, sort_keys=False))
         write_atomic(path, yaml.dump(data, default_flow_style=False, sort_keys=False))
 
     def ensure_directories(self) -> None:
@@ -462,6 +478,33 @@ class OberConfig:
             dirs.append(self.install_path / "venv")
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)
+
+
+LOCAL_CONFIG_NAME = "ober.local.yaml"
+# Values that must differ between nodes: a shared ober.yaml must leave them empty
+PER_NODE_KEYS = (("local_ip",), ("bgp", "router_id"), ("bgp", "local_address"))
+
+
+def _merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """Deep merge: mappings merge key by key, any other value in ``over`` replaces."""
+    out = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _split(data: dict[str, Any], local: dict[str, Any]) -> dict[str, Any]:
+    """Move the keys that ``local`` has out of ``data``; return them (current values)."""
+    out: dict[str, Any] = {}
+    for key, value in local.items():
+        if isinstance(value, dict) and isinstance(data.get(key), dict):
+            out[key] = _split(data[key], value)
+        else:
+            out[key] = data.pop(key, value)
+    return out
 
 
 def write_atomic(path: Path, text: str) -> None:

@@ -136,7 +136,8 @@ ober config [--dry-run]   # Interactive configuration wizard (choose BGP or Keep
 ober config --non-interactive  # Validate ober.yaml and render all configs, no prompts
 ober status               # Show current state (--json for scripting)
 ober cluster status       # All nodes over SSH: VIP placement, drift (set nodes: in ober.yaml)
-ober apply                # Apply ober.yaml: diff, check, reload, health gate, auto roll back
+ober apply [-f FILE|-]    # Apply ober.yaml: diff, check, reload, health gate, auto roll back
+ober push                 # ober apply on the other nodes, one at a time; stops at a failure
 ober rollback [--list]    # Go back to the state before the last apply
 ober backend list|drain|maint|ready <server>  # RGW servers on this node
 ober start|stop|restart   # Service management (stop gracefully withdraws routes/releases VIPs)
@@ -162,6 +163,32 @@ sudo ober config --non-interactive  # validate and render haproxy.cfg and the HA
 problem. `ober stop`, `ober status` and `ober logs` still work. `local_ip` sets this node's IP
 for keepalived `unicast_src_ip` and the BGP router-id/local-address when the default route
 uses another NIC.
+
+### One ober.yaml for the whole cluster
+
+Values that must differ between nodes go in `ober.local.yaml` next to `ober.yaml` on each
+node. Its keys override `ober.yaml`, and `ober config` saves them back there:
+
+```yaml
+# etc/ober.local.yaml on node ober2
+local_ip: 10.0.0.2
+bgp:
+  router_id: 10.0.0.2
+```
+
+Then `ober.yaml` is the same on every node. List the nodes once (`nodes: [ober1, ober2, ober3]`),
+apply on one node, and push to the others:
+
+```bash
+sudo ober apply              # this node first
+sudo ober push               # ssh NODE sudo -n ober apply -f - on each other node, one at a time
+sudo ober cluster status     # VIP placement and config drift over all nodes
+```
+
+`ober push` refuses an `ober.yaml` that sets `local_ip`, `bgp.router_id` or
+`bgp.local_address`, and stops at the first node that fails its check or health gate. That node
+puts its old files back. Certificates are not copied. The SSH user needs a key without a prompt
+and `sudo -n ober` on each node.
 
 `ober sync` is deprecated: the files it wrote were never read. Use `bgp.neighbors` or
 `keepalived.peers`, `security.internal_networks` or `security.allowlist`, and
