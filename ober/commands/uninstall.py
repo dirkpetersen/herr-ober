@@ -143,11 +143,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
 
     # Step 3: Remove kernel tuning
     console.print("Removing kernel tuning...")
-    sysctl_path = Path("/etc/sysctl.d/99-herr-ober.conf")
-    if sysctl_path.exists():
-        sysctl_path.unlink()
-        console.print(f"  [green]Removed {sysctl_path}[/green]")
-        run_command(["sysctl", "--system"], check=False)
+    _remove_kernel_tuning()
 
     # Step 4: Remove VIP interface
     console.print("Removing VIP interface...")
@@ -226,6 +222,21 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     if keep_config:
         console.print()
         console.print(f"Configuration preserved at: {config.config_path}")
+
+
+def _remove_kernel_tuning(
+    sysctl_path: Path | None = None, modules_path: Path | None = None
+) -> None:
+    """Remove the sysctl and modules-load files that bootstrap writes."""
+    sysctl_path = sysctl_path or Path("/etc/sysctl.d/99-herr-ober.conf")
+    modules_path = modules_path or Path("/etc/modules-load.d/herr-ober.conf")
+    if modules_path.exists():
+        modules_path.unlink()
+        console.print(f"  [green]Removed {modules_path}[/green]")
+    if sysctl_path.exists():
+        sysctl_path.unlink()
+        console.print(f"  [green]Removed {sysctl_path}[/green]")
+        run_command(["sysctl", "--system"], check=False)
 
 
 def _remove_vip_interface(
