@@ -7,6 +7,7 @@ from collections.abc import Callable
 import click
 from rich.console import Console
 
+from ober.commands.backend import save_server_state
 from ober.commands.maintenance import is_maintenance, read_json, set_maintenance
 from ober.config import OberConfig, exit_if_invalid
 from ober.system import ServiceInfo, SystemInfo, run_command
@@ -213,6 +214,7 @@ def stop(ctx: click.Context, force: bool) -> None:
     try:
         # Stop HAProxy
         if http_service.is_active:
+            save_server_state(config)
             try:
                 run_command(["systemctl", "stop", "ober-http"])
                 console.print("[green]Stopped ober-http (HAProxy)[/green]")
@@ -318,6 +320,7 @@ def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
         ha_active = ServiceInfo.from_service_name(ha_unit).is_active
         clear_maintenance = _drain(config, ha_active)
         console.print("Restarting Ober services...")
+        save_server_state(config)
         try:
             run_command(["systemctl", "restart", "ober-http"])
             console.print("[green]Restarted ober-http (HAProxy)[/green]")
@@ -340,6 +343,7 @@ def restart(ctx: click.Context, hard: bool, reload_only: bool) -> None:
         console.print("[bold green]Services restarted![/bold green]")
         return
 
+    save_server_state(config)  # HAProxy loads it on reload, so drain/maint stay set
     try:
         run_command(["systemctl", "reload", "ober-http"])
     except Exception as e:

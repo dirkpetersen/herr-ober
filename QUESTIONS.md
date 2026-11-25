@@ -72,3 +72,18 @@ These were not in the list above. Each one is the default the work used.
   in-flight flows, and a VRRP move does the same in keepalived mode. The drain only protects
   connections that still reach the node. The default `drain_timeout` stays 30 s (wave 2: revisit
   with resilient hashing on the router, and count old workers after a reload).
+
+## Decisions made during wave 2 (2026-11-25)
+
+- **Server names (5.1)** come from the address: `rgw1:7480` becomes `rgw1_7480`. Metrics and
+  alerts that use the old `srv1`, `srv2` names must be updated once.
+- **Backend tuning (5.3):** `fall` 3 and `rise` 2 (the HAProxy defaults), `slowstart_s` 10
+  (new: a recovered RGW gets traffic over 10 s), `maxconn` 0 (no limit). With `maxconn`, extra
+  requests wait in the queue for `timeout connect` (5 s). `observe layer4` was not added.
+- **Drain (5.2):** `ober backend drain|maint|ready` acts on this node only. `--all-nodes` waits
+  for `ober push` (4.4), which needs the same SSH channel. The state goes to
+  `<install>/var/run/haproxy-server-state` after each change and before each `ober restart`
+  or `ober stop`, so a drain survives a reload, restart and reboot. A plain
+  `systemctl reload ober-http` does not save it first.
+- **PPA (9.4):** when `ppa:vbernat/haproxy-3.3` cannot be added, bootstrap warns and uses the
+  distro HAProxy instead of failing (Ubuntu 26.04 has no PPA build but ships 3.2).
