@@ -174,6 +174,7 @@ def test_networkd_without_nmcli_running(sample_config: OberConfig) -> None:
     calls = _vip_iface(sample_config, "RHEL", tools=("networkctl",), active_rc=0)
     assert ["systemctl", "enable", "--now", "systemd-networkd"] in calls
     assert calls[-1] == ["networkctl", "reload"]
+    assert not any("systemd-networkd-wait-online.service" in c for c in calls)
     assert not any(c[0] == "nmcli" for c in calls)
     net = sample_config.install_path / "network"
     assert (net / "60-lo-vip.netdev").read_text() == "[NetDev]\nName=lo-vip\nKind=dummy\n"
@@ -187,7 +188,10 @@ def test_networkd_without_nmcli_running(sample_config: OberConfig) -> None:
 
 def test_networkd_not_running_is_started_without_reload(sample_config: OberConfig) -> None:
     calls = _vip_iface(sample_config, "RHEL", tools=("networkctl",), active_rc=3)
-    assert calls[-1] == ["systemctl", "enable", "--now", "systemd-networkd"]
+    assert calls[-2:] == [
+        ["systemctl", "enable", "--now", "systemd-networkd"],
+        ["systemctl", "disable", "systemd-networkd-wait-online.service"],
+    ]
 
 
 def test_networkd_failure_is_reported(sample_config: OberConfig) -> None:

@@ -1609,6 +1609,11 @@ def _configure_vip_interface(
             if active.returncode == 0:
                 # reload creates a new netdev and reapplies changed .network files
                 run_command(["networkctl", "reload"])
+            else:
+                # enable pulls in wait-online (Also=); with only lo-vip it waits ~2 min at boot
+                run_command(
+                    ["systemctl", "disable", "systemd-networkd-wait-online.service"], check=False
+                )
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         raise RuntimeError(f"VIP interface setup failed: {' '.join(exc.cmd)}: {detail}") from exc
