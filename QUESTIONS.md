@@ -32,3 +32,41 @@ answer here or say so in the session.
 - **3.4 Maintenance mode:** default: `ober maintenance on|off` writes a flag file. While it is
   set, health reports down, so the node withdraws its BGP routes or drops its VRRP priority but
   keeps serving existing connections.
+
+## Decisions made during wave 1 (2026-11-24)
+
+These were not in the list above. Each one is the default the work used.
+
+- **4.5 `ober sync`:** deprecated, not removed. Its three files were never read. Each list now
+  has its own field in ober.yaml (`bgp.neighbors` / `keepalived.peers`,
+  `security.internal_networks` / `security.allowlist`, `backends[].servers`). The command is
+  hidden, prints where each list now lives, and exits 1. The name stays free for 4.4.
+- **Peers must be IP addresses.** `keepalived.peers` and `bgp.neighbors` are validated as IPs,
+  because keepalived `unicast_peer` needs IPs. A config with hostnames there is now refused by
+  `config`, `start` and `test` (`stop`, `status`, `logs` still work).
+- **Unknown keys in ober.yaml** are warnings. Duplicate keys are errors.
+- **Plain `ober restart`** reloads HAProxy (and HUPs keepalived) but does not restart ExaBGP,
+  so the BGP session stays up. ExaBGP config changes need `ober restart --hard`, which also
+  drains first.
+- **Existing nodes** get the new units through `ober upgrade`, which re-renders them. Then one
+  `ober restart --hard` per node is needed to move HAProxy to `Type=notify`.
+- **Keepalived script security:** on (`enable_script_security`, `script_user root`). Without it
+  `keepalived -t` fails. Side effect: keepalived refuses the check scripts if the venv path is
+  writable by a non-root user (an install under /home). The recommended pipx install under
+  /opt/pipx is fine. Follow-up: doctor should warn about this case.
+- **Maintenance:** keepalived `track_file` weight -100, so the owner drops to priority 1 and the
+  peers (90) win. If every node is in maintenance, the VIP stays on one node and keeps serving.
+  The wait for "out of rotation" in `ober stop` is a fixed 15 s; on timeout it warns and goes on.
+- **Stats listener:** bound to 127.0.0.1 plus the addresses in the new `stats_bind` field.
+  Remote Prometheus scraping of :8404 needs `stats_bind: [<mgmt ip>]`. Basic auth was not
+  added (the password would sit in haproxy.cfg and travel over plain HTTP).
+- **Several backend groups** are now an error. Before, only the first was used.
+- **BFD:** the ExaBGP `bfd {}` block is no longer written. `bgp.bfd_enabled` stays as an unused
+  field so old files load. Failure detection is the BGP hold time (3 s).
+- **Conntrack:** limits raised (`nf_conntrack_max` 1048576), no `notrack` rules.
+- **Firewall:** the VRRP rule allows any source (peers are unknown at bootstrap). `--firewall`
+  does not open 179/tcp, the stats port or the watch ports.
+- **`ober status --check`** exits 0/1/2 (OK/WARN/CRIT), an intended exception to the 0/1 rule.
+  A route that is not announced is WARN, not CRIT, because it can be maintenance.
+- **ECMP and drain:** without resilient hashing on the router, a withdraw still resets
+  in-flight flows. The drain only protects connections the router keeps sending to the node.
