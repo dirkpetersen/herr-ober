@@ -538,3 +538,42 @@ def temp_dir() -> Path:
 def cli_runner() -> CliRunner:
     """Create a CLI runner."""
     return CliRunner()
+
+
+def test_same_peer_list_on_all_nodes_gives_one_owner(temp_dir: Path) -> None:
+    """One ober.yaml lists all nodes (self included): each VIP still has exactly one owner."""
+    import re
+
+    from ober.commands.config import _generate_keepalived_config
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    vips = ["192.168.1.100", "192.168.1.101", "192.168.1.102", "192.168.1.103"]
+    priorities: dict[str, list[int]] = {v: [] for v in vips}
+    for node in nodes:
+        config = OberConfig(install_path=temp_dir / node, local_ip=node)
+        config.ha_mode = "keepalived"
+        config.keepalived = KeepalivedConfig(peers=[*nodes, nodes[0]], interface="eth0")
+        config.vips = [VIPConfig(address=v) for v in vips]
+        config.ensure_directories()
+        _generate_keepalived_config(config)
+        text = config.keepalived_config_path.read_text()
+        for block in text.split("vrrp_instance ")[1:]:
+            vip = re.search(r"virtual_ipaddress \{\s+(\S+)/32", block)
+            prio = re.search(r"priority (\d+)", block)
+            assert vip and prio
+            priorities[vip.group(1)].append(int(prio.group(1)))
+            peers = re.search(r"unicast_peer \{([^}]*)\}", block)
+            assert peers and peers.group(1).split() == [n for n in nodes if n != node]
+    for vip, prios in priorities.items():
+        assert sorted(prios) == [90, 90, 100], vip
+
+
+def test_status_expected_owner_matches_generator() -> None:
+    from ober.commands.status import _expected_owner
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    owners = set()
+    for node in nodes:
+        config = OberConfig(local_ip=node, keepalived=KeepalivedConfig(peers=nodes))
+        owners.add(_expected_owner(config, "192.168.1.100"))
+    assert owners == {get_vip_owner("192.168.1.100", nodes, "")[0]}

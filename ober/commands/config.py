@@ -66,6 +66,11 @@ def get_vrrp_router_id(vip: str) -> int:
     return (int(hashlib.md5(vip.encode()).hexdigest(), 16) % 255) + 1
 
 
+def keepalived_peers(config: OberConfig, local_ip: str) -> list[str]:
+    """Peers without duplicates and without this node (one ober.yaml can list all nodes)."""
+    return [p for p in dict.fromkeys(config.keepalived.peers) if p != local_ip]
+
+
 def _parse_hostlist(hostlist: str) -> list[str]:
     """Parse comma-separated hostlist, supporting Slurm hostlist syntax.
 
@@ -1360,8 +1365,9 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     if not interface:
         interface = _detect_default_interface()
 
-    # Build all nodes list (self + peers)
-    all_nodes = [local_ip] + config.keepalived.peers
+    # Build all nodes list (self + peers); the same list on every node gives one owner per VIP
+    peers = keepalived_peers(config, local_ip)
+    all_nodes = [local_ip, *peers]
 
     cfg_lines = [
         "# Herr Ober Keepalived Configuration",
@@ -1448,7 +1454,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                     "    unicast_peer {",
                 ]
             )
-            for peer in config.keepalived.peers:
+            for peer in peers:
                 cfg_lines.append(f"        {peer}")
             cfg_lines.extend(
                 [

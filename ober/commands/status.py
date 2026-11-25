@@ -14,7 +14,7 @@ from rich.table import Table
 from ober.certs import check_cert_expiry
 from ober.commands.maintenance import is_maintenance
 from ober.config import OberConfig
-from ober.system import ServiceInfo, SystemInfo, get_haproxy_version
+from ober.system import ServiceInfo, get_haproxy_version
 
 console = Console()
 
@@ -160,11 +160,11 @@ def local_ipv4_addresses() -> set[str] | None:
 
 
 def _expected_owner(config: OberConfig, vip: str) -> str:
-    from ober.commands.config import get_vip_owner
+    from ober.commands.config import get_vip_owner, keepalived_peers
 
     # Same node list as _generate_keepalived_config, so the answer matches the config.
-    local_ip = SystemInfo().get_local_ip() or "0.0.0.0"
-    return get_vip_owner(vip, [local_ip] + list(config.keepalived.peers), local_ip)[0]
+    local_ip = config.node_ip()
+    return get_vip_owner(vip, [local_ip, *keepalived_peers(config, local_ip)], local_ip)[0]
 
 
 def _vip_status(config: OberConfig) -> list[dict[str, Any]]:
