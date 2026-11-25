@@ -66,6 +66,25 @@ def get_vrrp_router_id(vip: str) -> int:
     return (int(hashlib.md5(vip.encode()).hexdigest(), 16) % 255) + 1
 
 
+def vrrp_router_ids(vips: list[str]) -> dict[str, int]:
+    """Give each VIP a unique ``virtual_router_id`` (1-255), the same on all nodes.
+
+    Over the sorted VIPs, each one takes its md5 ID, or the next free ID on a collision.
+
+    Raises:
+        ValueError: More than 255 VIPs.
+    """
+    ids: dict[str, int] = {}
+    for vip in sorted(set(vips)):
+        if len(ids) == 255:
+            raise ValueError("keepalived supports at most 255 VIPs (virtual_router_id 1-255)")
+        vrid = get_vrrp_router_id(vip)
+        while vrid in ids.values():
+            vrid = vrid % 255 + 1
+        ids[vip] = vrid
+    return ids
+
+
 def keepalived_peers(config: OberConfig, local_ip: str) -> list[str]:
     """Peers without duplicates and without this node (one ober.yaml can list all nodes)."""
     return [p for p in dict.fromkeys(config.keepalived.peers) if p != local_ip]
@@ -1424,10 +1443,11 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     )
 
     # Generate one vrrp_instance per VIP
+    router_ids = vrrp_router_ids([_vip_host(v.address) for v in config.vips])
     for idx, vip_config in enumerate(config.vips):
-        vip = vip_config.address.split("/")[0]  # Strip CIDR notation
+        vip = _vip_host(vip_config.address)
         owner, priority = get_vip_owner(vip, all_nodes, local_ip)
-        router_id = get_vrrp_router_id(vip)
+        router_id = router_ids[vip]
 
         cfg_lines.extend(
             [

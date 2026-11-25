@@ -577,3 +577,17 @@ def test_status_expected_owner_matches_generator() -> None:
         config = OberConfig(local_ip=node, keepalived=KeepalivedConfig(peers=nodes))
         owners.add(_expected_owner(config, "192.168.1.100"))
     assert owners == {get_vip_owner("192.168.1.100", nodes, "")[0]}
+
+
+def test_vrrp_router_ids_are_unique() -> None:
+    from ober.commands.config import vrrp_router_ids
+
+    assert get_vrrp_router_id("10.0.0.2") == get_vrrp_router_id("10.0.0.6")
+    ids = vrrp_router_ids(["10.0.0.6", "10.0.0.2"])
+    assert ids == vrrp_router_ids(["10.0.0.2", "10.0.0.6"])  # same on every node
+    assert ids["10.0.0.2"] == get_vrrp_router_id("10.0.0.2")
+    assert ids["10.0.0.6"] != ids["10.0.0.2"]
+    many = vrrp_router_ids([f"10.0.{i // 250}.{i % 250}" for i in range(255)])
+    assert sorted(many.values()) == list(range(1, 256))
+    with pytest.raises(ValueError, match="at most 255"):
+        vrrp_router_ids([f"10.1.{i // 250}.{i % 250}" for i in range(256)])
