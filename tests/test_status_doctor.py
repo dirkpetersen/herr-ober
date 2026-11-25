@@ -95,6 +95,31 @@ class TestCertExpiry:
     def test_fresh_cert_has_about_100_days(self, pem_cert: Path) -> None:
         assert check_cert_expiry(pem_cert)["days_left"] in (99, 100)
 
+    def test_directory_reports_worst_pem(self, pem_cert: Path, temp_dir: Path) -> None:
+        import shutil
+
+        certs = temp_dir / "certs"
+        certs.mkdir()
+        assert check_cert_expiry(certs)["level"] == "warn"  # empty directory
+        shutil.copy(pem_cert, certs / "a.pem")
+        result = check_cert_expiry(certs)
+        assert result["level"] == "ok" and result["message"].startswith("a.pem: ")
+        (certs / "b.pem").write_text("garbage")
+        result = check_cert_expiry(certs)
+        assert result["level"] == "crit" and result["message"].startswith("b.pem: ")
+
+    def test_permission_denied_is_warn(self, pem_cert: Path) -> None:
+        import os
+
+        if os.geteuid() == 0:
+            pytest.skip("root can read any file")
+        pem_cert.chmod(0)
+        try:
+            result = check_cert_expiry(pem_cert)
+        finally:
+            pem_cert.chmod(0o600)
+        assert result["level"] == "warn" and "run as root" in result["message"]
+
     def test_unreadable(self, temp_dir: Path) -> None:
         result = check_cert_expiry(temp_dir / "missing.pem")
         assert result["level"] == "crit" and result["days_left"] is None
