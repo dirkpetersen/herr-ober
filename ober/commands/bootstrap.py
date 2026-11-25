@@ -91,8 +91,8 @@ RuntimeDirectoryMode=0700
 # keep it while HAProxy is stopped: blocklist sync still updates the file
 RuntimeDirectoryPreserve=yes
 
-# Security
-NoNewPrivileges=true
+# Security. No NoNewPrivileges here: on SELinux hosts (RHEL, Amazon Linux) it blocks the
+# switch to the haproxy_t domain, and then HAProxy cannot create its sockets in /run/ober.
 ProtectSystem=strict
 ProtectHome={protect_home}
 ReadWritePaths=/run /var/log
@@ -257,6 +257,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
         task = progress.add_task("Installing HAProxy and Keepalived...", total=None)
         _install_packages(system)
         _disable_distro_units()
+        _allow_haproxy_backend_ports()
         progress.update(
             task, completed=True, description="[green]Installed HAProxy and Keepalived[/green]"
         )
@@ -339,6 +340,20 @@ def _install_packages(system: SystemInfo) -> None:
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])
     elif system.os_family == OSFamily.RHEL:
         run_command(["dnf", "install", "-y", "haproxy", "keepalived", "iputils"])
+
+
+def _allow_haproxy_backend_ports() -> None:
+    """On SELinux hosts, let haproxy_t connect to RGW and bind the stats port.
+
+    Without haproxy_connect_any the policy allows only the http port types, so backends on
+    ports such as 7480 or 8080 are refused. No-op when SELinux is off or missing.
+    """
+    if not check_command_exists("getenforce"):
+        return
+    result = run_command(["getenforce"], check=False)
+    if result.stdout.strip() == "Disabled":
+        return
+    run_command(["setsebool", "-P", "haproxy_connect_any", "1"])
 
 
 def _disable_distro_units() -> None:

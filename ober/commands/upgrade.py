@@ -10,7 +10,11 @@ import inquirer  # type: ignore[import-untyped]
 from rich.console import Console
 from rich.table import Table
 
-from ober.commands.bootstrap import EXABGP_SPEC, _create_systemd_services
+from ober.commands.bootstrap import (
+    EXABGP_SPEC,
+    _allow_haproxy_backend_ports,
+    _create_systemd_services,
+)
 from ober.config import OberConfig
 from ober.system import (
     OSFamily,
@@ -136,6 +140,7 @@ def _rerender_units(config: OberConfig) -> None:
     """Rewrite the systemd units from the current templates (nodes bootstrapped earlier)."""
     config.ensure_directories()  # older installs lack var/run, which the units now list
     changed = _create_systemd_services(config, config.venv_path)
+    _allow_haproxy_backend_ports()  # the new ober-http unit runs HAProxy as haproxy_t
     unit = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
     if ServiceInfo.from_service_name(unit).is_enabled:
         # Adds the ober-http.service.wants link of a new [Install] section
