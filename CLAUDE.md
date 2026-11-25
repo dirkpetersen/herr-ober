@@ -9,7 +9,7 @@ Herr Ober ("Head Waiter") is a high-performance (50GB/s+) S3 ingress controller 
 - **BGP/ECMP (`ha_mode: bgp`)** - ExaBGP announces shared VIP(s); upstream router ECMPs across nodes.
 - **Keepalived (`ha_mode: keepalived`)** - one VIP per node with VRRP failover; DNS round-robin (managed by the user, out of scope) spreads clients.
 
-PyPI package `herr-ober`, CLI command `ober`, Python 3.12+, targets Ubuntu, Debian, RHEL 10+, Amazon Linux 2023/2027. Deep internals (kernel tuning, failure recovery) are in `architecture.md`.
+PyPI package `herr-ober`, CLI command `ober`, Python 3.12+, targets Ubuntu, Debian, RHEL 10+, Amazon Linux 2027. Deep internals (kernel tuning, failure recovery) are in `architecture.md`.
 
 ## Development Commands
 
@@ -35,7 +35,7 @@ CI (`.github/workflows/test.yml`, Python 3.12, 3.13 and 3.14) runs `ruff check .
 
 File paths are properties derived from `install_path` (`config_path`, `haproxy_config_path`, `bgp_config_path`, `keepalived_config_path`, `certs_path`, `blocklist_path`, `admin_socket_path`, `watch_data_dir`). Secrets, including Entra ID client secrets for Sentinel/MDE, go to `~/.ober/login` (mode 600) via `load_secrets()`/`save_secrets()`.
 
-**System (`ober/system.py`)**: `SystemInfo` detects OS family (DEBIAN/RHEL; Amazon Linux, `ID=amzn`, is RHEL with `os_id == "amzn"` and only versions 2023/2027), version, root, hostname, local IP. `ServiceInfo.from_service_name()` wraps systemd. Shell calls go through `run_command()`.
+**System (`ober/system.py`)**: `SystemInfo` detects OS family (DEBIAN/RHEL; Amazon Linux, `ID=amzn`, is RHEL with `os_id == "amzn"` and only version 2027; 2023 ships python3 3.9), version, root, hostname, local IP. `ServiceInfo.from_service_name()` wraps systemd. Shell calls go through `run_command()`.
 
 **Lifecycle split**:
 - `bootstrap.py` runs once per node as root. It installs `haproxy` + `keepalived` from OS packages (Ubuntu adds `ppa:vbernat/haproxy-3.3`), installs **ExaBGP via pip into the venv** (`python -m pip`, since pipx venvs lack `pip`), pinned to `EXABGP_SPEC` (`exabgp>=4.2,<5`, the same range as the `[bgp]` extra), disables the distro `haproxy`/`keepalived` units, writes sysctl tuning (incl. conntrack limits), watchdog, the firewall only with `--firewall` (ufw or firewalld: SSH first, 443/tcp, VRRP; an already active firewall gets only 443/tcp and VRRP), and writes **all three** HA-path systemd units (`ober-http`, `ober-bgp`, `ober-ha`) from string templates at the top of the file, plus the `ober-watch`/`ober-blocklist` units from `watch/units.py`. The watch and blocklist units are enabled only when needed.
