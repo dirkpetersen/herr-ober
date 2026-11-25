@@ -536,7 +536,10 @@ global_defs {
     # Save main config with venv_path, keeping an existing config intact
     if config.config_path.exists():
         existing = OberConfig.load(config.config_path)
-        if existing.validate()[0]:
+        errors, warnings = existing.validate()
+        for warning in warnings:  # unknown keys are dropped by the save below
+            console.print(f"[yellow]Warning:[/yellow] {config.config_path}: {warning}")
+        if errors:
             # Saving would replace the unreadable parts with defaults
             console.print(
                 f"[yellow]Warning:[/yellow] {config.config_path} is not valid and was not "

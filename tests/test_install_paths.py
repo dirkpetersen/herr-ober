@@ -247,6 +247,16 @@ class TestBootstrapRerun:
         assert first.bgp_config_path.read_text() == "# custom bgp\n"
         assert first.keepalived_config_path.read_text() == "# custom ka\n"
 
+    def test_unknown_keys_are_reported_before_save(self, temp_dir: Path) -> None:
+        install = temp_dir / "inst"
+        first = OberConfig(install_path=install)
+        first.ensure_directories()
+        first.config_path.write_text("stats_prot: 9000\n")
+        with patch.object(bs, "console") as console:
+            self._templates(OberConfig(install_path=install), temp_dir / "v")
+        printed = " ".join(str(c.args[0]) for c in console.print.call_args_list)
+        assert "stats_prot: unknown key (ignored)" in printed
+
     def test_kernel_tuning_nonlocal_bind(self) -> None:
         assert "net.ipv4.ip_nonlocal_bind = 1" in bs.KERNEL_TUNING
 
