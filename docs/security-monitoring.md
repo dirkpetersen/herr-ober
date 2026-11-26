@@ -226,7 +226,7 @@ Raw logs stay on the analysis host for `raw_log_retention_days`.
   Prometheus queries and Grafana dashboards that reference it.
 * `ober config` installs a systemd drop-in so HAProxy can create `/run/ober`.
 * The TLS minimum of 1.2 now applies to internal clients too.
-* Run `haproxy -c -f <haproxy.cfg>` once with the production AWS-LC build before rolling
+* Run `haproxy -c -f <haproxy.cfg>` once with the production HAProxy build before rolling
   out, to validate the generated configuration.
 
 ## 10. Known limitations

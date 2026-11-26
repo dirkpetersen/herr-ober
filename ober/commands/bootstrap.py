@@ -337,7 +337,7 @@ def _apply_kernel_tuning() -> None:
 def _install_packages(system: SystemInfo) -> None:
     """Install HAProxy and keepalived using the appropriate package manager."""
     if system.os_family == OSFamily.DEBIAN:
-        # Add HAProxy PPA for latest version (3.3+ with AWS-LC) on Ubuntu
+        # Add HAProxy PPA for 3.3 on Ubuntu (the PPA build uses OpenSSL, not AWS-LC)
         if "ubuntu" in system.os_name.lower():
             ppa = run_command(["add-apt-repository", "-y", "ppa:vbernat/haproxy-3.3"], check=False)
             if ppa.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release

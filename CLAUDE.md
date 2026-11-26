@@ -25,7 +25,7 @@ mypy ober/                                           # strict: disallow_untyped_
 
 CI (`.github/workflows/test.yml`, Python 3.12, 3.13 and 3.14) runs `ruff check .`, **`ruff format --check .`**, `mypy ober/`, and pytest. Run all four before pushing. Publishing to PyPI is via `publish-pypi.yml`; the version lives in both `pyproject.toml` and `ober/__init__.py`.
 
-`issue-auto-fix.yml` runs Claude Code headlessly on every newly opened GitHub issue, creates a `fix/issue-<n>` branch and PR, and closes the issue (auto-merge when repo var `ISSUE_AUTO_FIX_MERGE=yes`).
+`issue-auto-fix.yml` runs Claude Code headlessly when a user with write access adds the label `auto-fix` to an issue (never on a plain new issue), creates a `fix/issue-<n>` branch and PR, and closes the issue. With repo var `ISSUE_AUTO_FIX_MERGE=yes` it only turns on GitHub auto-merge, and only when `main` is protected (required CI checks and a review must be set there). Issue text reaches shell steps only through env vars and files, never `${{ }}`.
 
 ## Code Architecture
 

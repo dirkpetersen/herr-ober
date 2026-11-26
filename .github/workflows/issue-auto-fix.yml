@@ -1,8 +1,23 @@
 name: Auto-Fix Issue with Claude Code
 
+# Runs only when a maintainer adds the label "auto-fix" to an issue (or starts it by hand).
+# Adding a label needs triage access or more, and the job also checks that the sender has
+# write, maintain or admin permission. The label means "I read this issue and trust its text":
+# the issue body goes to an agent that runs without permission prompts.
+#
+# Untrusted text (issue title and body) never goes into a `run:` script through `${{ }}`.
+# It goes through env vars and files only.
+#
+# Auto-merge (repo variable ISSUE_AUTO_FIX_MERGE=yes) only turns on GitHub auto-merge.
+# GitHub then merges when the branch protection rules of main are met. Before you set the
+# variable, protect main with required status checks (the test workflow) and at least one
+# approving review. Without protection on main this job does not turn on auto-merge.
+# Set PAT_TOKEN: a PR opened with GITHUB_TOKEN does not start other workflows, so its
+# required checks never run and it never merges.
+
 on:
   issues:
-    types: [opened]
+    types: [labeled]
   workflow_dispatch:
     inputs:
       issue_number:
@@ -10,40 +25,55 @@ on:
         required: true
         type: number
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: issue-auto-fix-${{ github.event.issue.number || github.event.inputs.issue_number }}
+  cancel-in-progress: false
+
 jobs:
   auto-fix:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'auto-fix'
     runs-on: ubuntu-latest
+    env:
+      REPO: ${{ github.repository }}
+      ISSUE_NUM: ${{ github.event.issue.number || github.event.inputs.issue_number }}
 
     steps:
-      - name: Determine issue number
-        id: issue_num
+      - name: Check sender permission
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SENDER: ${{ github.event.sender.login }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "value=${{ github.event.inputs.issue_number }}" >> $GITHUB_OUTPUT
-          else
-            echo "value=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
-          fi
+          case "$ISSUE_NUM" in ''|*[!0-9]*) echo "bad issue number"; exit 1;; esac
+          # .permission is admin, write (also for maintain), read (also for triage) or none
+          PERM=$(gh api "repos/$REPO/collaborators/$SENDER/permission" --jq .permission)
+          case "$PERM" in
+            admin|write) echo "$SENDER has $PERM permission" ;;
+            *) echo "$SENDER has '$PERM' permission, write or more is needed"; exit 1 ;;
+          esac
 
       - name: Fetch issue data
-        id: issue_data
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ISSUE_NUM=${{ steps.issue_num.outputs.value }}
-          ISSUE_JSON=$(gh api repos/${{ github.repository }}/issues/$ISSUE_NUM)
-          ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
-          ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body')
-
-          echo "number=$ISSUE_NUM" >> $GITHUB_OUTPUT
-          echo "title=$ISSUE_TITLE" >> $GITHUB_OUTPUT
-
-          # Save body to file since it can be multiline
-          echo "$ISSUE_BODY" > /tmp/issue-body.txt
+          gh api "repos/$REPO/issues/$ISSUE_NUM" > /tmp/issue.json
+          {
+            echo "Issue #$ISSUE_NUM: $(jq -r .title /tmp/issue.json)"
+            echo
+            echo "Description:"
+            jq -r '.body // ""' /tmp/issue.json
+          } > /tmp/issue-context.txt
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The agent must not get a push token through .git/config
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -55,30 +85,9 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "Automated Claude Code"
-
-      - name: Create feature branch
-        run: |
-          BRANCH_NAME="fix/issue-${{ steps.issue_data.outputs.number }}"
-          git checkout -b "$BRANCH_NAME"
-          git push origin "$BRANCH_NAME"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create issue context file
-        run: |
-          ISSUE_NUM=${{ steps.issue_data.outputs.number }}
-          ISSUE_TITLE="${{ steps.issue_data.outputs.title }}"
-          ISSUE_BODY=$(cat /tmp/issue-body.txt)
-
-          mkdir -p /tmp
-          cat > /tmp/issue-context.txt <<EOF
-          Issue #$ISSUE_NUM: $ISSUE_TITLE
-
-          Description:
-          $ISSUE_BODY
-          EOF
+          git checkout -b "fix/issue-$ISSUE_NUM"
 
       - name: Run Claude Code to fix issue
         env:
@@ -88,14 +97,13 @@ jobs:
           CLAUDE_CODE_USE_BEDROCK: 1
           CLAUDE_FIX_MODEL: ${{ vars.CLAUDE_FIX_MODEL || 'opus' }}
         run: |
-          cat > /tmp/fix-prompt.md <<'PROMPT_EOF'
-          # Fix GitHub Issue
-
-          Please analyze and fix the following issue:
-
-          PROMPT_EOF
-          cat /tmp/issue-context.txt >> /tmp/fix-prompt.md
-          cat >> /tmp/fix-prompt.md <<'PROMPT_EOF'
+          {
+            echo "# Fix GitHub Issue"
+            echo
+            echo "Please analyze and fix the following issue:"
+            echo
+            cat /tmp/issue-context.txt
+            cat <<'PROMPT_EOF'
 
           ## Your Task
           1. Analyze the issue
@@ -105,110 +113,69 @@ jobs:
 
           When done, I will automatically commit and create a PR.
           PROMPT_EOF
+          } > /tmp/fix-prompt.md
 
           # Run Claude Code with stdin in fully automated mode
-          cat /tmp/fix-prompt.md | claude --dangerously-skip-permissions --model ${CLAUDE_FIX_MODEL}
+          claude --dangerously-skip-permissions --model "$CLAUDE_FIX_MODEL" < /tmp/fix-prompt.md
 
       - name: Check for changes
         id: changes
         run: |
-          if git diff --quiet; then
-            echo "HAS_CHANGES=false" >> $GITHUB_OUTPUT
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "HAS_CHANGES=false" >> "$GITHUB_OUTPUT"
           else
-            echo "HAS_CHANGES=true" >> $GITHUB_OUTPUT
+            echo "HAS_CHANGES=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit changes
+      - name: Commit and push changes
         if: steps.changes.outputs.HAS_CHANGES == 'true'
-        run: |
-          git add -A
-          git commit -m "fix: Resolve issue #${{ steps.issue_data.outputs.number }}"
-          git push origin "fix/issue-${{ steps.issue_data.outputs.number }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git add -A
+          git commit -m "fix: Resolve issue #$ISSUE_NUM"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" \
+            "fix/issue-$ISSUE_NUM"
 
       - name: Create Pull Request
-        id: create_pr
         if: steps.changes.outputs.HAS_CHANGES == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          ISSUE_NUM=${{ steps.issue_data.outputs.number }}
-          ISSUE_TITLE="${{ steps.issue_data.outputs.title }}"
-          BRANCH="fix/issue-$ISSUE_NUM"
-
-          # Create PR using gh CLI with heredoc for multiline body
-          PR_BODY=$(cat <<EOF
-          ## Automated Fix
-
-          This PR automatically addresses issue #$ISSUE_NUM.
-
-          **Issue**: $ISSUE_TITLE
-
-          Please review and merge if the fix looks good.
-
-          Fixes #$ISSUE_NUM
-          EOF
-          )
+          ISSUE_TITLE=$(jq -r .title /tmp/issue.json)
+          PR_BODY=$(printf '## Automated Fix\n\nThis PR automatically addresses issue #%s.\n\n**Issue**: %s\n\nPlease review and merge if the fix looks good.\n\nFixes #%s\n' \
+            "$ISSUE_NUM" "$ISSUE_TITLE" "$ISSUE_NUM")
 
           PR_URL=$(gh pr create \
-            --repo ${{ github.repository }} \
-            --head "$BRANCH" \
+            --repo "$REPO" \
+            --head "fix/issue-$ISSUE_NUM" \
             --base main \
             --title "Fix: Resolve issue #$ISSUE_NUM" \
             --body "$PR_BODY")
-
           echo "Created PR: $PR_URL"
-          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
 
-          # Comment on the issue
-          gh issue comment $ISSUE_NUM \
-            --repo ${{ github.repository }} \
-            --body "🤖 PR created with automated fix: $PR_URL - Please review!"
+          gh issue comment "$ISSUE_NUM" --repo "$REPO" \
+            --body "PR created with automated fix: $PR_URL - Please review!"
+          gh issue close "$ISSUE_NUM" --repo "$REPO" \
+            --comment "Automated fix completed. Closing this issue as PR $PR_URL has been created with the solution."
 
-          # Close the issue since a PR was created
-          gh issue close $ISSUE_NUM \
-            --repo ${{ github.repository }} \
-            --comment "✅ Automated fix completed. Closing this issue as PR $PR_URL has been created with the solution."
-
-      # ============================================================
-      # AUTO-MERGE FEATURE
-      # To enable auto-merge, set repository variable ISSUE_AUTO_FIX_MERGE=yes
-      # ============================================================
-      - name: Auto-merge Pull Request
+      # Auto-merge: set repository variable ISSUE_AUTO_FIX_MERGE=yes. See the notes at the top.
+      - name: Enable auto-merge
         if: steps.changes.outputs.HAS_CHANGES == 'true' && vars.ISSUE_AUTO_FIX_MERGE == 'yes'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          ISSUE_NUM=${{ steps.issue_data.outputs.number }}
-          BRANCH="fix/issue-$ISSUE_NUM"
-
-          # Wait a moment for PR to be fully created
-          sleep 5
-
-          # Merge the PR using squash merge
-          # Change --squash to --merge or --rebase if preferred
-          gh pr merge "$BRANCH" \
-            --repo ${{ github.repository }} \
-            --squash \
-            --delete-branch \
-            --body "🤖 Auto-merged by Claude Code workflow"
-
-          echo "✅ PR merged successfully"
-      # ============================================================
-      # END AUTO-MERGE FEATURE
-      # ============================================================
+          if [ "$(gh api "repos/$REPO/branches/main" --jq .protected)" != "true" ]; then
+            echo "main has no branch protection: not enabling auto-merge"
+            exit 0
+          fi
+          # --auto waits for the required checks and reviews of main; it never merges past them
+          gh pr merge "fix/issue-$ISSUE_NUM" --repo "$REPO" --auto --squash --delete-branch
 
       - name: Comment if no changes
         if: steps.changes.outputs.HAS_CHANGES == 'false'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const issueNumber = context.payload.issue.number;
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-              body: "⚠️ No changes were needed. The issue may already be resolved or requires manual intervention."
-            });
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "$ISSUE_NUM" --repo "$REPO" \
+            --body "No changes were needed. The issue may already be resolved or requires manual intervention."
