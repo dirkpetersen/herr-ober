@@ -84,10 +84,13 @@ jobs:
         run: npm i -g @anthropic-ai/claude-code
 
       - name: Configure Git
+        id: gitcfg
         run: |
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "Automated Claude Code"
           git checkout -b "fix/issue-$ISSUE_NUM"
+          # A step output cannot be changed by later steps (files in /tmp or GITHUB_ENV can)
+          echo "sha=$(sha256sum .git/config | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude Code to fix issue
         env:
@@ -131,11 +134,16 @@ jobs:
         if: steps.changes.outputs.HAS_CHANGES == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CFG_SHA: ${{ steps.gitcfg.outputs.sha }}
         run: |
-          git add -A
-          git commit -m "fix: Resolve issue #$ISSUE_NUM"
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" \
-            "fix/issue-$ISSUE_NUM"
+          # The agent could plant hooks or a url.insteadOf in .git that leak the token here
+          if [ "$(sha256sum .git/config | cut -d' ' -f1)" != "$CFG_SHA" ]; then
+            echo ".git/config changed during the agent run: not pushing"; exit 1
+          fi
+          git -c core.hooksPath=/dev/null add -A
+          git -c core.hooksPath=/dev/null commit -m "fix: Resolve issue #$ISSUE_NUM"
+          git -c core.hooksPath=/dev/null push \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" "fix/issue-$ISSUE_NUM"
 
       - name: Create Pull Request
         if: steps.changes.outputs.HAS_CHANGES == 'true'
