@@ -136,6 +136,14 @@ def test_snapshot_skips_certs_and_blocklist(node: dict[str, Any]) -> None:
     assert "ober.yaml" in names
 
 
+def test_snapshot_skips_binary_files(node: dict[str, Any]) -> None:
+    # install path = venv: pip writes etc/exabgp/examples/__pycache__/*.pyc
+    config = node["config"]
+    (config.install_path / "etc" / "x.pyc").write_bytes(b"\x00\xb8\xff")
+    assert "x.pyc" not in ap._tracked(config)
+    assert "ober.yaml" in ap._tracked(config)
+
+
 @pytest.mark.usefixtures("sample_config")
 def test_needs_root() -> None:
     with patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=False)):

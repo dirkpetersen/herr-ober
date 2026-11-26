@@ -45,7 +45,10 @@ def _tracked(config: OberConfig) -> dict[str, str]:
             continue
         if path.name.startswith("."):  # tmp files of write_atomic
             continue
-        files[str(path.relative_to(etc))] = path.read_text()
+        try:
+            files[str(path.relative_to(etc))] = path.read_text()
+        except UnicodeDecodeError:  # not ours: pip puts ExaBGP's example .pyc here in a venv
+            continue
     return files
 
 
