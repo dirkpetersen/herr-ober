@@ -280,3 +280,12 @@ def test_state_dir_owned_by_exabgp_user(temp_dir: Path) -> None:
         bs._own_state_dir(config)
     nobody = bs.pwd.getpwnam("nobody")
     chown.assert_called_once_with(config.health_state_path.parent, nobody.pw_uid, nobody.pw_gid)
+
+
+def test_watchdog_dropin(temp_dir: Path) -> None:
+    # Amazon Linux 2027 has no /etc/systemd/system.conf, so only a drop-in works everywhere
+    dropin = temp_dir / "system.conf.d" / "90-herr-ober-watchdog.conf"
+    with patch.object(bs, "run_command") as run:
+        bs._configure_watchdog(dropin)
+    assert dropin.read_text().startswith("[Manager]\nRuntimeWatchdogSec=10s\n")
+    assert run.call_count == int(Path("/dev/watchdog").exists())  # re-exec only with a device

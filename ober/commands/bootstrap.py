@@ -626,18 +626,20 @@ def _write_if_missing(path: Path, content: str) -> None:
     path.write_text(content)
 
 
-def _configure_watchdog() -> None:
-    """Configure systemd watchdog."""
-    # Check if systemd.conf has watchdog settings
-    systemd_conf = Path("/etc/systemd/system.conf")
-    if systemd_conf.exists():
-        content = systemd_conf.read_text()
-        if "RuntimeWatchdogSec" not in content:
-            # Append watchdog settings
-            with open(systemd_conf, "a") as f:
-                f.write("\n# Herr Ober watchdog settings\n")
-                f.write("RuntimeWatchdogSec=10s\n")
-                f.write("ShutdownWatchdogSec=2min\n")
+WATCHDOG_DROPIN = Path("/etc/systemd/system.conf.d/90-herr-ober-watchdog.conf")
+
+
+def _configure_watchdog(dropin: Path = WATCHDOG_DROPIN) -> None:
+    """Arm the systemd hardware watchdog (Proxmox i6300esb) with a drop-in.
+
+    A drop-in, because newer distros (Amazon Linux 2027) ship no /etc/systemd/system.conf.
+    """
+    dropin.parent.mkdir(parents=True, exist_ok=True)
+    dropin.write_text("[Manager]\nRuntimeWatchdogSec=10s\nShutdownWatchdogSec=2min\n")
+    if Path("/dev/watchdog").exists():
+        run_command(["systemctl", "daemon-reexec"], check=False)  # active now, not at reboot
+    else:
+        console.print("[yellow]Warning:[/yellow] no /dev/watchdog; add the i6300esb device.")
 
 
 def _ssh_ports() -> list[str]:
