@@ -327,3 +327,18 @@ def test_watchdog_dropin(temp_dir: Path) -> None:
         bs._configure_watchdog(dropin)
     assert dropin.read_text().startswith("[Manager]\nRuntimeWatchdogSec=10s\n")
     assert run.call_count == int(Path("/dev/watchdog").exists())  # re-exec only with a device
+
+
+def test_uninstall_removes_label_before_module() -> None:
+    from ober.commands import uninstall
+
+    with (
+        patch.object(uninstall, "check_command_exists", return_value=True),
+        patch.object(uninstall, "run_command") as run,
+    ):
+        uninstall._remove_selinux_module(Path("/opt/herr-ober"))
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert cmds == [
+        ["semanage", "fcontext", "-d", r"/opt/herr\-ober/var/run(/.*)?"],
+        ["semodule", "-r", "herr_ober"],
+    ]
