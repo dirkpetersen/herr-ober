@@ -14,11 +14,14 @@ public IP. VIPs are `10.99.0.100` and `10.99.0.101`, outside the VPC CIDR `10.77
 export AWS_PROFILE=iam-dirk          # default in lib.sh
 lab/aws/up.sh                        # create or reconcile, then provision.sh
 lab/aws/deploy.sh HEAD               # build a wheel of a git ref, install on the nodes
+lab/aws/configure.sh bgp             # bootstrap, ober.yaml + ober.local.yaml, cert, start
+lab/aws/configure.sh keepalived      # switch mode (rewrites ober.yaml)
 ssh -F lab/aws/ssh_config ober1      # log in
 lab/aws/teardown.sh                  # delete everything with the lab tag
 ```
 
-`up.sh` writes `inventory`, `ssh_config` and `known_hosts` here (git-ignored) and the key to
+`up.sh` writes `inventory`, `ssh_config`, `known_hosts` and `node_key` (root on each node uses it
+to reach the others as ec2-user, for `ober push`, `cluster status` and `--all-nodes`) here (git-ignored) and the key to
 `~/.ssh/herr-ober-lab.pem`. `teardown.sh` removes all of them.
 
 ## Known limits
