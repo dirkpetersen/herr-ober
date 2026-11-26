@@ -33,21 +33,25 @@ from ober.system import SystemInfo
 console = Console()
 
 
-def get_vip_owner(vip: str, nodes: list[str], local_hostname: str) -> tuple[str, int]:
-    """Determine which node owns a VIP using consistent hashing.
+def get_vip_owner(
+    vip: str, nodes: list[str], local_hostname: str, owner: str = ""
+) -> tuple[str, int]:
+    """Determine which node owns a VIP: the explicit owner, else consistent hashing.
 
     Args:
         vip: VIP address
         nodes: List of node hostnames/IPs (including self)
         local_hostname: This node's hostname/IP
+        owner: Explicit owner from ``vips[].owner`` ("" = md5 rule)
 
     Returns:
         Tuple of (owner_hostname, priority) where priority is 100 if owner, 90 otherwise
     """
-    sorted_nodes = sorted(nodes)
-    # Use deterministic hash (md5) to ensure consistent results across nodes
-    vip_hash = int(hashlib.md5(vip.encode()).hexdigest(), 16) % len(sorted_nodes)
-    owner = sorted_nodes[vip_hash]
+    if not owner:
+        sorted_nodes = sorted(nodes)
+        # Use deterministic hash (md5) to ensure consistent results across nodes
+        vip_hash = int(hashlib.md5(vip.encode()).hexdigest(), 16) % len(sorted_nodes)
+        owner = sorted_nodes[vip_hash]
 
     is_owner = owner == local_hostname
     priority = 100 if is_owner else 90
@@ -1469,7 +1473,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
     router_ids = vrrp_router_ids([_vip_host(v.address) for v in config.vips])
     for idx, vip_config in enumerate(config.vips):
         vip = _vip_host(vip_config.address)
-        owner, priority = get_vip_owner(vip, all_nodes, local_ip)
+        owner, priority = get_vip_owner(vip, all_nodes, local_ip, vip_config.owner)
         router_id = router_ids[vip]
 
         cfg_lines.extend(
@@ -1481,7 +1485,7 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                 f"    virtual_router_id {router_id}",
                 f"    priority {priority}",
                 f"    advert_int {config.keepalived.advert_int}",
-                "    preempt_delay 0",
+                "    preempt_delay 30  # a recovering owner waits before it takes the VIP back",
                 "",
             ]
         )

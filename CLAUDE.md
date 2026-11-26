@@ -70,7 +70,7 @@ Bootstrap in a venv (pipx, the recommended setup) defaults to the existing point
 ### Keepalived mode
 
 `_generate_keepalived_config()` in `commands/config.py` emits one `vrrp_instance` per VIP. Nodes are IPs (`[local_ip, *keepalived_peers(config, local_ip)]`; `keepalived_peers()` drops duplicates and the node itself, so one ober.yaml can list all nodes):
-- `get_vip_owner()` sorts the nodes and picks the owner by **md5** of the VIP (deterministic across nodes; never use Python's salted `hash()`). The owner gets priority 100, others 90. All instances start as `BACKUP` with preempt.
+- `get_vip_owner()` uses `vips[].owner` when set (`validate()` requires `local_ip`/`node_ip()` or a peer; in BGP mode it only warns). Else it sorts the nodes and picks the owner by **md5** of the VIP (deterministic across nodes; never use Python's salted `hash()`). The owner gets priority 100, others 90. All instances start as `BACKUP` with preempt and `preempt_delay 30`. `ober status` (`_expected_owner`) calls the same function, so status and the config agree.
 - `vrrp_router_ids()` gives each VIP a unique `virtual_router_id`: over the sorted VIPs, md5(VIP) % 255 + 1 (`get_vrrp_router_id()`), or the next free ID on a collision.
 - Unicast is the default (`unicast_src_ip` + `unicast_peer`); multicast is optional. No VRRP auth.
 - `chk_haproxy` track_script curls `/health` (weight -50, fall/rise 2). No `track_interface`: keepalived already goes to FAULT when the instance interface is down. `global_defs` sets `enable_script_security` and `script_user root`.

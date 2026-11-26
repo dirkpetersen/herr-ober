@@ -113,12 +113,26 @@ For a 3-node keepalived cluster without BGP:
 sudo ober bootstrap
 sudo ober config
 # Select: Keepalived/VRRP mode
-# Peers: node2,node3 (or 10.0.0.2,10.0.0.3)
+# Peers: 10.0.0.2,10.0.0.3 (IP addresses, not hostnames)
 # VIPs: 192.168.1.100,192.168.1.101,192.168.1.102 (one per node)
 sudo ober start
 ```
 
 **Node 2 & 3:** Repeat the same steps with appropriate peer IPs.
+
+By default the md5 of each VIP picks its owner node (priority 100, the others 90), so the
+split can be uneven. To place each VIP on a known node, set `owner` (an IP from `local_ip` and
+`keepalived.peers`) in `ober.yaml`:
+
+```yaml
+vips:
+  - {address: 192.168.1.100, owner: 10.0.0.1}
+  - {address: 192.168.1.101, owner: 10.0.0.2}
+  - {address: 192.168.1.102, owner: 10.0.0.3}
+```
+
+An owner that is not a cluster node is an error. In BGP mode `owner` is ignored (a warning).
+A recovered owner waits 30 s (`preempt_delay`) before it takes its VIP back.
 
 **DNS Round-Robin:**
 ```
