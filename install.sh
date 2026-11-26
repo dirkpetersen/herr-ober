@@ -1,12 +1,12 @@
 #!/bin/bash
 # Herr Ober installer - https://github.com/dirkpetersen/herr-ober
-# Usage: curl -fsSL https://raw.githubusercontent.com/dirkpetersen/herr-ober/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/dirkpetersen/herr-ober/<tag>/install.sh | bash
 set -e
 
 # Check if running as root
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: This script must be run as root"
-    echo "Usage: curl -fsSL https://raw.githubusercontent.com/dirkpetersen/herr-ober/main/install.sh | sudo bash"
+    echo "Usage: curl -fsSL https://raw.githubusercontent.com/dirkpetersen/herr-ober/<tag>/install.sh | sudo bash"
     exit 1
 fi
 

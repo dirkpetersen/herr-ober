@@ -113,7 +113,7 @@ def version_callback(ctx: click.Context, _param: click.Parameter, value: bool) -
 def main(ctx: Context, json_output: bool, quiet: bool, verbose: bool) -> None:
     """Ober - High-performance S3 ingress controller for Ceph RGW clusters.
 
-    Uses HAProxy 3.3 (AWS-LC) for SSL offloading and ExaBGP for Layer 3 HA
+    Uses HAProxy 3.3 for SSL offloading and ExaBGP for Layer 3 HA
     via BGP/ECMP.
     """
     ctx.json_output = json_output

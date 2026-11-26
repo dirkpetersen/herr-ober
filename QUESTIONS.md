@@ -100,3 +100,9 @@ These were not in the list above. Each one is the default the work used.
   install path, and each node runs the same check, health gate and restore as a local apply.
   Certificates are not pushed (keys stay where they are made; see 6.2). Drift shows in
   `ober cluster status` (hash of `haproxy.cfg`), not yet as a metric (7.4).
+- **Issue auto-fix (10.5):** the workflow runs only on the label `auto-fix` added by a user
+  with write, maintain or admin permission (default label name `auto-fix`). Auto-merge uses
+  `gh pr merge --auto` and is skipped when `main` has no branch protection, so the owner must
+  require the test checks and one review on `main`. The README one-liner uses a release tag
+  (`v0.4.0`, which must exist before the README is published). `install.sh` still installs the
+  newest herr-ober from PyPI: pinning it would put the version in a third file.

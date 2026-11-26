@@ -39,9 +39,12 @@ For host BIOS and kernel settings, a full VM config and a verification checklist
 
 ### 2. Install
 
-**One-liner (recommended):**
+**One-liner (recommended):** use a release tag (see
+[releases](https://github.com/dirkpetersen/herr-ober/releases)), not `main`, so you run a
+reviewed script. The script installs the newest herr-ober from PyPI.
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dirkpetersen/herr-ober/main/install.sh | sudo bash
+OBER_TAG=v0.4.0
+curl -fsSL "https://raw.githubusercontent.com/dirkpetersen/herr-ober/$OBER_TAG/install.sh" | sudo bash
 sudo ober bootstrap
 ```
 
