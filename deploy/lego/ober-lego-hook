@@ -1,0 +1,13 @@
+#!/bin/sh
+# lego deploy hook: send the renewed certificate plus key to every ober node.
+# lego v5 sets LEGO_HOOK_CERT_PATH (--deploy-hook), lego v4 sets LEGO_CERT_PATH (--run-hook,
+# --renew-hook). OBER_CERT_NAME (optional) is the file name when certs.path is a directory.
+set -eu
+cert=${LEGO_HOOK_CERT_PATH:-${LEGO_CERT_PATH:?lego did not set the certificate path}}
+key=${LEGO_HOOK_CERT_KEY_PATH:-${LEGO_CERT_KEY_PATH:?lego did not set the key path}}
+set -- cert install --all-nodes
+if [ -n "${OBER_CERT_NAME:-}" ]; then
+    set -- "$@" --name "$OBER_CERT_NAME"
+fi
+# ober checks the PEM (key match, expiry, SAN) and exits 1 if any node fails
+cat "$cert" "$key" | ober "$@" -

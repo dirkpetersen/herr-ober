@@ -106,3 +106,32 @@ These were not in the list above. Each one is the default the work used.
   require the test checks and one review on `main`. The README one-liner uses a release tag
   (`v0.4.0`, which must exist before the README is published). `install.sh` still installs the
   newest herr-ober from PyPI: pinning it would put the version in a third file.
+- **Issuer (6.3):** one issuer for the cluster: lego with DNS-01 on one node (or an admin host
+  with SSH to all nodes), run by `ober-lego.timer` twice a day. Its deploy hook
+  (`deploy/lego/ober-lego-hook`) pipes certificate plus key to `ober cert install --all-nodes`.
+  DNS-01 needs no port 80 and gives the `*.s3` wildcard for virtual-host buckets. The DNS token
+  goes in `/etc/ober/lego.env` (mode 600), not in `ober.yaml`. The unit is for lego v5
+  (`run --deploy-hook`, `LEGO_HOOK_CERT_PATH`); the hook also reads the lego v4 names
+  (`LEGO_CERT_PATH`). Not built into ober: no new dependency, and lego already handles ACME.
+  The unused `watchdog` dependency is removed (nothing watches the certificate files).
+- **Rolling upgrade (9.3):** a runbook in README.md ("Rolling upgrade"), no
+  `ober upgrade --rolling` command. Each step needs a human check (cluster status, doctor), and
+  a script would only chain the existing commands. In BGP mode the runbook does
+  `ober restart --hard` while the node is in maintenance, so the ExaBGP health process runs the
+  new code (an old one without SIGHUP support dies on the next `ober apply` and ExaBGP starts it
+  again).
+- **PPA (9.4), kept:** when `ppa:vbernat/haproxy-3.3` cannot be added, bootstrap warns and uses
+  the distro HAProxy. Failing would block every new Ubuntu release until the PPA has a build.
+  `ober doctor` shows the HAProxy version and TLS library, and `ober cluster status` shows
+  version drift between nodes.
+- **Runtime add/del server (5.4), skipped:** the master-worker reload is hitless, `ober apply`
+  already reloads with a health gate and rollback, and the `server-state-file` keeps drains over
+  the reload. Runtime-only servers would also differ from `haproxy.cfg` until the next render.
+- **Generic loader (10.1) and pure renderers (10.3), skipped:** no user gain now. The loader is
+  already generic over the dataclass fields (wave 1). The keepalived renderer still reads the
+  node identity itself; tests mock it.
+- **BFD (3.6), decision only:** no BFD. ExaBGP has none, and failure detection is the BGP hold
+  time (`bgp.hold_time`, default 3 s) plus the health process (withdraw after `health_fall`
+  failed probes). `bgp.bfd_enabled` (default true) is still in `BGPConfig` only so old files
+  load: nothing reads it, and no `bfd {}` block is written. If 3 s is too slow, run FRR `bfdd`
+  next to ExaBGP or replace ExaBGP with FRR; that is a separate project.

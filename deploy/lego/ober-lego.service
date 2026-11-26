@@ -1,0 +1,15 @@
+[Unit]
+Description=Renew the S3 certificate with lego (DNS-01) and install it on all ober nodes
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/ober/lego.env
+# lego v5: "run" gets or renews; the deploy hook runs only after a new certificate.
+# lego v4: use "lego --path ... --email ... --dns ... -d ... renew --renew-hook ..." instead
+# (and "run --run-hook" for the first certificate).
+ExecStart=/usr/local/bin/lego run --accept-tos --path /var/lib/lego \
+    --email ${LEGO_EMAIL} --dns ${LEGO_DNS_PROVIDER} \
+    -d ${LEGO_DOMAIN} -d *.${LEGO_DOMAIN} \
+    --deploy-hook /usr/local/bin/ober-lego-hook

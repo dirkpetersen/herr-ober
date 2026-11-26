@@ -150,7 +150,7 @@ ober start|stop|restart   # Service management (stop gracefully withdraws routes
 ober logs [-f] [-n N]     # View logs (--service http|bgp|ha|all to filter)
 ober doctor               # Diagnostic checks
 ober test                 # Test BGP connectivity without starting services
-ober upgrade              # Check and install updates
+ober upgrade              # Re-render units, install HAProxy/ExaBGP updates (see Rolling upgrade)
 ober uninstall            # Clean removal
 ```
 
@@ -213,6 +213,61 @@ version drift between nodes. Test them with `promtool test rules deploy/promethe
 `ober sync` is deprecated: the files it wrote were never read. Use `bgp.neighbors` or
 `keepalived.peers`, `security.internal_networks` or `security.allowlist`, and
 `backends[].servers` in `ober.yaml`.
+
+### Certificates
+
+Use one issuer for the whole cluster, not one per node: behind ECMP or DNS round-robin a
+per-node HTTP-01 challenge can land on the wrong node. The files in `deploy/lego/` run
+[lego](https://go-acme.github.io/lego/) with the DNS-01 challenge on one node (or an admin
+host that can SSH to all nodes):
+
+- DNS-01 proves the domain with a DNS TXT record, so no node opens port 80.
+- The certificate covers `s3.example.com` and `*.s3.example.com`. The wildcard is needed for
+  virtual-host buckets (`bucket.s3.example.com`). `ober cert install` warns without it.
+- After each new certificate, lego runs `ober-lego-hook`. The hook joins the certificate and
+  key into one PEM and pipes it to `ober cert install --all-nodes [--name NAME] -`, which
+  checks it and swaps it into HAProxy on every node without a reload.
+
+```bash
+sudo install -m 755 deploy/lego/ober-lego-hook /usr/local/bin/
+sudo install -m 600 deploy/lego/ober-lego.env /etc/ober/lego.env    # then edit: DNS token
+sudo install -m 644 deploy/lego/ober-lego.service deploy/lego/ober-lego.timer /etc/systemd/system/
+sudo systemctl start ober-lego.service       # first certificate, check the journal
+sudo systemctl enable --now ober-lego.timer  # checks twice a day, renews when due
+```
+
+The DNS API token stays in `/etc/ober/lego.env` (mode 600), never in `ober.yaml`. The unit is
+written for lego v5 (`lego run --deploy-hook`); lego v4 uses `renew --renew-hook`, and the hook
+reads the environment variables of both. The unit runs as root, so root needs an SSH key for
+the other nodes and `sudo -n ober` there (as for `ober push`).
+
+If the hook fails, lego keeps the new certificate in `/var/lib/lego/certificates/` and does
+not run the hook again until the next renewal. Run the hook by hand or use `ober cert install`.
+Expiry is visible early: `ober status` warns under 21 days and is critical under 7, and
+`ober metrics` exports `ober_cert_remaining_seconds`, which fires the `OberCertExpiresSoon`
+alert in `deploy/prometheus/alerts.yml` under 21 days.
+
+### Rolling upgrade
+
+Upgrade one node at a time. There is no single command for this. On each node:
+
+1. `sudo ober cluster status` must exit 0 (OK) before you start.
+2. `sudo ober maintenance on`. Wait until `sudo ober maintenance status` shows no announced
+   routes (BGP) or no MASTER state (keepalived), so the traffic has moved to the other nodes.
+3. As root: `PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade herr-ober` (or
+   `pip install -U herr-ober` in the venv).
+4. `sudo ober upgrade`. It re-renders the systemd units and offers HAProxy and ExaBGP updates.
+   If it says `ober-http.service` changed, or it installed a new ExaBGP, run
+   `sudo ober restart --hard` now, while the node has no traffic.
+5. `sudo ober doctor` must show no failures.
+6. `sudo ober maintenance off`.
+7. Wait until `sudo ober cluster status` exits 0 again, then go to the next node.
+
+BGP mode: the health process that ExaBGP started keeps running the old code until ExaBGP
+restarts. A health process from an ober version without SIGHUP support dies on the SIGHUP that
+`ober apply`, `ober rollback` and `ober push` send, and ExaBGP starts it again with the new
+code. To avoid this while the node has traffic, run `sudo ober restart --hard` in step 4 also
+in BGP mode.
 
 ### Host firewall
 
