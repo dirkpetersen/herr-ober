@@ -208,7 +208,8 @@ sudo ober cluster status     # VIP placement and config drift over all nodes
 `ober push` refuses an `ober.yaml` that sets `local_ip`, `bgp.router_id` or
 `bgp.local_address`, and stops at the first node that fails its check or health gate. That node
 puts its old files back. Certificates are not copied. The SSH user needs a key without a prompt
-and `sudo -n ober` on each node.
+and `sudo -n ober` on each node. SSH runs with `BatchMode=yes`, so the host keys must already be
+in root's `known_hosts` (or set `StrictHostKeyChecking accept-new` for the node addresses).
 
 ### Metrics and alerts
 
