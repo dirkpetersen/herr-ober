@@ -174,6 +174,14 @@ class TestKeepalivedChecks:
         assert f"vrrp-notify --state-file {temp_dir}/var/run/vrrp-state.json" in content
         assert "chk_gateway" not in content
 
+    def test_fast_failover_slow_return(self, temp_dir: Path) -> None:
+        # lab: preempt_delay 30 also made backups keep a failing master for 30 s
+        content = self._generate(temp_dir)
+        assert "preempt_delay" not in content
+        assert "    vrrp_startup_delay 30\n" in content  # a started owner waits 30 s
+        assert "    rise 15 " in content and "    init_fail " in content  # health flaps
+        assert "    fall 2 " in content
+
     def test_gateway_check(self, temp_dir: Path) -> None:
         content = self._generate(temp_dir, "10.0.0.254")
         assert "/usr/bin/ping -c 1 -W 1 10.0.0.254" in content

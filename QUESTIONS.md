@@ -141,3 +141,8 @@ These were not in the list above. Each one is the default the work used.
   owner prompt; edit `ober.yaml`. Peers stay IP-only (validation rejects hostnames instead of
   resolving them). `preempt_delay` changed from 0 to 30 s (fixed, not configurable): a recovered
   owner holds off 30 s before it takes its VIP back, which stops flapping.
+- **Keepalived return delay (lab, 2026-11-26).** `preempt_delay 30` was replaced: in the AWS
+  lab it also made backups ignore a failing master for 30 s (health fail to failover: 36 s).
+  Now `vrrp_startup_delay 30` (a started node waits 30 s) and `chk_haproxy` `rise 15` plus
+  `init_fail` (30 s of good checks before the priority comes back). Measured: failover 6 s,
+  return after health recovery 32 s, return after `ober stop`/`start` 34 s, reload keeps VIPs.

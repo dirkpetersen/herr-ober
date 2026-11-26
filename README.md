@@ -132,7 +132,8 @@ vips:
 ```
 
 An owner that is not a cluster node is an error. In BGP mode `owner` is ignored (a warning).
-A recovered owner waits 30 s (`preempt_delay`) before it takes its VIP back.
+A failing node loses its VIPs in a few seconds. A started owner waits 30 s
+(`vrrp_startup_delay`), and an owner with recovered health 30 s (`rise`), before it takes its VIP back.
 
 **DNS Round-Robin:**
 ```
