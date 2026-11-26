@@ -6,6 +6,7 @@ import os
 import pwd
 import re
 import sys
+import tempfile
 import venv
 from pathlib import Path
 
@@ -264,7 +265,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
         task = progress.add_task("Installing HAProxy and Keepalived...", total=None)
         _install_packages(system)
         _disable_distro_units()
-        _allow_haproxy_backend_ports()
+        _allow_haproxy_backend_ports(install_path)
         progress.update(
             task, completed=True, description="[green]Installed HAProxy and Keepalived[/green]"
         )
@@ -358,6 +359,7 @@ def _install_packages(system: SystemInfo) -> None:
                 "keepalived",
                 "iputils",
                 "policycoreutils-python-utils",
+                "checkpolicy",  # checkmodule builds the herr_ober SELinux module
             ]
         )
 
@@ -374,7 +376,42 @@ def _own_state_dir(config: OberConfig) -> None:
     os.chown(state_dir, nobody.pw_uid, nobody.pw_gid)
 
 
-def _allow_haproxy_backend_ports() -> None:
+# keepalived_t policy for the ober check/notify scripts. Raw policy language, so it builds with
+# checkmodule alone (no selinux-policy-devel). Rules come from the AVCs in the AWS lab.
+SELINUX_MODULE = """\
+module herr_ober 1.0;
+
+require {
+    type keepalived_t, haproxy_t, unreserved_port_t, ping_exec_t, ifconfig_exec_t, fs_t;
+    attribute file_type, non_security_file_type, non_auth_file_type;
+    class dir { getattr search open read write add_name remove_name watch };
+    class file { getattr open read write create unlink rename setattr lock map execute execute_no_trans };
+    class tcp_socket name_connect;
+    class capability dac_override;
+    class process setcap;
+    class filesystem getattr;
+}
+
+# <install>/var/run: maintenance flag (track_file), VRRP state (notify hook), server state
+type ober_state_t;
+typeattribute ober_state_t file_type, non_security_file_type, non_auth_file_type;
+allow keepalived_t ober_state_t:dir { getattr search open read write add_name remove_name watch };
+allow keepalived_t ober_state_t:file { getattr open read write create unlink rename setattr lock };
+allow haproxy_t ober_state_t:dir { getattr search open read };
+allow haproxy_t ober_state_t:file { getattr open read };
+
+# chk_haproxy: GET /health on the stats port
+allow keepalived_t unreserved_port_t:tcp_socket name_connect;
+# chk_gateway: ping; the ober scripts look up the node IP with ip
+allow keepalived_t { ping_exec_t ifconfig_exec_t }:file { getattr open read map execute execute_no_trans };
+allow keepalived_t self:process setcap;
+# root writes into the state dir, which belongs to nobody (the ExaBGP user)
+allow keepalived_t self:capability dac_override;
+allow keepalived_t fs_t:filesystem getattr;
+"""
+
+
+def _allow_haproxy_backend_ports(install_path: Path) -> None:
     """On SELinux hosts, let haproxy_t reach RGW and let keepalived run the ober scripts.
 
     Without haproxy_connect_any the policy allows only the http port types, so backends on
@@ -386,16 +423,49 @@ def _allow_haproxy_backend_ports() -> None:
     if result.stdout.strip() == "Disabled":
         return
     run_command(["setsebool", "-P", "haproxy_connect_any", "1"])
-    # shortcut: keepalived_t blocks our check/notify scripts (connect to the stats port, write
-    # the state dir, exec ping, watch the maintenance flag). A permissive keepalived_t is no
-    # weaker than before 0.4, when keepalived ran as init_t. Upgrade: ship a policy module.
+    if _install_selinux_module(install_path):
+        # ober 0.4 made keepalived_t permissive; the module replaces that
+        run_command(["semanage", "permissive", "-d", "keepalived_t"], check=False)
+        return
+    # keepalived_t blocks our scripts (stats port, state dir, ping, track_file watch). A
+    # permissive keepalived_t is no weaker than before 0.4, when keepalived ran as init_t.
+    console.print(
+        "[yellow]Warning:[/yellow] could not load the herr_ober SELinux module (needs "
+        "checkmodule, semodule_package, semanage: checkpolicy, policycoreutils-python-utils); "
+        "keepalived_t is made permissive instead."
+    )
     if check_command_exists("semanage"):
         run_command(["semanage", "permissive", "-a", "keepalived_t"], check=False)
-    else:
-        console.print(
-            "[yellow]Warning:[/yellow] semanage not found (policycoreutils-python-utils); "
-            "keepalived mode needs 'semanage permissive -a keepalived_t' on SELinux hosts."
-        )
+
+
+def _selinux_state_spec(install_path: Path) -> str:
+    """semanage fcontext regex for <install>/var/run (the ober state dir)."""
+    return re.escape(str(install_path / "var" / "run")) + "(/.*)?"
+
+
+def _install_selinux_module(install_path: Path) -> bool:
+    """Build and load SELINUX_MODULE and label the state dir. False when a step fails."""
+    tools = ("checkmodule", "semodule_package", "semodule", "semanage", "restorecon")
+    if not all(check_command_exists(t) for t in tools):
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        te, mod, pp = (str(Path(tmp) / f"herr_ober.{ext}") for ext in ("te", "mod", "pp"))
+        Path(te).write_text(SELINUX_MODULE)
+        for cmd in (
+            ["checkmodule", "-M", "-m", "-o", mod, te],
+            ["semodule_package", "-o", pp, "-m", mod],
+            ["semodule", "-i", pp],
+        ):
+            if run_command(cmd, check=False).returncode != 0:
+                return False
+    spec = _selinux_state_spec(install_path)
+    label = ["-t", "ober_state_t", spec]
+    # -a fails when the rule exists (bootstrap again, upgrade); -m updates it then
+    added = run_command(["semanage", "fcontext", "-a", *label], check=False).returncode == 0
+    if not added and run_command(["semanage", "fcontext", "-m", *label], check=False).returncode:
+        return False
+    run_command(["restorecon", "-R", str(install_path / "var" / "run")], check=False)
+    return True
 
 
 def _disable_distro_units() -> None:

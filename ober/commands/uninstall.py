@@ -144,6 +144,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     # Step 3: Remove kernel tuning
     console.print("Removing kernel tuning...")
     _remove_kernel_tuning()
+    _remove_selinux_module(config.install_path)
 
     # Step 4: Remove VIP interface
     console.print("Removing VIP interface...")
@@ -222,6 +223,18 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     if keep_config:
         console.print()
         console.print(f"Configuration preserved at: {config.config_path}")
+
+
+def _remove_selinux_module(install_path: Path) -> None:
+    """Remove the state dir label and the herr_ober module that bootstrap loads."""
+    from ober.commands.bootstrap import _selinux_state_spec
+
+    if not check_command_exists("semodule"):
+        return
+    # the label goes first: semodule refuses to drop a type that a rule still uses
+    spec = _selinux_state_spec(install_path)
+    run_command(["semanage", "fcontext", "-d", spec], check=False)
+    run_command(["semodule", "-r", "herr_ober"], check=False)
 
 
 def _remove_kernel_tuning(
