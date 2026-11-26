@@ -210,3 +210,5 @@ __marimo__/
 lab/aws/inventory
 lab/aws/ssh_config
 lab/aws/known_hosts
+lab/aws/node_key
+lab/aws/node_key.pub
