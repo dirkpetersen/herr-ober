@@ -161,7 +161,7 @@ Key features:
 - Backend health checks: HTTP to Ceph RGW
 - Load balancing: least-connections
 - Timeouts: aggressive defaults for high-performance networks
-- New certificates: `ober cert install` swaps them in over the runtime API (no auto-reload on file change)
+- New certificates go in with `ober cert install` (runtime API swap, no reload)
 
 ### Component 3: The Announcer (`ober-bgp`)
 
@@ -249,8 +249,9 @@ BGP passwords and other sensitive data. Permissions: 600.
 - **No rate limiting** - handled by Ceph
 
 ### Certificate Management
-- Certs provided via `--cert <path>` or HAProxy's built-in ACME support
-- **New certificates**: `ober cert install` swaps them in over the admin socket. Nothing watches the cert files on disk.
+- One issuer (lego, DNS-01) on one node or an admin host renews the certificate. Its deploy hook
+  (`deploy/lego/ober-lego-hook`) runs `ober cert install --all-nodes`, which checks the PEM and
+  swaps it into HAProxy over the runtime API. Nothing watches the files on disk.
 
 ### Open Questions
 - S3 header handling (Host, Authorization, x-amz-*) may need future work
@@ -324,10 +325,8 @@ BGP passwords and other sensitive data. Permissions: 600.
 - `click` - CLI framework
 - `python-inquirer` - Interactive prompts
 - `rich` - Colored output, tables, progress bars
-- `hostlist` - Slurm hostlist expansion
 - `requests` - Health checks
 - `pyyaml` - Config file handling
-- `watchdog` - inotify for certificate file watching
 
 ### Dev Dependencies (`[dev]` extra)
 - `pytest`, `pytest-cov` - Testing
