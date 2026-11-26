@@ -1485,7 +1485,8 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                 f"    virtual_router_id {router_id}",
                 f"    priority {priority}",
                 f"    advert_int {config.keepalived.advert_int}",
-                "    preempt_delay 30  # a recovering owner waits before it takes the VIP back",
+                "    # a recovering owner waits 30 s before it takes the VIP back",
+                "    preempt_delay 30",
                 "",
             ]
         )
