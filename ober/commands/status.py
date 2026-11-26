@@ -198,12 +198,13 @@ def bgp_sessions(neighbors: list[str]) -> dict[str, bool] | None:
     return {n: n in hosts for n in neighbors}
 
 
-def _expected_owner(config: OberConfig, vip: str) -> str:
+def _expected_owner(config: OberConfig, vip: str, owner: str = "") -> str:
     from ober.commands.config import get_vip_owner, keepalived_peers
 
     # Same node list as _generate_keepalived_config, so the answer matches the config.
     local_ip = config.node_ip()
-    return get_vip_owner(vip, [local_ip, *keepalived_peers(config, local_ip)], local_ip)[0]
+    nodes = [local_ip, *keepalived_peers(config, local_ip)]
+    return get_vip_owner(vip, nodes, local_ip, owner)[0]
 
 
 def _vip_status(config: OberConfig) -> list[dict[str, Any]]:
@@ -222,7 +223,7 @@ def _vip_status(config: OberConfig) -> list[dict[str, Any]]:
             entry["announced"] = None if routes is None else f"{addr}/32" in routes
         else:
             entry["vrrp_state"] = None if vrrp is None else vrrp.get(addr, "UNKNOWN")
-            entry["expected_owner"] = _expected_owner(config, addr)
+            entry["expected_owner"] = _expected_owner(config, addr, vip.owner)
         vips.append(entry)
     return vips
 

@@ -135,3 +135,9 @@ These were not in the list above. Each one is the default the work used.
   failed probes). `bgp.bfd_enabled` (default true) is still in `BGPConfig` only so old files
   load: nothing reads it, and no `bfd {}` block is written. If 3 s is too slow, run FRR `bfdd`
   next to ExaBGP or replace ExaBGP with FRR; that is a separate project.
+- **VIP owners (3.7, 4.1).** `vips[].owner` is optional and holds a node IP (same identity as
+  `local_ip` and `keepalived.peers`, not a hostname). Unset keeps the md5 rule, so existing
+  configs do not change. No round-robin default is written into the file and the wizard has no
+  owner prompt; edit `ober.yaml`. Peers stay IP-only (validation rejects hostnames instead of
+  resolving them). `preempt_delay` changed from 0 to 30 s (fixed, not configurable): a recovered
+  owner holds off 30 s before it takes its VIP back, which stops flapping.

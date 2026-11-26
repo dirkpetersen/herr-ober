@@ -37,6 +37,7 @@ class VIPConfig:
     address: str = ""
     interface: str = "lo-vip"
     exposure: str = "internal"  # "internal" (unchanged behavior) or "internet" (hardened)
+    owner: str = ""  # keepalived: node IP that holds this VIP; "" = md5 of the VIP picks one
 
 
 @dataclass
@@ -426,9 +427,21 @@ class OberConfig:
             (errors, warnings). All problems are reported, not only the first.
         """
         errors = list(self._load_errors)
+        warnings = list(self._load_warnings)
         _check_types(self, "", errors)
         _check_values(self, errors)
-        return errors, list(self._load_warnings)
+        for i, vip in enumerate(self.vips):
+            if not vip.owner or not isinstance(vip.owner, str):
+                continue
+            key = f"vips[{i}].owner"
+            if self.ha_mode == "bgp":
+                warnings.append(f"{key}: ignored in BGP mode (all nodes announce each VIP)")
+            # Same node identity as get_vip_owner: local_ip (or the detected IP) plus peers
+            elif vip.owner not in self.keepalived.peers and vip.owner != self.node_ip():
+                errors.append(
+                    f"{key}: must be local_ip or one of keepalived.peers, got {vip.owner!r}"
+                )
+        return errors, warnings
 
     def save(self, path: Path | None = None) -> None:
         """Save configuration to YAML file.

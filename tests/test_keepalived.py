@@ -591,3 +591,41 @@ def test_vrrp_router_ids_are_unique() -> None:
     assert sorted(many.values()) == list(range(1, 256))
     with pytest.raises(ValueError, match="at most 255"):
         vrrp_router_ids([f"10.1.{i // 250}.{i % 250}" for i in range(256)])
+
+
+def test_explicit_vip_owner_gets_priority_100(temp_dir: Path) -> None:
+    """vips[].owner overrides md5; status shows the same owner on every node."""
+    import re
+
+    from ober.commands.config import _generate_keepalived_config
+    from ober.commands.status import _expected_owner
+
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    vip = "192.168.1.100"
+    owner = next(n for n in nodes if n != get_vip_owner(vip, nodes, "")[0])
+    for node in nodes:
+        config = OberConfig(install_path=temp_dir / node, local_ip=node, ha_mode="keepalived")
+        config.keepalived = KeepalivedConfig(peers=nodes, interface="eth0")
+        config.vips = [VIPConfig(address=vip, owner=owner)]
+        assert config.validate()[0] == []
+        config.ensure_directories()
+        _generate_keepalived_config(config)
+        text = config.keepalived_config_path.read_text()
+        prio = re.search(r"priority (\d+)", text)
+        assert prio and int(prio.group(1)) == (100 if node == owner else 90)
+        assert _expected_owner(config, vip, owner) == owner
+
+
+def test_vip_owner_validation() -> None:
+    config = OberConfig(local_ip="10.0.0.1", ha_mode="keepalived")
+    config.keepalived = KeepalivedConfig(peers=["10.0.0.2"])
+    config.vips = [VIPConfig(address="192.168.1.100", owner="10.0.0.1")]
+    assert config.validate() == ([], [])
+    config.vips[0].owner = "10.0.0.2"
+    assert config.validate() == ([], [])
+    config.vips[0].owner = "node3"
+    errors, _ = config.validate()
+    assert errors == ["vips[0].owner: must be local_ip or one of keepalived.peers, got 'node3'"]
+    config.ha_mode = "bgp"
+    errors, warnings = config.validate()
+    assert errors == [] and warnings[0].startswith("vips[0].owner: ignored in BGP mode")
