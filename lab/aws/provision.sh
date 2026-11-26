@@ -13,9 +13,21 @@ for spec in "${NODES[@]}"; do
     [ "$name" = helper ] || NODE_IPS="$NODE_IPS $ip"
 done
 
+# ober push, cluster status and --all-nodes run `ssh NODE sudo -n ober ...` as root. Real
+# clusters need the same: a key for root on each node that may log in as a sudo user.
+NODE_KEY="$LAB_DIR/node_key"
+[ -f "$NODE_KEY" ] || ssh-keygen -q -t ed25519 -N '' -C herr-ober-lab-nodes -f "$NODE_KEY"
 for name in "${INGRESS_NODES[@]}"; do
     log "Provisioning $name"
     lab_ssh "$name" sudo dnf -y -q install python3-pip tar jq >/dev/null
+    lab_scp "$NODE_KEY" "$name:/tmp/node_key"
+    lab_ssh "$name" sudo bash -s -- "'$(cat "$NODE_KEY.pub")'" <<'EOF'
+set -euo pipefail
+install -d -m 700 /root/.ssh
+install -m 600 /tmp/node_key /root/.ssh/id_ed25519 && rm -f /tmp/node_key
+grep -qF "$1" /home/ec2-user/.ssh/authorized_keys || echo "$1" >>/home/ec2-user/.ssh/authorized_keys
+printf 'Host 10.77.1.*\n    User ec2-user\n    StrictHostKeyChecking accept-new\n' >/root/.ssh/config
+EOF
 done
 
 log "Provisioning helper"

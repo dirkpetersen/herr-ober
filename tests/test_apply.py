@@ -111,6 +111,18 @@ def test_failed_health_gate_rolls_back(node: dict[str, Any]) -> None:
     assert ap._snapshots(config) == []
 
 
+@pytest.mark.parametrize("old_ok", [True, False])
+def test_restore_after_failed_gate_is_health_checked(node: dict[str, Any], old_ok: bool) -> None:
+    # the failed new config left /health down; the restore must still wait for it
+    _edit(node["config"], "rgw3:7480")
+    node["healthy"] = [True, False]
+    with patch.object(ap, "_wait_healthy", side_effect=[False, old_ok]) as wait:
+        result = CliRunner().invoke(main, ["apply"])
+    assert result.exit_code == 1 and wait.call_count == 2
+    assert ("Rolled back" in result.output) is old_ok
+    assert ("did not get healthy either" in result.output) is not old_ok
+
+
 def test_rollback_and_undo(node: dict[str, Any]) -> None:
     config = node["config"]
     _edit(config, "rgw3:7480")
@@ -134,6 +146,14 @@ def test_snapshot_skips_certs_and_blocklist(node: dict[str, Any]) -> None:
     names = [p.name for p in snap.rglob("*")]
     assert "s3.pem" not in names and "blocklist.lst" not in names
     assert "ober.yaml" in names
+
+
+def test_snapshot_skips_binary_files(node: dict[str, Any]) -> None:
+    # install path = venv: pip writes etc/exabgp/examples/__pycache__/*.pyc
+    config = node["config"]
+    (config.install_path / "etc" / "x.pyc").write_bytes(b"\x00\xb8\xff")
+    assert "x.pyc" not in ap._tracked(config)
+    assert "ober.yaml" in ap._tracked(config)
 
 
 @pytest.mark.usefixtures("sample_config")

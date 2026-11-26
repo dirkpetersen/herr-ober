@@ -1,6 +1,8 @@
 """Tests for the systemd unit templates, reload/restart and upgrade lifecycle."""
 
+import shutil
 import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -204,7 +206,7 @@ def test_upgrade_rerenders_units_and_reenables_ha_unit(temp_dir: Path) -> None:
     ):
         svc.from_service_name.return_value.is_enabled = True
         up._rerender_units(config)
-    sebool.assert_called_once_with()
+    sebool.assert_called_once_with(config.install_path)
     cs.assert_called_once_with(config, config.venv_path)
     run.assert_called_once_with(["systemctl", "enable", "ober-bgp"], check=False)
 
@@ -255,22 +257,58 @@ def test_http_unit_allows_selinux_domain_switch(temp_dir: Path) -> None:
     assert "NoNewPrivileges=true" not in units["ober-ha.service"]  # VRRP raw socket, ping
 
 
-def test_selinux_boolean_set_unless_disabled() -> None:
+def _selinux_cmds(state: str, tools: bool = True, fail: str = "") -> list[list[str]]:
+    def run(cmd: list[str], **_kw: object) -> MagicMock:
+        return MagicMock(stdout=state + "\n", returncode=1 if fail and fail in cmd else 0)
+
+    with (
+        patch.object(bs, "check_command_exists", side_effect=lambda t: tools or t == "getenforce"),
+        patch.object(bs, "run_command", side_effect=run) as rc,
+    ):
+        bs._allow_haproxy_backend_ports(Path("/opt/herr-ober"))
+    return [c.args[0] for c in rc.call_args_list]
+
+
+def test_selinux_module_replaces_permissive_domain() -> None:
     for state, expected in (("Enforcing", True), ("Permissive", True), ("Disabled", False)):
-        with (
-            patch.object(bs, "check_command_exists", return_value=True),
-            patch.object(bs, "run_command", return_value=MagicMock(stdout=state + "\n")) as run,
-        ):
-            bs._allow_haproxy_backend_ports()
-        cmds = [c.args[0] for c in run.call_args_list]
+        cmds = _selinux_cmds(state)
         assert (["setsebool", "-P", "haproxy_connect_any", "1"] in cmds) is expected
-        assert (["semanage", "permissive", "-a", "keepalived_t"] in cmds) is expected
+        assert any(c[:2] == ["semodule", "-i"] for c in cmds) is expected
+        spec = r"/opt/herr\-ober/var/run(/.*)?"
+        assert (["semanage", "fcontext", "-a", "-t", "ober_state_t", spec] in cmds) is expected
+        assert (["semanage", "permissive", "-d", "keepalived_t"] in cmds) is expected
+        assert ["semanage", "permissive", "-a", "keepalived_t"] not in cmds
+
+
+def test_selinux_falls_back_to_permissive_domain() -> None:
+    # no checkmodule (or a failed build): keepalived mode must still work
+    for cmds in (_selinux_cmds("Enforcing", tools=False), _selinux_cmds("Enforcing", fail="-i")):
+        assert ["semanage", "permissive", "-d", "keepalived_t"] not in cmds
+    assert ["semanage", "permissive", "-a", "keepalived_t"] in _selinux_cmds("Enforcing", fail="-i")
+    # an existing label rule (bootstrap again) is modified, not an error
+    cmds = _selinux_cmds("Enforcing", fail="-a")
+    assert any(c[:3] == ["semanage", "fcontext", "-m"] for c in cmds)
     with (
         patch.object(bs, "check_command_exists", return_value=False),
         patch.object(bs, "run_command") as run,
     ):
-        bs._allow_haproxy_backend_ports()
+        bs._allow_haproxy_backend_ports(Path("/x"))
     run.assert_not_called()
+
+
+def test_selinux_module_compiles() -> None:
+    checkmodule = shutil.which("checkmodule")
+    if not checkmodule:
+        pytest.skip("checkmodule not installed")
+    with tempfile.TemporaryDirectory() as tmp:
+        te = Path(tmp) / "herr_ober.te"
+        te.write_text(bs.SELINUX_MODULE)
+        out = subprocess.run(
+            [checkmodule, "-M", "-m", "-o", str(te.with_suffix(".mod")), str(te)],
+            capture_output=True,
+            text=True,
+        )
+    assert out.returncode == 0, out.stderr
 
 
 def test_state_dir_owned_by_exabgp_user(temp_dir: Path) -> None:
@@ -280,3 +318,27 @@ def test_state_dir_owned_by_exabgp_user(temp_dir: Path) -> None:
         bs._own_state_dir(config)
     nobody = bs.pwd.getpwnam("nobody")
     chown.assert_called_once_with(config.health_state_path.parent, nobody.pw_uid, nobody.pw_gid)
+
+
+def test_watchdog_dropin(temp_dir: Path) -> None:
+    # Amazon Linux 2027 has no /etc/systemd/system.conf, so only a drop-in works everywhere
+    dropin = temp_dir / "system.conf.d" / "90-herr-ober-watchdog.conf"
+    with patch.object(bs, "run_command") as run:
+        bs._configure_watchdog(dropin)
+    assert dropin.read_text().startswith("[Manager]\nRuntimeWatchdogSec=10s\n")
+    assert run.call_count == int(Path("/dev/watchdog").exists())  # re-exec only with a device
+
+
+def test_uninstall_removes_label_before_module() -> None:
+    from ober.commands import uninstall
+
+    with (
+        patch.object(uninstall, "check_command_exists", return_value=True),
+        patch.object(uninstall, "run_command") as run,
+    ):
+        uninstall._remove_selinux_module(Path("/opt/herr-ober"))
+    cmds = [c.args[0] for c in run.call_args_list]
+    assert cmds == [
+        ["semanage", "fcontext", "-d", r"/opt/herr\-ober/var/run(/.*)?"],
+        ["semodule", "-r", "herr_ober"],
+    ]

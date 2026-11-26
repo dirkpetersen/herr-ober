@@ -132,7 +132,8 @@ vips:
 ```
 
 An owner that is not a cluster node is an error. In BGP mode `owner` is ignored (a warning).
-A recovered owner waits 30 s (`preempt_delay`) before it takes its VIP back.
+A failing node loses its VIPs in a few seconds. A started owner waits 30 s
+(`vrrp_startup_delay`), and an owner with recovered health 30 s (`rise`), before it takes its VIP back.
 
 **DNS Round-Robin:**
 ```
@@ -207,7 +208,8 @@ sudo ober cluster status     # VIP placement and config drift over all nodes
 `ober push` refuses an `ober.yaml` that sets `local_ip`, `bgp.router_id` or
 `bgp.local_address`, and stops at the first node that fails its check or health gate. That node
 puts its old files back. Certificates are not copied. The SSH user needs a key without a prompt
-and `sudo -n ober` on each node.
+and `sudo -n ober` on each node. SSH runs with `BatchMode=yes`, so the host keys must already be
+in root's `known_hosts` (or set `StrictHostKeyChecking accept-new` for the node addresses).
 
 ### Metrics and alerts
 

@@ -54,3 +54,89 @@ Lab script bugs (fixed): GoBGP got only one neighbor (ssh split the IP list), an
   reports OK. A cluster view (wave 2, 7.6) is needed for that.
 - Two independent moto servers do not share state, so the data test used one backend.
 - Amazon Linux 2027 is a preview. Ubuntu 26.04 and RHEL 10 were not tested on real nodes.
+
+# AWS lab findings (2026-11-26)
+
+Same lab layout and AMI (`al2027-preview-ami-2027.0.20261120.0-kernel-7.2-arm64`), SELinux
+enforcing. Tested: `main` at af23e45 (PRs #14 to #16), then rebased on `main` with #17 to #19,
+then branch `wave2/selinux-lab`. HAProxy 3.4.7 (`haproxy-awslc`), keepalived 2.3.4,
+ExaBGP 4.2.25, GoBGP 4.11.0. New lab helpers: `configure.sh bgp|keepalived`, and a node key so
+root on each node can `ssh 10.77.1.x sudo -n ober ...` as ec2-user (real clusters need the same:
+a prompt-free key, `sudo -n ober`, and known host keys, because ober uses `BatchMode=yes`).
+
+## Bugs found and fixed (branch `wave2/selinux-lab`)
+
+1. **`ober apply` crashed** with `UnicodeDecodeError`. With a plain venv the install path is the
+   venv, and pip puts ExaBGP's examples (with `.pyc` files) under `etc/exabgp`. Snapshots now
+   skip files that are not text.
+2. **A failed health gate printed "Rolled back" without a check.** The failed config left
+   `/health` down, so the restore skipped its gate ("/health was failing before"). The restore
+   now always waits for `/health`.
+3. **Keepalived failover took 36 s (PR #18 regression).** `preempt_delay 30` also makes backups
+   ignore adverts from a lower-priority master for 30 s, so a node with failed `/health` kept
+   its VIP. Now `vrrp_startup_delay 30` (a started node waits 30 s) and `chk_haproxy` `rise 15`
+   plus `init_fail`. Measured below.
+4. **Watchdog was never configured on Amazon Linux 2027**: there is no
+   `/etc/systemd/system.conf`, so bootstrap wrote nothing. Now a drop-in in
+   `/etc/systemd/system.conf.d/` (active after reboot: `RuntimeWatchdogUSec=10s`). EC2 has no
+   `/dev/watchdog`, so bootstrap warns there.
+5. **SELinux (8.6):** the permissive `keepalived_t` is replaced by the `herr_ober` module.
+   AVCs collected with the domain permissive (all from `keepalived_t`): `name_connect` to
+   `unreserved_port_t` (8404), write/create/rename/unlink/watch in `<install>/var/run`
+   (`usr_t`), `dac_override` (the dir belongs to `nobody`), execute `ping_exec_t` and
+   `ifconfig_exec_t` plus `process setcap`, `filesystem getattr` on `fs_t`. The module gives
+   `<install>/var/run` its own type `ober_state_t` (no write access to `usr_t`), lets
+   `haproxy_t` read it (server-state file), and allows the rest. It builds with `checkmodule`
+   (from `checkpolicy`, now in the RHEL package list); no `selinux-policy-devel` needed.
+
+Lab script bugs (fixed): `configure.sh` passed the VIP list as several ssh words (only the
+first VIP was configured).
+
+## Results
+
+| Test | Result |
+|---|---|
+| BGP: 3 sessions, ECMP via 3 next hops for both VIPs | pass |
+| S3 PUT/GET 50 MB via VIPs .100 and .101, byte-identical (BGP mode, before and after the module) | pass |
+| `ober apply` adds VIP 10.99.0.102 on ober1: in GoBGP RIB and kernel route in < 10 s, ExaBGP and HAProxy PIDs unchanged (SIGHUP, PR #14) | pass (after bug 1) |
+| `ober apply` removes 10.99.0.102: withdrawn from RIB and kernel | pass |
+| Failing apply, bad cert (fails `haproxy -c`): exit 1, haproxy.cfg unchanged, master PID unchanged | pass |
+| Failing apply, dead backend (fails `/health`): exit 1 after 15 s, old files back, `/health` 200 | pass (after bug 2) |
+| `ober rollback --list`, `ober rollback`: `timeout server` 700 s -> 600 s | pass |
+| `ober.local.yaml` (`local_ip`): router-id / local-address per node after push | pass |
+| `ober push -y` from ober1 to ober2/ober3 (11 s); refuses an ober.yaml with `local_ip` | pass |
+| `ober cluster status`: all OK, exit 0 | pass |
+| cluster status, ober3 stopped: CRIT (inactive, not announced), exit 2 | pass |
+| cluster status, ober3 unreachable (blackhole route): CRIT unreachable, exit 2 | pass |
+| cluster status, keepalived with ober-ha stopped on all nodes: CRIT "not held (VRRP MASTER) on any node" | pass |
+| `ober backend drain/ready 10.77.1.10_9001 --all-nodes` | pass, DRAIN/UP on all 3 |
+| Drain survives `ober restart` (server-state file, also when labeled `ober_state_t`) | pass |
+| `ober metrics` and `--output /var/tmp/ober.prom`; `promtool check metrics` | pass, no findings |
+| `ober cert install` (CN/SAN `s3.lab.internal`, `*.s3.lab.internal`): new cert on new connections, master and worker PIDs unchanged, mode 600 | pass |
+| `ober cert install --all-nodes`: same on ober2/ober3, no reload | pass |
+| `ober cert install`: cert without SAN cover and key mismatch refused, exit 1 | pass |
+| `ober doctor` TLS line | "Version 3.4.7, TLS: AWS-LC FIPS 5.12.0" (AL2027 `haproxy-awslc` is AWS-LC, not OpenSSL) |
+| `ober stop` (2.2 s, route gone) / `ober start` (back in the route after ~5 s) | pass |
+| Reboot ober3 (BGP): services, lo-vip and route back; SELinux enforcing | pass |
+| 3.9: `arp_ignore=1`, `arp_announce=2` after reboot | pass (ober3 BGP, ober2 keepalived) |
+| 8.7: NIC tuning | ober applies none (no `ethtool` calls, no `.link` files); nothing to persist |
+| 8.5: watchdog drop-in | missing before bug 4; now present, `RuntimeWatchdogUSec=10s` after reboot |
+| Keepalived, module loaded, `keepalived_t` NOT permissive, enforcing: zero AVC denials on all 3 nodes during all rows below and after a reboot | pass |
+| Keepalived: one MASTER per VIP | pass |
+| Keepalived: maintenance on moves the VIP (3 s), off brings it back (3 s) | pass |
+| Keepalived: `kill -9` of the HAProxy master: VIP leaves at once; back 36 s later (systemd restart + startup delay) | pass |
+| Keepalived: `/health` fails (server in maint): VIP moves in 7 s (was 36 s with `preempt_delay 30`); back 34 s after recovery | pass (after bug 3) |
+| Keepalived: `chk_gateway` (ping) to a dead IP: FAULT, VIP leaves; good IP: back | pass |
+| Keepalived: notify hook writes `vrrp-state.json` (`ober_state_t`) | pass |
+| Keepalived: `vips[].owner: 10.77.1.13` (PR #18): ober3 takes .100 within 1 s of the push | pass |
+| Keepalived: `ober stop`/`start` of the owner: VIP back after 33 s | pass |
+| Keepalived: `systemctl reload ober-ha` (`ober apply`) keeps the VIPs | pass |
+| Reboot ober2 (keepalived): VIP back 34 s after keepalived start, no AVCs | pass |
+| BGP mode after the module: health process (`unconfined_service_t`) writes `ober-health.json`, routes OK, no AVCs | pass |
+
+## Not tested / known gaps
+
+- Keepalived client traffic after a failover (the VPC ignores gratuitous ARP).
+- A real all-BACKUP state with keepalived running (forced only by stopping ober-ha).
+- `ober uninstall` on a node (module and label removal is unit-tested only).
+- RHEL 10 and Ubuntu 26.04 on real nodes.

@@ -1423,6 +1423,9 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         f"    router_id ober_{hostname}",
         "    vrrp_skip_check_adv_addr",
         "    vrrp_garp_master_delay 1",
+        # A starting node waits 30 s before it takes VIPs (back). Not preempt_delay: that also
+        # makes backups keep a failing master for 30 s.
+        "    vrrp_startup_delay 30",
         # keepalived -t fails on track scripts without script security
         "    enable_script_security",
         "    script_user root",
@@ -1436,7 +1439,8 @@ def _generate_keepalived_config(config: OberConfig) -> None:
         "    timeout 3",
         "    weight -50  # Reduce priority by 50 if health check fails",
         "    fall 2      # Require 2 failures before marking down",
-        "    rise 2      # Require 2 successes before marking up",
+        "    rise 15     # 30 s healthy before the priority comes back (no flapping)",
+        "    init_fail   # healthy only after the first good check",
         "}",
         "",
         "# Maintenance flag (ober maintenance on|off): 1 x -100 drops priority below all peers",
@@ -1485,8 +1489,6 @@ def _generate_keepalived_config(config: OberConfig) -> None:
                 f"    virtual_router_id {router_id}",
                 f"    priority {priority}",
                 f"    advert_int {config.keepalived.advert_int}",
-                "    # a recovering owner waits 30 s before it takes the VIP back",
-                "    preempt_delay 30",
                 "",
             ]
         )

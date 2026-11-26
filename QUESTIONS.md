@@ -141,3 +141,18 @@ These were not in the list above. Each one is the default the work used.
   owner prompt; edit `ober.yaml`. Peers stay IP-only (validation rejects hostnames instead of
   resolving them). `preempt_delay` changed from 0 to 30 s (fixed, not configurable): a recovered
   owner holds off 30 s before it takes its VIP back, which stops flapping.
+- **Keepalived return delay (lab, 2026-11-26).** `preempt_delay 30` was replaced: in the AWS
+  lab it also made backups ignore a failing master for 30 s (health fail to failover: 36 s).
+  Now `vrrp_startup_delay 30` (a started node waits 30 s) and `chk_haproxy` `rise 15` plus
+  `init_fail` (30 s of good checks before the priority comes back). Measured: failover 6 s,
+  return after health recovery 32 s, return after `ober stop`/`start` 34 s, reload keeps VIPs.
+- **SELinux module (8.6, lab 2026-11-26).** Bootstrap and upgrade load the `herr_ober` module
+  (raw policy, `checkmodule` + `semodule_package`, no `selinux-policy-devel`) and label
+  `<install>/var/run` `ober_state_t`; the permissive `keepalived_t` of 0.4 is removed. The
+  module is built from the AVCs seen in the lab (Amazon Linux 2027, keepalived 2.3.4). When it
+  cannot be built or loaded, bootstrap warns and keeps the permissive domain (default: on).
+  RHEL 10 has the same types but was not tested on a real node.
+- **Watchdog (8.5).** A drop-in in `/etc/systemd/system.conf.d/` replaces the append to
+  `/etc/systemd/system.conf`, which Amazon Linux 2027 does not ship. `daemon-reexec` runs only
+  when `/dev/watchdog` exists; without it bootstrap warns. `ober upgrade` does not write it:
+  run `ober bootstrap` again on old nodes. Uninstall leaves it (host setting).
