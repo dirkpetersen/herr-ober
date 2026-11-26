@@ -111,6 +111,18 @@ def test_failed_health_gate_rolls_back(node: dict[str, Any]) -> None:
     assert ap._snapshots(config) == []
 
 
+@pytest.mark.parametrize("old_ok", [True, False])
+def test_restore_after_failed_gate_is_health_checked(node: dict[str, Any], old_ok: bool) -> None:
+    # the failed new config left /health down; the restore must still wait for it
+    _edit(node["config"], "rgw3:7480")
+    node["healthy"] = [True, False]
+    with patch.object(ap, "_wait_healthy", side_effect=[False, old_ok]) as wait:
+        result = CliRunner().invoke(main, ["apply"])
+    assert result.exit_code == 1 and wait.call_count == 2
+    assert ("Rolled back" in result.output) is old_ok
+    assert ("did not get healthy either" in result.output) is not old_ok
+
+
 def test_rollback_and_undo(node: dict[str, Any]) -> None:
     config = node["config"]
     _edit(config, "rgw3:7480")

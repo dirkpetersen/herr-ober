@@ -118,8 +118,14 @@ def _wait_healthy(config: OberConfig, timeout: int) -> bool:
     return False
 
 
-def _activate(config: OberConfig, timeout: int, ha_changed: bool) -> str | None:
-    """Check, reload and gate on health. Returns an error text, or None when it worked."""
+def _activate(
+    config: OberConfig, timeout: int, ha_changed: bool, restore: bool = False
+) -> str | None:
+    """Check, reload and gate on health. Returns an error text, or None when it worked.
+
+    ``restore``: the old files come back after a failure, so /health failing now is expected
+    and the gate still applies.
+    """
     checks = [["/usr/sbin/haproxy", "-c", "-f", str(config.haproxy_config_path)]]
     ka = config.ha_mode == "keepalived" and ServiceInfo.from_service_name("ober-ha").is_active
     if ka:
@@ -147,7 +153,7 @@ def _activate(config: OberConfig, timeout: int, ha_changed: bool) -> str | None:
         if ha_changed:
             console.print("[yellow]The ExaBGP config changed: run 'ober restart --hard'.[/yellow]")
 
-    if not was_healthy:  # a gate that could never pass would roll back every change
+    if not was_healthy and not restore:  # a gate that never passes would undo every change
         console.print("[yellow]Warning:[/yellow] /health was failing before; no health gate.")
         return None
     if not _wait_healthy(config, timeout):
@@ -211,7 +217,7 @@ def apply(ctx: click.Context, timeout: int, diff: bool, new_file: TextIO | None)
         # Without -f, ober.yaml keeps the edit, so it can be fixed and applied again;
         # with -f, the old ober.yaml comes back
         _write(config, before)
-        if _activate(config, timeout, False):
+        if _activate(config, timeout, False, restore=True):
             console.print("[red]The old files did not get healthy either. Check the node.[/red]")
         else:
             console.print("[yellow]Rolled back to the previous files.[/yellow]")
@@ -286,7 +292,7 @@ def rollback(ctx: click.Context, snapshot: str | None, list_only: bool, timeout:
         console.print(f"[red]Rollback failed:[/red] {escape(error)}")
         _write(config, current)
         _sync_vips()
-        _activate(config, timeout, False)
+        _activate(config, timeout, False, restore=True)
         ctx.exit(1)
     _save(config, files)
     console.print(
