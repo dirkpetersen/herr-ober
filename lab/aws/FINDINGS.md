@@ -140,3 +140,78 @@ first VIP was configured).
 - A real all-BACKUP state with keepalived running (forced only by stopping ober-ha).
 - `ober uninstall` on a node (module and label removal is unit-tested only).
 - RHEL 10 and Ubuntu 26.04 on real nodes.
+
+# AWS lab findings (2026-11-27, AlmaLinux 10, wave 3)
+
+Lab: 3 ingress nodes (t4g.medium) and 1 helper (t4g.small), AlmaLinux 10.3
+(`AlmaLinux OS 10.3.20261116.0 aarch64`, ami-09905381bb1145fc7), SELinux enforcing, us-west-2.
+Distro packages: HAProxy 3.0.5 (OpenSSL), keepalived 2.2.8, FRR 10.6.1 (bfdd), Python 3.12.16;
+ExaBGP 4.2.25 (venv). Helper: BIRD 3.4.0 (EPEL `bird`; there is no bird2 package on EL10, the
+bird2 config syntax works), awscli2 2.33. Backend: AWS S3 `s3.us-west-2.amazonaws.com:443` over
+TLS, through an S3 gateway VPC endpoint. Client: AWS CLI on the helper, S3 names mapped to the
+VIP in `/etc/hosts`, lab CA as `AWS_CA_BUNDLE`. Tested: `main` with PRs #23 (TLS backends),
+#24 (runtime servers, cluster upgrade) and #25 (BFD), then branch `wave3/lab-alma`.
+
+## Bugs found and fixed (branch `wave3/lab-alma`)
+
+1. **TLS backends were DOWN on AlmaLinux 10** ("Layer6 invalid response, SSL handshake
+   failure"). HAProxy 3.0.5 loads no CAs from `ca-file @system-ca` there. An empty
+   `tls_ca_file` now renders the distro bundle (`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`,
+   else `/etc/ssl/certs/ca-certificates.crt`, else `@system-ca`).
+2. **A TLS server added by `ober apply` over the runtime API stayed DOWN** (L7TOUT) until a
+   reload: a dynamic server does not get `check-ssl` from `ssl`, so its health check went in
+   plain HTTP to port 443. TLS server lines now have an explicit `check-ssl`.
+3. **`ober upgrade` broke ExaBGP** when `ober.yaml` has no `venv_path` (written by hand or by
+   a tool, here `configure.sh`): it rendered `ober-bgp.service` with
+   `<install>/venv/bin/exabgp`, which does not exist. ExaBGP (and so BFD) failed at the next
+   start. `ober upgrade` now uses the venv ober runs in when `<install>/venv` is not a venv.
+4. **`ober cluster upgrade` stopped after the first node**: it waits for `cluster status` OK,
+   but the ober version differs between nodes during a rolling upgrade (WARN). Version drift
+   (ober and HAProxy) no longer blocks that wait; config drift still does.
+5. **`sudo ober` fails on RHEL**: sudo's `secure_path` has no `/usr/local/bin`, where
+   `install.sh` puts `ober`. This also breaks `ober push`, `cluster status`, `--all-nodes` and
+   `cluster upgrade` (`ssh NODE sudo -n ober ...`). `install.sh` now links `/usr/bin/ober` when
+   needed; `ober uninstall` removes only that link.
+
+Lab notes: BIRD 3.4 misses the kernel update when a route grows from 1 to more paths (the
+first node in, then the others: the kernel kept 1 next hop until the 60 s scan). Workaround
+`scan time 2`. BIRD also waits about 1 s before it writes a route change to the kernel; with
+`export settle time 0 ms 10 ms` on `master4` route removal dropped from ~1 s to ~40 ms.
+
+## Results
+
+| Test | Result |
+|---|---|
+| `up.sh`/`provision.sh` on AlmaLinux 10 (root device `/dev/sda1`, S3 gateway endpoint) | pass |
+| `ober bootstrap` with SELinux enforcing (haproxy, keepalived, policy module, sysctl) | pass, 0 AVC denials |
+| BGP: 3 sessions to bird, ECMP route via 3 next hops for both VIPs | pass (with `scan time 2`) |
+| TLS backend to AWS S3: `ssl verify required`, SNI, `resolvers sys` (S3 IPs change every few s) | pass after bug 1, L7OK (GET / gives 307) |
+| `ober cert install --all-nodes` (lab cert for `s3.us-west-2.amazonaws.com`, `*.s3...`) | pass, no reload |
+| S3 GET of an existing 168 MB video through the VIP (helper, AWS CLI, SigV4) | pass, 1.4 s (~120 MB/s, helper limit) |
+| S3 PUT/GET/DELETE of 64 MiB under `herr-ober-test/`, byte-identical; prefix empty after | pass |
+| Requests spread over all 3 nodes (backend session counters 12 / 27 / 7) | pass |
+| Runtime servers: `ober apply` adds an IP TLS server: "Runtime API, no reload", master and worker PIDs unchanged, server UP | pass after bug 2 (before: DOWN L7TOUT) |
+| Runtime servers: `ober apply` removes it: runtime `del server`, PIDs unchanged | pass |
+| `ober rollback` | pass (reload; restored snapshot) |
+| `ober push -y` from ober1 (11 s, both nodes render `inter 2000ms`) | pass |
+| `ober cluster status`, `ober metrics` (`ober_bfd_peer_up 1`, `ober_service_active{unit="ober-bfd"} 1`) | pass |
+| Old nodes to BFD: `dnf install frr`, `ober upgrade -y` (adds `ober-bfd.service`), `bfd_enabled: true`, `ober apply` | pass, but see bug 3 |
+| BFD: bfdd runs as `frr_t`, `/etc/frr/bfdd.conf` is `frr_conf_t`, 0 AVC denials; 3 sessions Up in bird (300 ms x 3) | pass |
+| BFD: node loses the router (blackhole route on the node): route removed on the helper | 1.1-1.4 s (BFD) |
+| Same without BFD on that node: route removed by BGP hold timer (ExaBGP `hold-time 3`) | 3.2 s |
+| `systemctl stop ober-http`: ober-bgp and ober-bfd stop at once (BindsTo), bfdd exits cleanly | pass; route removed after 1.1 s, 40 ms with the settle fix |
+| `ober cluster upgrade` with a locally built 0.5.0.dev2 wheel (`--command` pip install) | pass after bug 4, 3 nodes in 94 s |
+| Probe from the helper every 0.2 s during the rolling upgrade (452 requests) | 0 failures |
+| Reboot ober2: route removed after 1 s, back after 31 s, BGP and BFD up, `ober status` OK | pass, 0 AVC denials |
+
+## Not tested / known gaps
+
+- Keepalived mode on AlmaLinux 10 (keepalived 2.2.8) was not run this time.
+- A fresh `ober bootstrap` that installs `frr` itself (the nodes were bootstrapped before
+  PR #25 and got `frr` with `dnf`).
+- `ober apply` says "No changes." when only `bgp.bfd_enabled` changes, although it starts or
+  stops `ober-bfd` correctly.
+- When a node turns BFD off, bird (which still has `bfd on`) drops the BGP session once
+  ("BFD session down"); it comes back without BFD after the error wait.
+- HAProxy 3.0.5 is the only HAProxy on EL10; no HAProxy 3.3 build was tested on Alma.
+- The lab cert expires after 30 days, the lab CA after 90.
