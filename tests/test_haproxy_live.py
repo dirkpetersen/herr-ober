@@ -214,11 +214,42 @@ def can_connect(proxy: Proxy, src: str, dest: str = INTERNET_IP) -> bool:
         return False
 
 
+def make_ca_and_leaf(root: Path, name: str) -> tuple[Path, Path, Path]:
+    """A private CA plus a leaf cert for DNS:name; returns (ca, leaf cert, leaf key)."""
+    ca, ca_key, crt, key = (root / f"{name}-{x}.pem" for x in ("ca", "cakey", "crt", "key"))
+    ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-days", "2"]
+    subprocess.run(
+        ["openssl", "req", "-x509", *ec, "-keyout", str(ca_key), "-out", str(ca),
+         "-subj", "/CN=ober test CA"],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    subprocess.run(
+        ["openssl", "req", "-x509", *ec, "-keyout", str(key), "-out", str(crt),
+         "-subj", f"/CN={name}", "-addext", f"subjectAltName=DNS:{name}",
+         "-CA", str(ca), "-CAkey", str(ca_key)],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    return ca, crt, key
+
+
 @contextlib.contextmanager
-def launch(**security: Any) -> Iterator[Proxy]:
-    """Start backend, syslog sink and a real HAProxy for one SecurityConfig variant."""
+def launch(backend_ca: str = "", **security: Any) -> Iterator[Proxy]:
+    """Start backend, syslog sink and a real HAProxy for one SecurityConfig variant.
+
+    backend_ca "own" serves the backend over TLS as localhost and trusts its CA; any other
+    non-empty value is used as tls_ca_file (a wrong CA must keep the backend DOWN).
+    """
     root = Path(tempfile.mkdtemp(prefix="obl"))
     backend = Backend()
+    server = f"127.0.0.1:{backend.server_port}"
+    tls: dict[str, Any] = {}
+    if backend_ca:
+        ca, crt, key = make_ca_and_leaf(root, "localhost")
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(crt, key)
+        backend.socket = ctx.wrap_socket(backend.socket, server_side=True)
+        server = f"localhost:{backend.server_port}"
+        tls = {"tls": True, "tls_ca_file": str(ca) if backend_ca == "own" else backend_ca}
     threading.Thread(target=backend.serve_forever, daemon=True).start()
     sink = SyslogSink()
     try:
@@ -240,9 +271,7 @@ def launch(**security: Any) -> Iterator[Proxy]:
             VIPConfig(address=f"{INTERNET_IP}/32", exposure="internet"),
             VIPConfig(address=f"{INTERNAL_IP}/32"),
         ]
-        config.backends = [
-            BackendConfig(name="s3_backend", servers=[f"127.0.0.1:{backend.server_port}"])
-        ]
+        config.backends = [BackendConfig(name="s3_backend", servers=[server], **tls)]
         config.certs = CertConfig(path=str(pem))
         config.stats_port = free_port()
         config.stats_bind = [INTERNAL_IP]  # 127.0.0.1 (the internet VIP here) is always bound
@@ -937,3 +966,23 @@ def test_cert_hot_swap_without_reload() -> None:
             ctx.wrap_socket(raw) as tls,
         ):
             assert tls.getpeercert(binary_form=True) == ssl.PEM_cert_to_DER_cert(new_cert)
+
+
+def test_tls_backend_keeps_host_header() -> None:
+    """HTTPS to the backend with a private CA and SNI; Host and signature pass unchanged."""
+    with launch(backend_ca="own") as p:
+        host = f"bucket.{HOST}"
+        assert p.status("PUT", "/k", {"Authorization": SIGV4}, host=host, body=b"x") == 200
+        seen = p.backend.seen[-1]
+        assert seen["headers"]["host"] == host
+        assert seen["headers"]["authorization"] == SIGV4
+        assert "L7OK" in p.admin("show stat -1 4 -1")
+
+
+def test_tls_backend_wrong_ca_stays_down() -> None:
+    other_ca = make_ca_and_leaf(Path(tempfile.mkdtemp(prefix="obca")), "other")[0]
+    with (
+        pytest.raises(RuntimeError, match="never became healthy"),
+        launch(backend_ca=str(other_ca)),
+    ):
+        pass

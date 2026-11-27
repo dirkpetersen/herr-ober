@@ -204,6 +204,10 @@ error.
 | `rise` | `2` | Good checks before a server is marked up |
 | `slowstart_s` | `10` | Seconds over which a recovered server gets its full share (0 = off) |
 | `maxconn` | `0` | Connections per server; more wait in the queue (0 = no limit) |
+| `health_check_expect` | `""` | `status <codes>` or `rstatus <regex>`; empty is the HAProxy default (2xx or 3xx) |
+| `tls` | `false` | HTTPS to the servers (AWS S3, RGW behind TLS) |
+| `tls_verify` | `true` | Verify the server cert (CA chain; the host name for servers given by name) |
+| `tls_ca_file` | `""` | CA bundle for a private CA; empty uses the system CAs (`@system-ca`) |
 
 Backends balance with `leastconn`. The S3 frontends are only generated when VIPs, a
 certificate path and a backend are configured.

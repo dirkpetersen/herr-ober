@@ -24,6 +24,7 @@ from ober.config import (
     OberConfig,
     SecurityConfig,
     VIPConfig,
+    _is_ip,
     exit_if_invalid,
     server_name,
     write_atomic,
@@ -1330,6 +1331,11 @@ def _generate_haproxy_config(
         binds = ",".join(f"{h}:{https_port}" for h in hosts)
         cfg_lines += _s3_frontend_internet(config, binds, backend_name, hostnames, hosts)
 
+    # TLS backends with host names follow DNS changes (S3 IPs rotate); plain backends keep the
+    # resolve-at-start behavior, so names only in /etc/hosts never go to MAINT on a DNS NX
+    if any(b.tls and not _is_ip(_server_host(s)) for b in config.backends for s in b.servers):
+        cfg_lines += ["resolvers sys", "    parse-resolv-conf", ""]
+
     # Backends
     for backend in config.backends:
         cfg_lines.extend(
@@ -1339,6 +1345,8 @@ def _generate_haproxy_config(
                 f"    option httpchk GET {backend.health_check_path}",
             ]
         )
+        if backend.health_check_expect:
+            cfg_lines.append(f"    http-check expect {backend.health_check_expect}")
         dflt = (
             f"    default-server check inter {backend.health_check_interval}ms"
             f" fall {backend.fall} rise {backend.rise}"
@@ -1349,11 +1357,39 @@ def _generate_haproxy_config(
             dflt += f" maxconn {backend.maxconn}"
         cfg_lines.append(dflt)
         for server in backend.servers:
-            cfg_lines.append(f"    server {server_name(server)} {server}")
+            cfg_lines.append(
+                f"    server {server_name(server)} {server}{_server_tls(backend, server)}"
+            )
         cfg_lines.append("")
 
     config.haproxy_config_path.parent.mkdir(parents=True, exist_ok=True)
     _write_if_changed(config.haproxy_config_path, "\n".join(cfg_lines))
+
+
+def _server_host(server: str) -> str:
+    """Host part of ``host:port`` (brackets of an IPv6 address removed)."""
+    return server.rsplit(":", 1)[0].strip("[]")
+
+
+def _server_tls(backend: BackendConfig, server: str) -> str:
+    """TLS options for one server line ("" for a plain HTTP backend).
+
+    The SNI is the server's host name, not the client's Host: the AWS S3 cert covers the
+    endpoint and ``*.endpoint``, and a fixed SNI also works for bucket names with dots. The
+    Host header is passed unchanged, as SigV4 signs it. An IP server gets no SNI, so only the
+    CA chain is verified.
+    """
+    if not backend.tls:
+        return ""
+    if backend.tls_verify:
+        opts = f" ssl verify required ca-file {backend.tls_ca_file or '@system-ca'}"
+    else:
+        opts = " ssl verify none"
+    host = _server_host(server)
+    if not _is_ip(host):
+        opts += f" sni str({host}) check-sni {host}"
+        opts += " resolvers sys init-addr last,libc,none resolve-prefer ipv4"
+    return opts
 
 
 def _generate_exabgp_config(config: OberConfig) -> None:

@@ -65,6 +65,69 @@ def test_render_uses_names_and_tuning(temp_dir: Path) -> None:
     assert f"server-state-file {config.server_state_path}" in text
 
 
+def _render(config: OberConfig) -> str:
+    from ober.commands.config import _generate_haproxy_config
+    from ober.config import CertConfig, VIPConfig
+
+    config.vips = [VIPConfig(address="10.0.0.100")]
+    config.certs = CertConfig(path="/etc/ssl/s3.pem")
+    _generate_haproxy_config(config)
+    return config.haproxy_config_path.read_text()
+
+
+def test_render_aws_s3_tls_backend(temp_dir: Path) -> None:
+    config = OberConfig(install_path=temp_dir)
+    aws = "s3.us-west-2.amazonaws.com"
+    config.backends = [
+        BackendConfig(
+            name="aws", servers=[f"{aws}:443"], tls=True, health_check_expect="rstatus ^[234]"
+        )
+    ]
+    assert config.validate()[0] == []
+    text = _render(config)
+    assert "resolvers sys\n    parse-resolv-conf\n" in text
+    assert "    http-check expect rstatus ^[234]\n" in text
+    assert (
+        f"    server {aws}_443 {aws}:443 ssl verify required ca-file @system-ca"
+        f" sni str({aws}) check-sni {aws}"
+        " resolvers sys init-addr last,libc,none resolve-prefer ipv4\n"
+    ) in text
+    # SigV4 signs Host: the proxy never rewrites it
+    assert "set-header host" not in text.lower() and "replace-header host" not in text.lower()
+
+
+def test_render_tls_ip_server_with_private_ca(temp_dir: Path) -> None:
+    config = OberConfig(install_path=temp_dir)
+    config.backends = [
+        BackendConfig(
+            name="rgw", servers=["10.0.2.1:443"], tls=True, tls_ca_file="/etc/ober/rgw-ca.pem"
+        ),
+    ]
+    text = _render(config)
+    assert (
+        "    server 10.0.2.1_443 10.0.2.1:443 ssl verify required ca-file /etc/ober/rgw-ca.pem\n"
+        in text
+    )
+    assert "resolvers" not in text and "http-check expect" not in text
+
+
+def test_render_tls_no_verify_and_plain_unchanged(temp_dir: Path) -> None:
+    config = _config(temp_dir, tls=True, tls_verify=False)
+    text = _render(config)
+    assert " rgw1:7480 ssl verify none sni str(rgw1) check-sni rgw1 resolvers sys" in text
+    plain = _render(_config(temp_dir / "plain"))
+    assert "    server rgw1_7480 rgw1:7480\n" in plain and "resolvers" not in plain
+
+
+def test_tls_fields_validated(temp_dir: Path) -> None:
+    errors, _ = _config(
+        temp_dir, health_check_expect="status 200\nlisten x", tls_ca_file="ca.pem"
+    ).validate()
+    assert any("health_check_expect" in e for e in errors)
+    assert any("tls_ca_file" in e for e in errors)
+    assert _config(temp_dir, health_check_expect="status 200").validate()[0] == []
+
+
 def test_drain_by_address(temp_dir: Path) -> None:
     runtime = MagicMock()
     runtime.send.side_effect = lambda cmd: "1\n# hdr\n" if cmd == "show servers state" else ""
