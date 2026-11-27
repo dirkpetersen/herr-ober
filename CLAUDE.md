@@ -21,7 +21,10 @@ pytest tests/test_cli.py::test_bootstrap -v          # one test
 pytest --cov=ober --cov-report=term-missing          # coverage (min 50%)
 ruff check . --fix && ruff format .                  # lint + format (line length 100)
 mypy ober/                                           # strict: disallow_untyped_defs
+pip install -e ".[docs]" && zensical serve           # docs at :8000; CI runs zensical build --clean --strict
 ```
+
+The docs site (`zensical.toml`, `docs/`, `.github/workflows/docs.yml`) includes `architecture.md`, `deploy/sentinel/README.md` and the README part between the `operations` snippet markers (`docs/operations.md`) through `pymdownx.snippets`. Keep the markers, and keep links in those parts absolute or inside the included text.
 
 CI (`.github/workflows/test.yml`, Python 3.12, 3.13 and 3.14) runs `ruff check .`, **`ruff format --check .`**, `mypy ober/`, and pytest. Run all four before pushing. Publishing to PyPI is via `publish-pypi.yml`; the version lives in both `pyproject.toml` and `ober/__init__.py`.
 

@@ -1,0 +1,116 @@
+# Zensical configuration for the Herr Ober documentation site.
+# Build: zensical build --clean --strict    Preview: zensical serve
+# Reference: https://zensical.org/docs/setup/basics/
+
+[project]
+site_name = "Herr Ober"
+site_description = "High-performance S3 ingress controller for Ceph RGW clusters (HAProxy with BGP/ECMP or keepalived/VRRP)"
+site_author = "Dirk Petersen"
+site_url = "https://dirkpetersen.github.io/herr-ober/"
+copyright = "Copyright &copy; Dirk Petersen. Released under the MIT License."
+
+repo_url = "https://github.com/dirkpetersen/herr-ober"
+repo_name = "dirkpetersen/herr-ober"
+
+docs_dir = "docs"
+site_dir = "site"
+
+# Pages that pull in files from outside docs/ through pymdownx.snippets
+# (architecture.md, README.md and deploy/sentinel/README.md). Rebuild when they change.
+watch = [
+  "architecture.md",
+  "README.md",
+  "deploy/sentinel/README.md",
+]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting started" = "getting-started.md" },
+  { "Configuration" = "configuration.md" },
+  { "Operations" = "operations.md" },
+  { "CLI reference" = "cli.md" },
+  { "Architecture" = "architecture.md" },
+  { "Proxmox deployment" = "proxmox-deployment.md" },
+  { "Security" = [
+    { "Security monitoring" = "security-monitoring.md" },
+    { "Sentinel and Defender" = "sentinel.md" },
+  ] },
+  { "Development" = "development.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[project.theme.icon]
+repo = "fontawesome/brands/github"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/dirkpetersen/herr-ober"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/herr-ober/"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+# Keep a bulleted list and a numbered list that follow each other apart (as on GitHub)
+sane_lists = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.magiclink = {}
+# Paths are relative to the repository root, so docs pages can include
+# architecture.md and deploy/sentinel/README.md without duplicating them.
+pymdownx.snippets.base_path = ["."]
+pymdownx.snippets.check_paths = true
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true

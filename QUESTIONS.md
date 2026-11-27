@@ -156,3 +156,8 @@ These were not in the list above. Each one is the default the work used.
   `/etc/systemd/system.conf`, which Amazon Linux 2027 does not ship. `daemon-reexec` runs only
   when `/dev/watchdog` exists; without it bootstrap warns. `ober upgrade` does not write it:
   run `ober bootstrap` again on old nodes. Uninstall leaves it (host setting).
+- **Docs site (10.4).** The Zensical site reuses text instead of copying it: `docs/operations.md`
+  includes the README part between the `operations` snippet markers (cluster, metrics,
+  certificates, rolling upgrade, firewall); `architecture.md` and `deploy/sentinel/README.md`
+  are included whole. Pages deploy through GitHub Actions (no gh-pages branch), so the repo
+  needs Settings > Pages > Source: "GitHub Actions" (default: not set until the owner sets it).

@@ -121,7 +121,7 @@ fail the timer; HAProxy keeps the last applied list and its own local auto-ban.
 ## 4. Microsoft Sentinel
 
 Create tables, DCR, app registration and analytics rules with the exact commands in
-[deploy/sentinel/README.md](../deploy/sentinel/README.md), then enable it:
+[Sentinel and Defender](sentinel.md) (source: `deploy/sentinel/README.md`), then enable it:
 
 ```yaml
 sentinel:

@@ -19,6 +19,9 @@ Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress co
 
 ## Documentation
 
+The full documentation (getting started, configuration reference, CLI reference, deployment
+and security guides) is at **<https://dirkpetersen.github.io/herr-ober/>**.
+
 For deep internals, kernel tuning, and failure recovery logic, see **[architecture.md](https://github.com/dirkpetersen/herr-ober/blob/main/architecture.md)**.
 For Proxmox host and VM setup (SR-IOV, hugepages, CPU priority, BIOS), see **[docs/proxmox-deployment.md](docs/proxmox-deployment.md)**.
 
@@ -77,8 +80,8 @@ only `lo-vip`; the ENI configuration of amazon-ec2-net-utils is not changed.
 **Upgrading from v0.3.0 or earlier:** re-run the one-liner. The old install lived under
 `/root/.local/pipx`; the installer prints how to keep it
 (`sudo ober bootstrap /root/.local/pipx/venvs/herr-ober`) or copy its `etc/` to
-`/opt/pipx/venvs/herr-ober/etc`. Because the `hostlist` dependency was replaced by
-`python-hostlist`, reinstall into a clean venv so that no stale `hostlist` package stays:
+`/opt/pipx/venvs/herr-ober/etc`. Herr Ober no longer depends on a hostlist package, so reinstall
+into a clean venv so that no stale `hostlist` package stays:
 ```bash
 PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx reinstall herr-ober
 sudo ober upgrade   # installs ExaBGP again if the reinstall removed it, and rewrites the units
@@ -184,6 +187,7 @@ problem. `ober stop`, `ober status` and `ober logs` still work. `local_ip` sets 
 for keepalived `unicast_src_ip` and the BGP router-id/local-address when the default route
 uses another NIC.
 
+<!-- --8<-- [start:operations] -->
 ### One ober.yaml for the whole cluster
 
 Values that must differ between nodes go in `ober.local.yaml` next to `ober.yaml` on each
@@ -295,6 +299,8 @@ rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every
 client and RGW connection.
 
+<!-- --8<-- [end:operations] -->
+
 ### Checking Health
 
 ```bash
@@ -302,7 +308,7 @@ client and RGW connection.
 ober status
 
 # JSON output for monitoring integration
-ober status --json
+ober --json status
 
 # Direct health endpoint
 curl http://127.0.0.1:8404/health
@@ -359,7 +365,7 @@ and **[deploy/sentinel/README.md](deploy/sentinel/README.md)**.
 ```bash
 # Clone and install dev dependencies
 git clone https://github.com/dirkpetersen/herr-ober.git
-cd ober
+cd herr-ober
 pip install -e ".[dev]"
 
 # Run tests

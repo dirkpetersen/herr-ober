@@ -1,0 +1,75 @@
+# Build the documentation site with Zensical and publish it to GitHub Pages.
+# Based on the workflow that `zensical new` generates (https://zensical.org/docs/publish-your-site/):
+# the site is uploaded as a Pages artifact and deployed with actions/deploy-pages, so there is
+# no gh-pages branch. Requires Settings > Pages > Build and deployment > Source: "GitHub Actions".
+# Pull requests only build the site (strict), they do not deploy.
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "zensical.toml"
+      - "README.md"
+      - "architecture.md"
+      - "deploy/sentinel/README.md"
+      - "pyproject.toml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "zensical.toml"
+      - "README.md"
+      - "architecture.md"
+      - "deploy/sentinel/README.md"
+      - "pyproject.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a running deployment is allowed to finish.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: 3.x
+
+      - name: Install Zensical
+        run: pip install ".[docs]"
+
+      # --strict fails the build on links to missing pages or anchors
+      - name: Build site
+        run: zensical build --clean --strict
+
+      - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/deploy-pages@v5
+        id: deployment
