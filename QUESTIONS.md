@@ -198,4 +198,8 @@ These were not in the list above. Each one is the default the work used.
   links `/usr/bin/ober` when sudo's `secure_path` lacks `/usr/local/bin` (RHEL default), so
   `sudo ober` and the remote `sudo -n ober` work; `ober uninstall` removes only that link.
   (c) RHEL 10 ships HAProxy 3.0.5 and keepalived 2.2.8; bootstrap installs them as is
-  (default: no third-party repo), `ober doctor` warns "recommend 3.3+".
+  (default: no third-party repo), `ober doctor` warns "recommend 3.3+". (d) TLS server lines
+  carry `check-ssl` (runtime-added servers do not imply it). (e) `ober cluster upgrade` ignores
+  ober and HAProxy version drift while it waits for OK; config drift still blocks. (f) `ober
+  upgrade` renders the units with the running venv when `<install>/venv` is not a venv (an
+  ober.yaml without `venv_path`).
