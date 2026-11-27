@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Create (or reconcile) the herr-ober lab: VPC, subnet, IGW, SG, key pair, 4 instances.
+# Create (or reconcile) the herr-ober lab: VPC, subnet, IGW, S3 endpoint, SG, key pair,
+# 4 instances.
 # Idempotent: every resource is looked up by the Project=herr-ober-lab tag first.
 # Afterwards it writes ./inventory and ./ssh_config and runs ./provision.sh.
 set -euo pipefail
@@ -68,6 +69,18 @@ if [ -z "$ASSOC" ]; then
     aws ec2 associate-route-table --route-table-id "$RTB_ID" --subnet-id "$SUBNET_ID" >/dev/null
 fi
 
+# ---- S3 gateway endpoint: S3 traffic from the nodes stays private and costs nothing --
+VPCE_ID="$(aws ec2 describe-vpc-endpoints --filters "Name=tag:Project,Values=$PROJECT" \
+    "Name=vpc-id,Values=$VPC_ID" "Name=vpc-endpoint-state,Values=available,pending" \
+    --query 'VpcEndpoints[0].VpcEndpointId' --output text | none_to_empty)"
+if [ -z "$VPCE_ID" ]; then
+    VPCE_ID="$(aws ec2 create-vpc-endpoint --vpc-id "$VPC_ID" --vpc-endpoint-type Gateway \
+        --service-name "com.amazonaws.$AWS_REGION.s3" --route-table-ids "$RTB_ID" \
+        --tag-specifications "ResourceType=vpc-endpoint,Tags=[$TAGS,{Key=Name,Value=$PROJECT-s3}]" \
+        --query 'VpcEndpoint.VpcEndpointId' --output text)"
+    log "Created S3 gateway endpoint $VPCE_ID"
+fi
+
 # ---- Security group -----------------------------------------------------------------
 SG_ID="$(aws ec2 describe-security-groups --filters "Name=tag:Project,Values=$PROJECT" \
     "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text | none_to_empty)"
@@ -110,10 +123,12 @@ elif [ ! -f "$KEY_FILE" ]; then
 fi
 
 # ---- AMI ----------------------------------------------------------------------------
-AMI_ID="${AMI_ID:-$(aws ec2 describe-images --owners amazon \
+AMI_ID="${AMI_ID:-$(aws ec2 describe-images --owners "$AMI_OWNER" \
     --filters "Name=name,Values=$AMI_PATTERN" "Name=state,Values=available" \
     --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)}"
-log "AMI $AMI_ID ($(aws ec2 describe-images --image-ids "$AMI_ID" --query 'Images[0].Name' --output text))"
+ami_q() { aws ec2 describe-images --image-ids "$AMI_ID" --query "Images[0].$1" --output text; }
+ROOT_DEV="$(ami_q RootDeviceName)"
+log "AMI $AMI_ID ($(ami_q Name), root $ROOT_DEV)"
 
 # ---- Instances ----------------------------------------------------------------------
 instance_id() {
@@ -132,7 +147,7 @@ for spec in "${NODES[@]}"; do
             --private-ip-address "$ip" --associate-public-ip-address \
             --metadata-options 'HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1' \
             --credit-specification CpuCredits=standard \
-            --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=$disk,VolumeType=gp3,DeleteOnTermination=true}" \
+            --block-device-mappings "DeviceName=$ROOT_DEV,Ebs={VolumeSize=$disk,VolumeType=gp3,DeleteOnTermination=true}" \
             --user-data "$userdata" \
             --tag-specifications \
                 "ResourceType=instance,Tags=[$TAGS,{Key=Name,Value=$name}]" \
@@ -190,7 +205,7 @@ for spec in "${NODES[@]}"; do
     iid="$(instance_id "$name")"
     pub="$(aws ec2 describe-instances --instance-ids "$iid" \
         --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"
-    role="ingress"; [ "$name" = helper ] && role="s3-backend+bgp-peer+client"
+    role="ingress"; [ "$name" = helper ] && role="bird2-router+s3-client"
     printf '%-8s %-21s %-11s %-13s %-15s %s\n' "$name" "$iid" "$itype" "$ip" "$pub" "$role" \
         >>"$LAB_DIR/inventory"
     printf 'Host %s\n    HostName %s\n' "$name" "$pub" >>"$SSH_CONFIG"

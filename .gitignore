@@ -212,3 +212,5 @@ lab/aws/ssh_config
 lab/aws/known_hosts
 lab/aws/node_key
 lab/aws/node_key.pub
+lab/aws/lab-ca.pem
+lab/aws/server.pem
