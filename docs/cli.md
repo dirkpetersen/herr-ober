@@ -14,6 +14,7 @@ success and `1` for errors.
 | [`apply`, `rollback`](#ober-apply-rollback) | Apply `ober.yaml` with check, reload and health gate; go back | yes |
 | [`push`](#ober-push) | `ober apply` on the other nodes, one at a time | SSH user needs `sudo -n ober` |
 | [`cluster status`](#ober-cluster-status) | All nodes: VIP placement and drift | SSH user needs `sudo -n ober` |
+| [`cluster upgrade`](#ober-cluster-upgrade) | Rolling upgrade, one node at a time | SSH user needs `sudo -n` |
 | [`status`](#ober-status) | Show the current state | no |
 | [`metrics`](#ober-metrics) | Node state in the Prometheus text format | for backend state |
 | [`maintenance`](#ober-maintenance) | Take this node out of rotation | yes |
@@ -87,7 +88,11 @@ ober rollback [--list] [--timeout SECONDS] [SNAPSHOT]
 `ober apply` renders the configs from `ober.yaml`, shows the diff, runs `haproxy -c` (and
 `keepalived -t`), reloads and waits for 3 good `/health` checks. Any failure writes the old
 files back and reloads again. `ober rollback` restores a stored state (default: the one before
-the newest) with the same checks. See
+the newest) with the same checks. When the only change in `haproxy.cfg` is servers added to or
+removed from a backend (with IP addresses), `apply` uses the HAProxy runtime API instead of a
+reload: `add server`, `enable health`, `enable server`, or `set server ... state maint`, a drain
+of up to `--timeout` seconds and `del server`. Any unexpected answer falls back to the reload.
+See
 [Operations](operations.md#change-the-configuration-apply-and-rollback).
 
 | Option | Default | Description |
@@ -131,6 +136,27 @@ the same on all nodes. Exit 0 (OK), 1 (WARN) or 2 (CRIT), like `ober status --ch
 |--------|---------|-------------|
 | `--nodes` | `nodes` in `ober.yaml` (keepalived: `local_ip` plus the peers) | Comma-separated nodes |
 | `--timeout` | `10` | SSH connect timeout in seconds |
+
+## ober cluster upgrade
+
+```text
+ober cluster upgrade [--nodes LIST] [--command CMD] [--timeout SECONDS] [--dry-run] [-y]
+```
+
+Runs the [rolling upgrade](operations.md#rolling-upgrade) on each node, this node last. It
+starts only when `ober cluster status` is OK. Per node: `ober maintenance on`, wait until the
+node announces no route and is MASTER for no VIP, `sudo -n sh -c CMD`, `ober upgrade -y`,
+`ober restart --hard` (BGP mode, or when `ober upgrade` asks for a restart), `ober doctor`,
+`ober maintenance off`, and wait until `ober cluster status` is OK. It stops at the first
+failure and leaves that node in maintenance.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--nodes` | `nodes` in `ober.yaml` | Comma-separated nodes |
+| `--command` | `PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade herr-ober` | Package upgrade command, run as root |
+| `--timeout` | `300` | Seconds to wait for the drain and for cluster OK |
+| `--dry-run` | | Show the steps, change nothing |
+| `-y`, `--yes` | | Do not ask for confirmation |
 
 ## ober sync
 
@@ -283,7 +309,7 @@ Validates the configuration and tests connectivity without starting services:
 ## ober upgrade
 
 ```text
-ober upgrade [--check-only]
+ober upgrade [--check-only] [-y]
 ```
 
 Re-renders the systemd units (so nodes bootstrapped earlier get the new templates), checks for
@@ -295,6 +321,7 @@ the [rolling upgrade](operations.md#rolling-upgrade).
 | Option | Description |
 |--------|-------------|
 | `--check-only` | Only check for updates, don't install (no root needed) |
+| `-y`, `--yes` | Install updates without asking |
 
 ## ober uninstall
 

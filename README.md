@@ -158,6 +158,7 @@ ober config --non-interactive  # Validate ober.yaml and render all configs, no p
 ober status               # Show current state (--json for scripting)
 ober metrics [--output F] # Node state for Prometheus (deploy/prometheus/alerts.yml)
 ober cluster status       # All nodes over SSH: VIP placement, drift (set nodes: in ober.yaml)
+ober cluster upgrade      # Rolling upgrade of all nodes, this node last (see Rolling upgrade)
 ober apply [-f FILE|-]    # Apply ober.yaml: diff, check, reload, health gate, auto roll back
 ober push                 # ober apply on the other nodes, one at a time; stops at a failure
 ober rollback [--list]    # Go back to the state before the last apply
@@ -269,14 +270,18 @@ alert in `deploy/prometheus/alerts.yml` under 21 days.
 
 ### Rolling upgrade
 
-Upgrade one node at a time. There is no single command for this. On each node:
+Upgrade one node at a time. `sudo ober cluster upgrade` runs the steps below on each node over
+SSH (this node last) and stops at the first failure, which leaves that node in maintenance.
+`--command` sets the package upgrade command (default: the pipx command in step 3), `--nodes`
+limits the nodes, `--timeout` (300 s) limits each wait, and `--dry-run` shows the steps. The
+steps by hand, on each node:
 
 1. `sudo ober cluster status` must exit 0 (OK) before you start.
 2. `sudo ober maintenance on`. Wait until `sudo ober maintenance status` shows no announced
    routes (BGP) or no MASTER state (keepalived), so the traffic has moved to the other nodes.
 3. As root: `PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade herr-ober` (or
    `pip install -U herr-ober` in the venv).
-4. `sudo ober upgrade`. It re-renders the systemd units and offers HAProxy and ExaBGP updates.
+4. `sudo ober upgrade` (`-y` installs without asking). It re-renders the systemd units and offers HAProxy and ExaBGP updates.
    If it says `ober-http.service` changed, or it installed a new ExaBGP, run
    `sudo ober restart --hard` now, while the node has no traffic.
 5. `sudo ober doctor` must show no failures.

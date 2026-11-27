@@ -222,3 +222,63 @@ def test_apply_file_refuses_invalid_or_other_install_path(node: dict[str, Any]) 
         assert "not valid on this node" in result.output
         assert config.config_path.read_text() == old
         assert not config.config_path.with_name(".ober.yaml.new").exists()
+
+
+CFG = """backend s3
+    balance leastconn
+    default-server check inter 2000ms fall 3 rise 2
+    server a 10.0.0.1:80
+    server b 10.0.0.2:80
+"""
+
+
+def test_server_plan() -> None:
+    added = CFG.replace("server b 10.0.0.2:80", "server c 10.0.0.3:80 weight 5")
+    assert ap.server_plan(CFG, added) == [
+        ("s3", "c", "10.0.0.3:80 check inter 2000ms fall 3 rise 2 weight 5"),
+        ("s3", "b", None),
+    ]
+    assert ap.server_plan(CFG, CFG.replace("10.0.0.2", "rgw:80 x")) is None  # host name
+    assert ap.server_plan(CFG, CFG.replace("leastconn", "roundrobin")) is None
+    assert ap.server_plan(CFG, CFG.replace("10.0.0.2:80", "10.0.0.2:81")) is None  # same name
+    assert ap.server_plan(CFG, CFG) is None
+
+
+def _runtime(answers: dict[str, str]) -> MagicMock:
+    def send(cmd: str) -> str:
+        sent.append(cmd)
+        if cmd.startswith("show stat"):
+            return "# pxname,svname,scur\n"
+        return next((a for k, a in answers.items() if cmd.startswith(k)), "\n")
+
+    sent: list[str] = []
+    runtime = MagicMock(sent=sent)
+    runtime.return_value.send.side_effect = send
+    return runtime
+
+
+def test_apply_adds_and_removes_servers_at_runtime(node: dict[str, Any]) -> None:
+    config = node["config"]
+    _edit(config, "10.0.0.9:7480")
+    runtime = _runtime({"add server": "New server registered.\n", "del server": "Server deleted."})
+    with patch.object(ap, "HAProxyRuntime", runtime):
+        result = CliRunner().invoke(main, ["apply"])
+    assert result.exit_code == 0, result.output
+    assert "Runtime API, no reload: +s3_backend/10.0.0.9_7480, -s3_backend/rgw2_7480" in (
+        result.output
+    )
+    assert ["systemctl", "reload", "ober-http"] not in node["cmds"]
+    add = next(c for c in runtime.sent if c.startswith("add server"))
+    assert add.startswith("add server s3_backend/10.0.0.9_7480 10.0.0.9:7480 check inter")
+    assert runtime.sent[-1] == "del server s3_backend/rgw2_7480"
+    assert "10.0.0.9_7480" in config.haproxy_config_path.read_text()  # a reload keeps it
+
+
+def test_runtime_failure_falls_back_to_reload(node: dict[str, Any]) -> None:
+    _edit(node["config"], "10.0.0.9:7480")
+    runtime = _runtime({"add server": "Backend not found.\n"})
+    with patch.object(ap, "HAProxyRuntime", runtime):
+        result = CliRunner().invoke(main, ["apply"])
+    assert result.exit_code == 0, result.output
+    assert "Runtime API failed" in result.output and "Backend not found." in result.output
+    assert ["systemctl", "reload", "ober-http"] in node["cmds"]
