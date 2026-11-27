@@ -108,8 +108,13 @@ def gather(config: OberConfig, nodes: list[str], timeout: int) -> dict[str, dict
         return dict(zip(nodes, pool.map(one, nodes), strict=True))
 
 
-def evaluate_cluster(ha_mode: str, nodes: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Cluster-wide problems: unreachable or unhealthy nodes, VIP placement, drift."""
+def evaluate_cluster(
+    ha_mode: str, nodes: dict[str, dict[str, Any]], upgrading: bool = False
+) -> dict[str, Any]:
+    """Cluster-wide problems: unreachable or unhealthy nodes, VIP placement, drift.
+
+    ``upgrading``: a rolling upgrade is in progress, so HAProxy and ober versions may differ.
+    """
     problems: list[tuple[str, str]] = []
     ok = {n: s for n, s in nodes.items() if "error" not in s}
     for node, s in nodes.items():
@@ -132,12 +137,12 @@ def evaluate_cluster(ha_mode: str, nodes: dict[str, dict[str, Any]]) -> dict[str
         elif ha_mode == "keepalived" and len(who) > 1:
             problems.append(("CRIT", f"{addr}: MASTER on {len(who)} nodes ({', '.join(who)})"))
 
-    for label, key in (("config", ("config_hash",)), ("HAProxy", ("haproxy", "version"))):
-        values = {_get(s, key) for s in ok.values()}
-        if len(values) > 1:
+    drift: list[tuple[str, tuple[str, ...]]] = [("config", ("config_hash",))]
+    if not upgrading:
+        drift += [("HAProxy", ("haproxy", "version")), ("ober version", ("ober", "version"))]
+    for label, key in drift:
+        if len({_get(s, key) for s in ok.values()}) > 1:
             problems.append(("WARN", f"{label} differs between nodes"))
-    if len({_get(s, ("ober", "version")) for s in ok.values()}) > 1:
-        problems.append(("WARN", "ober version differs between nodes"))
 
     level = max((p[0] for p in problems), key=LEVELS.__getitem__, default="OK")
     summary = (
@@ -377,7 +382,8 @@ def cluster_upgrade(
         click.confirm(f"Upgrade {', '.join(order)}, one at a time?", abort=True)
 
     def cluster_ok() -> bool:
-        return bool(evaluate_cluster(config.ha_mode, gather(config, names, 10))["level"] == "OK")
+        found = evaluate_cluster(config.ha_mode, gather(config, names, 10), upgrading=True)
+        return bool(found["level"] == "OK")
 
     def stop(node: str, why: str, in_maint: bool = True) -> NoReturn:
         console.print(f"[red]Upgrade stopped at {escape(node)}:[/red] {escape(why)}")

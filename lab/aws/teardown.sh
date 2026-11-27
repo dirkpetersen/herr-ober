@@ -20,6 +20,19 @@ if [ -n "$IIDS" ]; then
 fi
 
 for VPC_ID in $(tagged describe-vpcs 'Vpcs[].VpcId'); do
+    VPCES="$(aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$VPC_ID" \
+        --query 'VpcEndpoints[].VpcEndpointId' --output text)"
+    if [ -n "$VPCES" ]; then
+        log "Deleting VPC endpoints $VPCES"
+        # shellcheck disable=SC2086
+        aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $VPCES >/dev/null
+        for _ in $(seq 1 30); do  # the VPC cannot be deleted while they exist
+            [ -z "$(aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$VPC_ID" \
+                "Name=vpc-endpoint-state,Values=available,pending,deleting" \
+                --query 'VpcEndpoints[].VpcEndpointId' --output text)" ] && break
+            sleep 5
+        done
+    fi
     for sg in $(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" \
         --query "SecurityGroups[?GroupName!='default'].GroupId" --output text); do
         log "Deleting SG $sg"; aws ec2 delete-security-group --group-id "$sg"
@@ -51,7 +64,8 @@ if aws ec2 describe-key-pairs --key-names "$KEY_NAME" >/dev/null 2>&1; then
     aws ec2 delete-key-pair --key-name "$KEY_NAME"
     rm -f "$KEY_FILE"
 fi
-rm -f "$LAB_DIR/inventory" "$LAB_DIR/ssh_config" "$LAB_DIR/known_hosts" "$LAB_DIR"/node_key*
+rm -f "$LAB_DIR/inventory" "$LAB_DIR/ssh_config" "$LAB_DIR/known_hosts" "$LAB_DIR"/node_key* \
+    "$LAB_DIR/lab-ca.pem" "$LAB_DIR/server.pem"
 
 LEFT="$(aws resourcegroupstaggingapi get-resources --tag-filters "Key=Project,Values=$PROJECT" \
     --query 'ResourceTagMappingList[].ResourceARN' --output text)"

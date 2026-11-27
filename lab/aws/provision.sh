@@ -55,7 +55,7 @@ dnf -y -q install bird awscli2 jq iproute tcpdump >/dev/null
         i=$((i + 1))
         printf 'protocol bgp ober%s {\n  local %s as 65000;\n  neighbor %s as 65001;\n' \
             "$i" "$HELPER_IP" "$ip"
-        printf '  hold time 9;\n  keepalive time 3;\n  bfd on;\n'
+        printf '  hold time 9;\n  keepalive time 3;\n  error wait time 5, 30;\n  bfd on;\n'
         printf '  ipv4 { import all; export none; };\n}\n\n'
     done
 } >/etc/bird.conf
