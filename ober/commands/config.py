@@ -1387,6 +1387,19 @@ def _server_host(server: str) -> str:
     return server.rsplit(":", 1)[0].strip("[]")
 
 
+# HAProxy 3.0 on RHEL 10 finds no CA through @system-ca (its cert dir holds only hash
+# symlinks), so every TLS check fails. The distro bundle file works everywhere.
+SYSTEM_CA_BUNDLES = (
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # RHEL, Amazon Linux
+    "/etc/ssl/certs/ca-certificates.crt",  # Debian, Ubuntu
+)
+
+
+def _system_ca() -> str:
+    """The distro CA bundle file, or HAProxy's ``@system-ca`` when none exists."""
+    return next((p for p in SYSTEM_CA_BUNDLES if Path(p).is_file()), "@system-ca")
+
+
 def _server_tls(backend: BackendConfig, server: str) -> str:
     """TLS options for one server line ("" for a plain HTTP backend).
 
@@ -1397,10 +1410,11 @@ def _server_tls(backend: BackendConfig, server: str) -> str:
     """
     if not backend.tls:
         return ""
+    # check-ssl: a server added over the runtime API (apply) does not imply it from ssl
     if backend.tls_verify:
-        opts = f" ssl verify required ca-file {backend.tls_ca_file or '@system-ca'}"
+        opts = f" ssl check-ssl verify required ca-file {backend.tls_ca_file or _system_ca()}"
     else:
-        opts = " ssl verify none"
+        opts = " ssl check-ssl verify none"
     host = _server_host(server)
     if not _is_ip(host):
         opts += f" sni str({host}) check-sni {host}"

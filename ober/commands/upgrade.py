@@ -3,6 +3,7 @@
 
 import json
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import click
@@ -14,6 +15,7 @@ from ober.commands.bootstrap import (
     EXABGP_SPEC,
     _allow_haproxy_backend_ports,
     _create_systemd_services,
+    _get_current_venv_path,
     _own_state_dir,
 )
 from ober.config import OberConfig
@@ -136,7 +138,7 @@ def upgrade(ctx: click.Context, check_only: bool, yes: bool) -> None:
 def _rerender_units(config: OberConfig) -> None:
     """Rewrite the systemd units from the current templates (nodes bootstrapped earlier)."""
     config.ensure_directories()  # older installs lack var/run, which the units now list
-    changed = _create_systemd_services(config, config.venv_path)
+    changed = _create_systemd_services(config, _venv(config))
     # the new ober-http unit runs HAProxy as haproxy_t
     _allow_haproxy_backend_ports(config.install_path)
     _own_state_dir(config)
@@ -262,12 +264,24 @@ def _upgrade_haproxy(system: SystemInfo) -> None:
         console.print("[green]HAProxy upgraded[/green]")
 
 
+def _venv(config: OberConfig) -> Path:
+    """The venv with ExaBGP: ``config.venv_path``, else the venv ober runs in.
+
+    An ober.yaml written by hand or by a tool has no ``venv_path``, so ``config.venv_path`` is
+    ``<install>/venv``, which a pipx or plain venv install never fills. Rendering the units
+    from it gives an ExaBGP path that does not exist, and ober-bgp fails at its next start.
+    """
+    if (config.venv_path / "bin" / "python").exists():
+        return config.venv_path
+    return _get_current_venv_path() or config.venv_path
+
+
 def _venv_pip(config: OberConfig) -> list[str] | None:
     """Return the pip command of the ober venv, or None when the venv is missing.
 
     Uses ``python -m pip`` because pipx venvs have no ``bin/pip``.
     """
-    python = config.venv_path / "bin" / "python"
+    python = _venv(config) / "bin" / "python"
     return [str(python), "-m", "pip"] if python.exists() else None
 
 

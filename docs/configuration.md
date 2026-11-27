@@ -210,7 +210,7 @@ error.
 | `health_check_expect` | `""` | `status <codes>` or `rstatus <regex>`; empty is the HAProxy default (2xx or 3xx) |
 | `tls` | `false` | HTTPS to the servers (AWS S3, RGW behind TLS) |
 | `tls_verify` | `true` | Verify the server cert (CA chain; the host name for servers given by name) |
-| `tls_ca_file` | `""` | CA bundle for a private CA; empty uses the system CAs (`@system-ca`) |
+| `tls_ca_file` | `""` | CA bundle for a private CA; empty uses the distro bundle (`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` or `/etc/ssl/certs/ca-certificates.crt`, else `@system-ca`) |
 
 Backends balance with `leastconn`. The S3 frontends are only generated when VIPs, a
 certificate path and a backend are configured.

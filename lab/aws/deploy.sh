@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy.sh <git-ref>: build a wheel of <git-ref> and install it on the ingress nodes.
-# Amazon Linux 2027 has no pipx package, so ober goes into a plain venv at /opt/herr-ober
+# Not pipx (Amazon Linux 2027 has none), so it matches the earlier lab runs:, so ober goes into a plain venv at /opt/herr-ober
 # (outside /root and /home, so the units can keep ProtectHome=true) and `ober` is linked
 # into /usr/local/bin. Configuration is a separate step (ober bootstrap / ober config).
 set -euo pipefail
@@ -25,6 +25,8 @@ set -euo pipefail
 /opt/herr-ober/bin/pip -q install --force-reinstall --no-deps "$1"
 /opt/herr-ober/bin/pip -q install "$1"
 ln -sf /opt/herr-ober/bin/ober /usr/local/bin/ober
+# RHEL sudo has no /usr/local/bin in secure_path; same link as install.sh makes
+[ -e /usr/bin/ober ] || ln -s /usr/local/bin/ober /usr/bin/ober
 ober --version
 EOF
 done

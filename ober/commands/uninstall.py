@@ -199,6 +199,12 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
         except OSError as e:
             console.print(f"  [yellow]Could not remove {ober_symlink}: {e}[/yellow]")
 
+    # install.sh links /usr/bin/ober where sudo's secure_path has no /usr/local/bin (RHEL)
+    sudo_link = Path("/usr/bin/ober")
+    if sudo_link.is_symlink() and sudo_link.readlink() == ober_symlink:
+        sudo_link.unlink()
+        console.print(f"  [green]Removed {sudo_link}[/green]")
+
     # Step 8: Remove pipx package (must be last - removes running code!)
     if has_pipx:
         console.print("Removing pipx package...")

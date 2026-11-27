@@ -191,3 +191,15 @@ These were not in the list above. Each one is the default the work used.
   `--firewall` opens 3784/udp (the router sends its own BFD packets, they are not replies).
   Single-hop only; multihop (4784/udp) is not supported. SELinux on AlmaLinux 10 is not yet
   checked on a node (expected: bfdd runs as `frr_t`, `/etc/frr` is `frr_conf_t`).
+- **AlmaLinux 10 lab (wave 3).** (a) Empty `tls_ca_file` now renders the distro CA bundle file
+  (`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`, else
+  `/etc/ssl/certs/ca-certificates.crt`, else `@system-ca`): with HAProxy 3.0.5 on AlmaLinux 10,
+  `@system-ca` loads no CAs and every TLS check fails ("SSL handshake failure"). (b) `install.sh`
+  links `/usr/bin/ober` when sudo's `secure_path` lacks `/usr/local/bin` (RHEL default), so
+  `sudo ober` and the remote `sudo -n ober` work; `ober uninstall` removes only that link.
+  (c) RHEL 10 ships HAProxy 3.0.5 and keepalived 2.2.8; bootstrap installs them as is
+  (default: no third-party repo), `ober doctor` warns "recommend 3.3+". (d) TLS server lines
+  carry `check-ssl` (runtime-added servers do not imply it). (e) `ober cluster upgrade` ignores
+  ober and HAProxy version drift while it waits for OK; config drift still blocks. (f) `ober
+  upgrade` renders the units with the running venv when `<install>/venv` is not a venv (an
+  ober.yaml without `venv_path`).

@@ -16,20 +16,26 @@ KEY_FILE="$HOME/.ssh/herr-ober-lab.pem"
 SSH_CONFIG="$LAB_DIR/ssh_config"
 KNOWN_HOSTS="$LAB_DIR/known_hosts"
 
-# AMI name patterns: newest AL2027 preview (not minimal) arm64, kernel 7.2.
-AMI_PATTERN="al2027-preview-ami-2027.0.*-kernel-7.2-arm64"
+# Newest official AlmaLinux 10 arm64 AMI (owner: AlmaLinux OS Foundation). Login: ec2-user.
+AMI_OWNER="764336703387"
+AMI_PATTERN="AlmaLinux OS 10.* aarch64"
+
+# AWS S3 is the backend. Tests write and delete only under BUCKET/TEST_PREFIX.
+BUCKET="hcic-townhall"
+TEST_PREFIX="herr-ober-test/"
+S3_HOST="s3.$AWS_REGION.amazonaws.com"
 
 # name:type:private-ip:root-GB
 NODES=(
-    "ober1:t4g.medium:10.77.1.11:8"
-    "ober2:t4g.medium:10.77.1.12:8"
-    "ober3:t4g.medium:10.77.1.13:8"
-    "helper:t4g.small:10.77.1.10:20"
+    "ober1:t4g.medium:10.77.1.11:10"
+    "ober2:t4g.medium:10.77.1.12:10"
+    "ober3:t4g.medium:10.77.1.13:10"
+    "helper:t4g.small:10.77.1.10:12"
 )
 INGRESS_NODES=(ober1 ober2 ober3)
 HELPER_IP="10.77.1.10"
 
-# VIPs live outside the VPC CIDR; the helper routes them to the nodes via BGP.
+# VIPs live outside the VPC CIDR; the helper (bird2) routes them to the nodes via BGP.
 VIPS=(10.99.0.100 10.99.0.101)
 
 TAGS="{Key=Project,Value=$PROJECT}"

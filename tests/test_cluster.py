@@ -82,6 +82,10 @@ def test_unreachable_node_and_drift() -> None:
     assert "config differs between nodes" in check["problems"]
     assert "ober version differs between nodes" in check["problems"]
     assert "HAProxy differs between nodes" not in check["problems"]
+    # a rolling upgrade expects version drift, but not config drift
+    during = evaluate_cluster("keepalived", nodes, upgrading=True)["problems"]
+    assert "ober version differs between nodes" not in during
+    assert "config differs between nodes" in during
 
 
 def test_gather_reads_remote_and_reports_ssh_errors(temp_dir: Path) -> None:
