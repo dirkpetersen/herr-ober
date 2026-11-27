@@ -203,12 +203,30 @@ def test_upgrade_rerenders_units_and_reenables_ha_unit(temp_dir: Path) -> None:
         patch.object(up, "run_command") as run,
         patch.object(up, "_allow_haproxy_backend_ports") as sebool,
         patch.object(up, "_own_state_dir"),
+        patch.object(up, "_get_current_venv_path", return_value=None),
     ):
         svc.from_service_name.return_value.is_enabled = True
         up._rerender_units(config)
     sebool.assert_called_once_with(config.install_path)
     cs.assert_called_once_with(config, config.venv_path)
     run.assert_called_once_with(["systemctl", "enable", "ober-bgp"], check=False)
+
+
+def test_upgrade_units_use_running_venv_without_venv_path(temp_dir: Path) -> None:
+    # ober.yaml without venv_path, <install>/venv empty: the units must use the running venv
+    config = OberConfig(install_path=temp_dir)
+    (temp_dir / "venv").mkdir()
+    with (
+        patch.object(up, "_create_systemd_services", return_value=[]) as cs,
+        patch.object(up, "ServiceInfo"),
+        patch.object(up, "run_command"),
+        patch.object(up, "_allow_haproxy_backend_ports"),
+        patch.object(up, "_own_state_dir"),
+        patch.object(up, "_get_current_venv_path", return_value=Path("/opt/herr-ober")),
+    ):
+        up._rerender_units(config)
+        assert up._venv_pip(config) is None  # /opt/herr-ober/bin/python does not exist here
+    cs.assert_called_once_with(config, Path("/opt/herr-ober"))
 
 
 def test_exabgp_check_offers_install_when_missing(temp_dir: Path) -> None:
