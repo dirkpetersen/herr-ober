@@ -299,6 +299,35 @@ rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every
 client and RGW connection.
 
+### AWS S3 or TLS backends
+
+A backend can use HTTPS, so Herr Ober can front AWS S3 or an RGW behind TLS. Example for
+AWS S3 in us-west-2:
+
+```yaml
+security:
+  s3_hostnames: [s3.us-west-2.amazonaws.com]   # cert and SAN checks use these names
+certs:
+  path: /etc/ober/certs/s3.pem                  # a cert for s3.us-west-2.amazonaws.com
+backends:
+  - name: aws_s3
+    servers: ["s3.us-west-2.amazonaws.com:443"]
+    tls: true                     # HTTPS to the servers
+    tls_verify: true              # default: verify with the system CAs (@system-ca)
+    tls_ca_file: ""               # or a CA bundle for an RGW with a private CA
+    health_check_expect: "rstatus ^[234]"   # optional: S3 answers GET / with 307 or 403
+```
+
+- SigV4 signs the Host header. Herr Ober passes Host unchanged, so clients must sign for the
+  AWS name, and that name must resolve to the VIP (hosts file or private DNS).
+- Clients then expect a cert for the AWS name from Herr Ober. Use a private CA that the clients
+  trust, or for a test a self-signed cert and `aws --no-verify-ssl`.
+- The SNI to the backend is the server's host name, which the AWS cert covers (also
+  `*.s3.us-west-2.amazonaws.com`), so path-style and virtual-host style requests both work.
+- TLS servers given by host name are resolved again through DNS (`resolvers sys`), because S3
+  IP addresses change. Plain HTTP backends resolve names only at start. An IP server gets no
+  SNI, so only the CA chain is verified.
+
 <!-- --8<-- [end:operations] -->
 
 ### Checking Health

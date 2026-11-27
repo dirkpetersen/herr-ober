@@ -161,3 +161,14 @@ These were not in the list above. Each one is the default the work used.
   certificates, rolling upgrade, firewall); `architecture.md` and `deploy/sentinel/README.md`
   are included whole. Pages deploy through GitHub Actions (no gh-pages branch), so the repo
   needs Settings > Pages > Source: "GitHub Actions" (default: not set until the owner sets it).
+- **TLS to backends (wave 3).** New `backends[].tls` (default off), `tls_verify` (on),
+  `tls_ca_file` (empty: HAProxy `@system-ca`, the same on Debian and RHEL) and
+  `health_check_expect` (empty: HAProxy default, 2xx/3xx). The SNI is the server's host name
+  (`sni str(host)`, `check-sni host`), not the client's Host: the AWS cert covers the endpoint
+  and `*.endpoint`, and a fixed SNI works for bucket names with dots. Host is passed unchanged
+  (SigV4). Only TLS servers given by name get runtime DNS (`resolvers sys`, `parse-resolv-conf`,
+  `init-addr last,libc,none`, `resolve-prefer ipv4`); plain backends keep resolve-at-start, so
+  names only in /etc/hosts never go to MAINT on a DNS NX. IP servers get no SNI: only the CA
+  chain is verified. Checked with HAProxy 3.3 (OpenSSL) against the real
+  `s3.us-west-2.amazonaws.com`: L7OK (GET / gives 307), bucket requests reach AWS with Host
+  kept. Not checked with an AWS-LC build.

@@ -130,6 +130,10 @@ class BackendConfig:
     rise: int = 2  # good checks before it is marked up again
     slowstart_s: int = 10  # ramp-up time for a recovered server (0 = off)
     maxconn: int = 0  # per-server connection limit, extra requests queue (0 = no limit)
+    health_check_expect: str = ""  # e.g. "rstatus ^[234]"; empty = HAProxy default (2xx/3xx)
+    tls: bool = False  # HTTPS to the servers (AWS S3, RGW behind TLS)
+    tls_verify: bool = True  # verify the server cert (CA chain, and the host name for hostnames)
+    tls_ca_file: str = ""  # CA bundle for a private CA; empty = the system CAs (@system-ca)
 
 
 @dataclass
@@ -749,6 +753,23 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
         for name, low in (("fall", 1), ("rise", 1), ("slowstart_s", 0), ("maxconn", 0)):
             value = getattr(backend, name)
             need(_in_range(value, low, 1000000), f"{key}.{name}", f"must be >= {low}", value)
+        need(
+            isinstance(backend.health_check_expect, str)
+            and (
+                not backend.health_check_expect
+                or bool(re.match(r"^r?status [^\s]+$", backend.health_check_expect))
+            ),
+            f"{key}.health_check_expect",
+            "must be empty, 'status <codes>' or 'rstatus <regex>'",
+            backend.health_check_expect,
+        )
+        need(
+            isinstance(backend.tls_ca_file, str)
+            and (not backend.tls_ca_file or bool(re.match(r"^/\S+$", backend.tls_ca_file))),
+            f"{key}.tls_ca_file",
+            "must be empty or an absolute path without spaces",
+            backend.tls_ca_file,
+        )
         names = [server_name(str(s)) for s in backend.servers]
         need(
             len(names) == len(set(names)),
