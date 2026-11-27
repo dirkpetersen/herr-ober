@@ -215,3 +215,31 @@ first node in, then the others: the kernel kept 1 next hop until the 60 s scan).
   ("BFD session down"); it comes back without BFD after the error wait.
 - HAProxy 3.0.5 is the only HAProxy on EL10; no HAProxy 3.3 build was tested on Alma.
 - The lab cert expires after 30 days, the lab CA after 90.
+
+# 2026-11-27: HAProxy 3.4 on AlmaLinux 10 and Ubuntu 26.04
+
+Same lab (3 x t4g.medium arm64, bird helper with BFD, AWS S3 backend over TLS, BGP mode).
+First AlmaLinux 10.3 (HAProxy 3.0.5 rolled to 3.4.8), then the nodes replaced with Ubuntu 26.04
+(`NODE_OS=ubuntu`, fresh bootstrap).
+
+| Test | AlmaLinux 10.3 | Ubuntu 26.04 |
+|---|---|---|
+| HAProxy source | `deploy/el10-haproxy/build-rpm.sh` on the helper: Fedora 3.4.8 SRPM, ~6 min on t4g.small | `ppa:vbernat/haproxy-3.4` (3.4.9), added by `ober bootstrap` |
+| TLS library (`ober doctor`) | OpenSSL 3.5.9 | OpenSSL 3.5.5 |
+| Install | `ober cluster upgrade --command "dnf install -y <rpm>"` from 3.0.5, 95 s | fresh `ober bootstrap` (also installed `frr` itself, first time tested) |
+| Probe every 0.2 s during the rolling upgrade | 479 / 479 OK | 430 / 430 OK (`--reinstall haproxy`, 75 s) |
+| SELinux | 0 AVC denials (the RPM keeps `/usr/sbin/haproxy`, `haproxy_exec_t`) | n/a |
+| `haproxy -c`, cluster status, BFD peers up, 3-way ECMP | pass | pass |
+| S3 GET 168 MB video / PUT+GET 64 MiB under `herr-ober-test/` | 1.2 s / identical | 1.5 s / identical |
+| Runtime add + del of a TLS server (`ober apply`) | no reload, UP L7OK, same master PID | same |
+| BFD: node loses the router | route removed after 1.5 s | 1.0 s |
+| Reboot ober2 | not repeated | services up, route back to 3 paths, `ober status` OK |
+| Distro `haproxy`/`frr` units after the package (re)install | stay disabled | stay disabled |
+
+Findings:
+
+1. The 3.4 PPA builds only for 26.04 (resolute). Adding it on 24.04 makes `apt-get update` fail
+   ("does not have a Release file"), so bootstrap keeps the 3.3 PPA on noble.
+2. Fedora's spec puts halog/iprange in `%{_bindir}` (Fedora merged `/usr/sbin`); on EL10 they are
+   in `%{_sbindir}`. `build-rpm.sh` fixes the three `%files` lines; nothing else changes.
+3. `ausearch` without a terminal reads stdin and hangs; use `ausearch --input-logs`.
