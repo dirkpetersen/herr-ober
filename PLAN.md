@@ -129,6 +129,27 @@ firewall and sysctl functions in `bootstrap.py`, and loading in `ober/config.py`
 - **Lower priority:** 3.6 sub-second detection (FRR bfdd) as a design decision, 3.9 `arp_ignore`/`arp_announce`, 8.5 watchdog drop-in plus re-exec, 8.6 SELinux, 8.7 persist NIC tuning.
 - **Docs:** 10.4 stale claims, to be done on or after the `docs/zensical` branch (which already lists most of them).
 
+## Wave 3 (owner request 2026-11-27)
+
+Waves 1 and 2 are merged and released as 0.4.0. Wave 3 is tested on AlmaLinux 10 in the AWS lab,
+with herr-ober as the frontend to the AWS S3 bucket `hcic-townhall` (us-west-2).
+
+- **3.6 BFD:** sub-second detection of a dead node or link in BGP mode. ExaBGP has no BFD, so
+  each node runs FRR `bfdd` (BFD only, no FRR BGP) toward the BGP neighbors. The router side
+  (bird2 in the lab) ties BFD to the BGP session. `bgp.bfd_enabled` becomes real.
+- **Rolling upgrade command:** `ober cluster upgrade` runs the 9.3 runbook node by node: cluster
+  status OK, maintenance on, wait for drain, upgrade the package, `ober upgrade`, restart when
+  needed, doctor, maintenance off, wait for cluster status OK. It stops at the first failure.
+- **5.4 runtime servers:** when `ober apply` only adds or removes backend servers, it uses the
+  HAProxy runtime API (`add server`, `enable server`, `del server`) instead of a reload, then
+  writes `haproxy.cfg` so a later reload gives the same state.
+- **TLS to backends:** a backend server can be HTTPS (verify with the system CA, SNI, Host
+  header kept), so AWS S3 or RGW with TLS can be a backend. Health check fits S3.
+- **Lab on AlmaLinux 10:** 3 ingress nodes plus a helper with bird2 (BGP, ECMP, BFD). Backend:
+  `s3.us-west-2.amazonaws.com:443`. Clients sign for the AWS name, which resolves to the VIP
+  (SigV4 binds the host name). Tests write only under the prefix `herr-ober-test/` and remove
+  only that prefix. Test access is from the helper over SSH; no public endpoint.
+
 ## Lab (AWS)
 
 - **Account:** us-west-2, profile `iam-dirk` on the old server. Set `AWS_PROFILE` on the new one.
