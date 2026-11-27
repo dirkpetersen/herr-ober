@@ -177,10 +177,10 @@ def _check_haproxy() -> dict[str, Any]:
     if version:
         tls = get_haproxy_tls_library()  # distro and PPA builds use OpenSSL, not AWS-LC
         shown = f"{version}, TLS: {tls}" if tls else version
-        # Recommend version 3.3+
+        # Recommend version 3.4+ (LTS)
         try:
             major, minor = map(int, version.split(".")[:2])
-            if (major, minor) >= (3, 3):
+            if (major, minor) >= (3, 4):
                 return {
                     "name": "HAProxy",
                     "passed": True,
@@ -192,7 +192,7 @@ def _check_haproxy() -> dict[str, Any]:
                 "name": "HAProxy",
                 "passed": True,
                 "status": "installed (old)",
-                "message": f"Version {shown} (recommend 3.3+)",
+                "message": f"Version {shown} (recommend 3.4+)",
                 "critical": False,
             }
         except (ValueError, IndexError):

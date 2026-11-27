@@ -97,7 +97,9 @@ For later upgrades of a running cluster, follow the
 2. Writes kernel tuning to `/etc/sysctl.d/99-herr-ober.conf` (including conntrack limits) and
    applies it (see [Architecture](architecture.md)).
 3. Installs `haproxy` and `keepalived` from the OS packages and disables their distro units.
-   On Ubuntu it first adds `ppa:vbernat/haproxy-3.3`. On RHEL it keeps SELinux enforcing and
+   On Ubuntu it first adds `ppa:vbernat/haproxy-3.4` (on 24.04 `-3.3`, because the 3.4 PPA
+   builds only for 26.04 and later). RHEL 10 ships HAProxy 3.0: install the 3.4 RPM first (see
+   the README section "HAProxy 3.4 on RHEL 10"). On RHEL it keeps SELinux enforcing and
    loads the `herr_ober` policy module (see [Architecture](architecture.md#d-selinux-rhel-only)).
 4. Installs ExaBGP with pip into the venv `ober` runs from (`exabgp>=4.2,<5`).
 5. Writes the systemd units `ober-http`, `ober-bgp` and `ober-ha` (plus the `ober watch` and

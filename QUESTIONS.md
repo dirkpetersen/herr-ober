@@ -203,3 +203,15 @@ These were not in the list above. Each one is the default the work used.
   ober and HAProxy version drift while it waits for OK; config drift still blocks. (f) `ober
   upgrade` renders the units with the running venv when `<install>/venv` is not a venv (an
   ober.yaml without `venv_path`).
+
+## HAProxy 3.4 (LTS) is the target (2026-11-27)
+
+- **Ubuntu:** `ppa:vbernat/haproxy-3.4` builds only for 26.04 (resolute) and later. Bootstrap uses
+  `-3.3` on 24.04 (noble), because adding a PPA without a build for the release breaks
+  `apt-get update`. CI runs on `ubuntu-26.04`.
+- **EL10:** no 3.4 package exists (AlmaLinux 10 ships 3.0.5). `deploy/el10-haproxy/build-rpm.sh`
+  rebuilds the Fedora rawhide source RPM (Fedora packaging, upstream source, system OpenSSL 3.5);
+  the only change is the admin tool paths (Fedora merged `/usr/sbin`). Not a third-party COPR.
+- `ober doctor` recommends 3.4+. 3.3 still works (all live tests pass on it).
+- A live test fails when `haproxy -c` prints any WARNING for the generated config, so a new release
+  that deprecates a keyword shows up in CI.

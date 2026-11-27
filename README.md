@@ -8,7 +8,7 @@
 
 **High-Performance S3 Ingress Controller (BGP/ECMP or VRRP)**
 
-Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.3** (the Ubuntu PPA and distro builds use OpenSSL; `ober doctor` shows the TLS library) for SSL offloading with two HA modes:
+Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.4** (the Ubuntu PPA and distro builds use OpenSSL; `ober doctor` shows the TLS library) for SSL offloading with two HA modes:
 
 - **BGP/ECMP Mode** - Uses **ExaBGP** for Layer 3 HA via BGP (requires BGP-capable router)
 - **Keepalived Mode** - Uses **VRRP** for VIP failover (no BGP required)
@@ -76,6 +76,16 @@ sudo ober bootstrap
 Amazon Linux has no NetworkManager, so in BGP mode `ober config` puts the VIPs on `lo-vip`
 with systemd-networkd (`/etc/systemd/network/60-lo-vip.{netdev,network}`). These files match
 only `lo-vip`; the ENI configuration of amazon-ec2-net-utils is not changed.
+
+**HAProxy 3.4 on RHEL 10:** RHEL, AlmaLinux and Rocky 10 ship only HAProxy 3.0. Before
+`ober bootstrap`, build the 3.4 RPM from the Fedora source RPM on one EL10 host of the same CPU
+architecture, and install it on each node (`dnf` then keeps it, because it is newer than 3.0):
+```bash
+sudo deploy/el10-haproxy/build-rpm.sh      # prints /var/tmp/haproxy-rpm.*/RPMS/<arch>/haproxy-3.4*.rpm
+sudo dnf install -y /var/tmp/haproxy-rpm.*/RPMS/*/haproxy-3.4*.rpm
+```
+On Ubuntu, bootstrap uses `ppa:vbernat/haproxy-3.4`. That PPA builds only for 26.04 and later, so
+24.04 gets the 3.3 PPA.
 
 **Upgrading from v0.3.0 or earlier:** re-run the one-liner. The old install lived under
 `/root/.local/pipx`; the installer prints how to keep it

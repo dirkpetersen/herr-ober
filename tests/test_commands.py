@@ -934,7 +934,7 @@ class TestDoctorPrintResults:
             result = _check_haproxy()
             assert result["passed"] is True
             assert "old" in result["status"]
-            assert "3.3+" in result["message"]
+            assert "3.4+" in result["message"]
 
     def test_check_haproxy_invalid_version(self) -> None:
         """Test HAProxy check with invalid version string."""
@@ -1288,6 +1288,22 @@ class TestBootstrapMoreTests:
             calls = [str(call) for call in mock_run.call_args_list]
             # Should have called apt-get install with both packages
             assert any("haproxy" in str(call) and "keepalived" in str(call) for call in calls)
+
+    def test_install_packages_ubuntu_ppa_by_release(self) -> None:
+        """The 3.4 PPA has no noble build; noble keeps the 3.3 PPA."""
+        from ober.commands.bootstrap import _install_packages
+
+        for codename, ppa in (
+            ("noble", "ppa:vbernat/haproxy-3.3"),
+            ("resolute", "ppa:vbernat/haproxy-3.4"),
+        ):
+            system = SystemInfo()
+            system.os_family = OSFamily.DEBIAN
+            system.os_name = "Ubuntu"
+            system.os_codename = codename
+            with patch("ober.commands.bootstrap.run_command") as mock_run:
+                _install_packages(system)
+            assert mock_run.call_args_list[0].args[0] == ["add-apt-repository", "-y", ppa]
 
     def test_install_packages_rhel_includes_keepalived(self) -> None:
         """Test _install_packages installs both HAProxy and Keepalived on RHEL."""

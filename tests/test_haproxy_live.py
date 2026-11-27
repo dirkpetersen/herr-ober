@@ -1018,3 +1018,14 @@ def test_apply_changes_servers_without_reload(monkeypatch: pytest.MonkeyPatch) -
     finally:
         second.shutdown()
         second.server_close()
+
+
+def test_config_check_has_no_warnings(proxy: Proxy) -> None:
+    """A new HAProxy release must not warn about (deprecated) keywords in the generated config."""
+    out = subprocess.run(
+        [HAPROXY, "-c", "-f", str(proxy.config.haproxy_config_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "WARNING" not in out.stdout + out.stderr, out.stdout + out.stderr

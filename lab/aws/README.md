@@ -47,6 +47,6 @@ to reach the others as ec2-user, for `ober push`, `cluster status` and `--all-no
 - BIRD 3.4 misses the kernel update when a route grows from one path to more. The kernel
   protocol scans every 2 s (`scan time 2`), which repairs it. `export settle time 0 ms 10 ms`
   on the table removes BIRD's default 1 s delay before routes reach the kernel.
-- AlmaLinux 10 ships HAProxy 3.0.5 and keepalived 2.2.8 (no 3.3 package); `ober doctor` warns.
+- AlmaLinux 10 ships HAProxy 3.0.5 and keepalived 2.2.8 (no 3.4 package); `ober doctor` warns. `deploy/el10-haproxy/build-rpm.sh` builds 3.4.
 - `deploy.sh` uses a plain venv at `/opt/herr-ober` (not pipx) and links `ober` into
   `/usr/local/bin` and `/usr/bin` (RHEL sudo has no `/usr/local/bin` in `secure_path`).

@@ -8,7 +8,7 @@
 [![Tests](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml/badge.svg)](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml)
 
 Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller
-designed for Ceph RGW clusters. It uses **HAProxy 3.3** for SSL offloading (the Ubuntu PPA and distro builds use OpenSSL;
+designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading (the Ubuntu PPA and distro builds use OpenSSL;
 `ober doctor` shows the TLS library) and one of two high-availability modes:
 
 - **BGP/ECMP mode** uses **ExaBGP** for Layer 3 HA via BGP (requires a BGP-capable router).
@@ -40,7 +40,7 @@ Each node runs these systemd services:
 
 | Service | Component | Role |
 |---------|-----------|------|
-| `ober-http` | HAProxy 3.3 | SSL offloading, S3 frontends, proxying to the Ceph RGW backends |
+| `ober-http` | HAProxy 3.4 | SSL offloading, S3 frontends, proxying to the Ceph RGW backends |
 | `ober-bgp` | ExaBGP | BGP mode only: announces the shared VIP(s) to the router |
 | `ober-ha` | Keepalived | Keepalived mode only: VRRP failover of one VIP per node |
 

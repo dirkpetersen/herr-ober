@@ -364,12 +364,13 @@ def _apply_kernel_tuning() -> None:
 def _install_packages(system: SystemInfo) -> None:
     """Install HAProxy and keepalived using the appropriate package manager."""
     if system.os_family == OSFamily.DEBIAN:
-        # Add HAProxy PPA for 3.3 on Ubuntu (the PPA build uses OpenSSL, not AWS-LC)
+        # HAProxy PPA on Ubuntu (OpenSSL build). The 3.4 PPA has no 24.04 (noble) build.
         if "ubuntu" in system.os_name.lower():
-            ppa = run_command(["add-apt-repository", "-y", "ppa:vbernat/haproxy-3.3"], check=False)
-            if ppa.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
+            ppa = "ppa:vbernat/haproxy-" + ("3.3" if system.os_codename == "noble" else "3.4")
+            added = run_command(["add-apt-repository", "-y", ppa], check=False)
+            if added.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
                 console.print(
-                    "[yellow]Warning:[/yellow] cannot add ppa:vbernat/haproxy-3.3, using the "
+                    f"[yellow]Warning:[/yellow] cannot add {ppa}, using the "
                     "distro HAProxy. Check its version with 'haproxy -v'."
                 )
         run_command(["apt-get", "update"], check=False)
