@@ -20,14 +20,18 @@ NODE_KEY="$LAB_DIR/node_key"
 [ -f "$NODE_KEY" ] || ssh-keygen -q -t ed25519 -N '' -C herr-ober-lab-nodes -f "$NODE_KEY"
 for name in "${INGRESS_NODES[@]}"; do
     log "Provisioning $name"
-    lab_ssh "$name" sudo dnf -y -q install python3-pip tar jq >/dev/null
+    if [ "$NODE_OS" = ubuntu ]; then
+        lab_ssh "$name" 'sudo apt-get -qq update && sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y python3-venv python3-pip jq >/dev/null'
+    else
+        lab_ssh "$name" sudo dnf -y -q install python3-pip tar jq >/dev/null
+    fi
     lab_scp "$NODE_KEY" "$name:/tmp/node_key"
-    lab_ssh "$name" sudo bash -s -- "'$(cat "$NODE_KEY.pub")'" <<'EOF'
+    lab_ssh "$name" sudo bash -s -- "'$(cat "$NODE_KEY.pub")'" "$NODE_USER" <<'EOF'
 set -euo pipefail
 install -d -m 700 /root/.ssh
 install -m 600 /tmp/node_key /root/.ssh/id_ed25519 && rm -f /tmp/node_key
-grep -qF "$1" /home/ec2-user/.ssh/authorized_keys || echo "$1" >>/home/ec2-user/.ssh/authorized_keys
-printf 'Host 10.77.1.*\n    User ec2-user\n    StrictHostKeyChecking accept-new\n' >/root/.ssh/config
+grep -qF "$1" /home/$2/.ssh/authorized_keys || echo "$1" >>/home/$2/.ssh/authorized_keys
+printf 'Host 10.77.1.*\n    User %s\n    StrictHostKeyChecking accept-new\n' "$2" >/root/.ssh/config
 EOF
 done
 

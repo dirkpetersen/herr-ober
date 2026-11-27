@@ -23,6 +23,7 @@ public IP. VIPs are `10.99.0.100` and `10.99.0.101`, outside the VPC CIDR `10.77
 ```bash
 export AWS_PROFILE=iam-dirk          # default in lib.sh
 lab/aws/up.sh                        # create or reconcile, then provision.sh
+NODE_OS=ubuntu lab/aws/up.sh         # ingress nodes on Ubuntu 26.04 instead (helper stays Alma)
 lab/aws/deploy.sh HEAD               # build a wheel of a git ref, install on the nodes
 lab/aws/configure.sh bgp             # bootstrap, ober.yaml + ober.local.yaml, cert, start
 lab/aws/configure.sh keepalived      # switch mode (rewrites ober.yaml)
@@ -39,6 +40,9 @@ vars over ssh stdin; nothing is written on the helper. **Tests write and delete 
 `up.sh` writes `inventory`, `ssh_config`, `known_hosts` and `node_key` (root on each node uses it
 to reach the others as ec2-user, for `ober push`, `cluster status` and `--all-nodes`) here
 (git-ignored) and the key to `~/.ssh/herr-ober-lab.pem`. `teardown.sh` removes all of them.
+
+`NODE_OS` (alma or ubuntu) is saved in `node_os` for the later scripts. To switch, terminate the
+three ingress nodes first (up.sh refuses a node with another `LabOS` tag), then run up.sh.
 
 ## Known limits
 

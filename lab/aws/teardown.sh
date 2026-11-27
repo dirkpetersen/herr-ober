@@ -64,7 +64,7 @@ if aws ec2 describe-key-pairs --key-names "$KEY_NAME" >/dev/null 2>&1; then
     aws ec2 delete-key-pair --key-name "$KEY_NAME"
     rm -f "$KEY_FILE"
 fi
-rm -f "$LAB_DIR/inventory" "$LAB_DIR/ssh_config" "$LAB_DIR/known_hosts" "$LAB_DIR"/node_key* \
+rm -f "$LAB_DIR/inventory" "$LAB_DIR/ssh_config" "$LAB_DIR/known_hosts" "$LAB_DIR"/node_key* "$LAB_DIR/node_os" \
     "$LAB_DIR/lab-ca.pem" "$LAB_DIR/server.pem"
 
 LEFT="$(aws resourcegroupstaggingapi get-resources --tag-filters "Key=Project,Values=$PROJECT" \
