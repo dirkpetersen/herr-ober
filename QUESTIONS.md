@@ -114,19 +114,25 @@ These were not in the list above. Each one is the default the work used.
   (`run --deploy-hook`, `LEGO_HOOK_CERT_PATH`); the hook also reads the lego v4 names
   (`LEGO_CERT_PATH`). Not built into ober: no new dependency, and lego already handles ACME.
   The unused `watchdog` dependency is removed (nothing watches the certificate files).
-- **Rolling upgrade (9.3):** a runbook in README.md ("Rolling upgrade"), no
-  `ober upgrade --rolling` command. Each step needs a human check (cluster status, doctor), and
-  a script would only chain the existing commands. In BGP mode the runbook does
-  `ober restart --hard` while the node is in maintenance, so the ExaBGP health process runs the
-  new code (an old one without SIGHUP support dies on the next `ober apply` and ExaBGP starts it
-  again).
+- **Rolling upgrade (9.3), now a command:** `ober cluster upgrade` runs the README runbook node
+  by node (this node last) and stops at the first failure, which leaves that node in
+  maintenance. The package command is `--command` (default: the pipx command of the runbook).
+  `ober restart --hard` runs always in BGP mode (the health process gets the new code) and in
+  keepalived mode only when `ober upgrade` asks for a restart. Each wait (drain, cluster OK) has
+  `--timeout`, default 300 s. `ober upgrade` got `-y`, because the prompt cannot work over SSH.
 - **PPA (9.4), kept:** when `ppa:vbernat/haproxy-3.3` cannot be added, bootstrap warns and uses
   the distro HAProxy. Failing would block every new Ubuntu release until the PPA has a build.
   `ober doctor` shows the HAProxy version and TLS library, and `ober cluster status` shows
   version drift between nodes.
-- **Runtime add/del server (5.4), skipped:** the master-worker reload is hitless, `ober apply`
-  already reloads with a health gate and rollback, and the `server-state-file` keeps drains over
-  the reload. Runtime-only servers would also differ from `haproxy.cfg` until the next render.
+- **Runtime add/del server (5.4), now in `ober apply`:** used only when servers added to or
+  removed from a backend are the only change in `haproxy.cfg` (the other generated files are
+  the same) and each new server has an IP address (HAProxy cannot resolve a host name at runtime
+  without a `resolvers` section). New servers get the `default-server` options on the
+  `add server` line, because dynamic servers do not inherit them. A removed server goes to
+  maint and is deleted after its sessions reach 0, or after `--timeout` (then `del server`
+  fails and apply reloads). Any unexpected answer falls back to the normal reload, which also
+  restores on failure. The health gate stays. The server state file is saved before the runtime
+  steps (a fallback reload must not load a half-added server in maint) and after them.
 - **Generic loader (10.1) and pure renderers (10.3), skipped:** no user gain now. The loader is
   already generic over the dataclass fields (wave 1). The keepalived renderer still reads the
   node identity itself; tests mock it.

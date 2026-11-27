@@ -7,10 +7,14 @@ announced by the right number of nodes, and do the nodes run the same config and
 """
 
 import json
+import shlex
 import socket
 import subprocess
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from functools import partial
+from typing import Any, NoReturn
 
 import click
 import yaml
@@ -24,6 +28,7 @@ from ober.config import PER_NODE_KEYS, OberConfig
 console = Console()
 
 REMOTE_STATUS = "sudo -n ober --json status"
+PIPX_UPGRADE = "PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade herr-ober"
 
 
 def cluster_nodes(config: OberConfig) -> list[str]:
@@ -288,3 +293,119 @@ def push(ctx: click.Context, nodes: str | None, timeout: int, yes: bool) -> None
                 console.print(f"Not pushed: {', '.join(rest)}", markup=False)
             ctx.exit(1)
     console.print(f"[green]Applied on {len(targets)} node(s).[/green] Check: ober cluster status")
+
+
+def _run_on(node: str, config: OberConfig, cmd: str, timeout: int = 900) -> tuple[int, str]:
+    """Run a shell command on ``node``: over SSH, or with sh on this node."""
+    argv = ["sh", "-c", cmd] if _is_local(node, config) else [*_ssh(node, 10), cmd]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, str(e)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def _wait(check: Callable[[], bool], timeout: int) -> bool:
+    deadline = time.time() + timeout
+    while True:
+        if check():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(5)
+
+
+def _drained(config: OberConfig, node: str) -> bool:
+    """True when ``node`` announces no route (BGP) and is MASTER for no VIP (keepalived)."""
+    s = gather(config, [node], 10)[node]
+    return "error" not in s and not any(
+        v.get("announced") or v.get("vrrp_state") == "MASTER" for v in s.get("vips", [])
+    )
+
+
+@cluster.command("upgrade")
+@click.option("--nodes", help="Comma-separated nodes (default: 'nodes' in ober.yaml).")
+@click.option(
+    "--command",
+    "package_cmd",
+    default=PIPX_UPGRADE,
+    show_default=True,
+    help="Shell command that upgrades the herr-ober package (run as root).",
+)
+@click.option(
+    "--timeout", default=300, show_default=True, help="Seconds to wait for drain and for OK."
+)
+@click.option("--dry-run", is_flag=True, help="Show the steps, change nothing.")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask for confirmation.")
+@click.pass_context
+def cluster_upgrade(
+    ctx: click.Context,
+    nodes: str | None,
+    package_cmd: str,
+    timeout: int,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Rolling upgrade, one node at a time, this node last (README "Rolling upgrade").
+
+    Per node: maintenance on, wait for drain, upgrade the package, 'ober upgrade', a hard
+    restart when needed (always in BGP mode), doctor, maintenance off, and wait until
+    'ober cluster status' is OK. It stops at the first failure and leaves that node in
+    maintenance.
+    """
+    config, _ = load_config_safe()
+    names = [n.strip() for n in nodes.split(",") if n.strip()] if nodes else cluster_nodes(config)
+    if not names:
+        console.print("[red]Error:[/red] No nodes. Set 'nodes:' in ober.yaml or use --nodes.")
+        ctx.exit(1)
+    order = sorted(names, key=lambda n: _is_local(n, config))  # this node last
+    package = "sudo -n sh -c " + shlex.quote(package_cmd)
+    restart = "sudo -n ober restart --hard"
+    if dry_run:
+        click.echo(f"Order: {', '.join(order)}. Per node:")
+        for line in (
+            "sudo -n ober maintenance on, wait for drain",
+            package,
+            "sudo -n ober upgrade -y",
+            f"{restart} (BGP mode, or when 'ober upgrade' asks for a restart)",
+            "sudo -n ober doctor",
+            "sudo -n ober maintenance off, wait for 'ober cluster status' OK",
+        ):
+            click.echo(f"  {line}")
+        return
+    if not yes:
+        click.confirm(f"Upgrade {', '.join(order)}, one at a time?", abort=True)
+
+    def cluster_ok() -> bool:
+        return bool(evaluate_cluster(config.ha_mode, gather(config, names, 10))["level"] == "OK")
+
+    def stop(node: str, why: str, in_maint: bool = True) -> NoReturn:
+        console.print(f"[red]Upgrade stopped at {escape(node)}:[/red] {escape(why)}")
+        if in_maint:
+            click.echo(f"{node} stays in maintenance. Fix it, then: sudo ober maintenance off")
+        ctx.exit(1)
+
+    def step(node: str, cmd: str) -> str:
+        click.echo(f"$ {cmd}")
+        rc, out = _run_on(node, config, cmd)
+        click.echo(out.rstrip())
+        if rc != 0:
+            stop(node, f"'{cmd}' failed (exit {rc})")
+        return out
+
+    if not cluster_ok():
+        stop(order[0], "'ober cluster status' is not OK; nothing changed.", in_maint=False)
+    for node in order:
+        console.print(f"[bold]== {escape(node)}[/bold]")
+        step(node, "sudo -n ober maintenance on")
+        if not _wait(partial(_drained, config, node), timeout):
+            stop(node, f"traffic did not leave the node within {timeout}s")
+        step(node, package)
+        # BGP: restart always, so the health process runs the new code (README runbook)
+        if "ober restart" in step(node, "sudo -n ober upgrade -y") or config.ha_mode == "bgp":
+            step(node, restart)
+        step(node, "sudo -n ober doctor")
+        step(node, "sudo -n ober maintenance off")
+        if not _wait(cluster_ok, timeout):
+            stop(node, f"'ober cluster status' is not OK within {timeout}s", in_maint=False)
+    console.print(f"[green]Upgraded {len(order)} node(s).[/green] ober cluster status is OK.")

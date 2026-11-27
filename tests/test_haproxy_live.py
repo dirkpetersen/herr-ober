@@ -986,3 +986,35 @@ def test_tls_backend_wrong_ca_stays_down() -> None:
         launch(backend_ca=str(other_ca)),
     ):
         pass
+
+
+def test_apply_changes_servers_without_reload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ober apply's runtime path: one server added, one deleted, same HAProxy process."""
+    from ober.commands import apply as ap
+
+    second = Backend()
+    threading.Thread(target=second.serve_forever, daemon=True).start()
+    try:
+        with launch() as p:
+            monkeypatch.setattr(OberConfig, "admin_socket_path", property(lambda _self: p.sock))
+            cfg = p.config.haproxy_config_path
+            old, pid = cfg.read_text(), p.admin("show info").split("Pid: ")[1].split()[0]
+            p.config.backends[0].servers = [f"127.0.0.1:{second.server_port}"]
+            _generate_haproxy_config(p.config, socket_path=p.sock, https_port=p.port)
+            new = cfg.read_text().replace("    maxconn 100000\n", "    maxconn 10000\n", 1)
+            plan = ap.server_plan(old, new)
+            assert plan is not None and [a is None for _, _, a in plan] == [False, True]
+            assert ap._run_plan(p.config, plan, timeout=5) is None
+            state = p.admin("show servers state s3_backend")
+            assert f"127.0.0.1_{second.server_port}" in state
+            assert f"127.0.0.1_{p.backend.server_port}" not in state
+            assert p.admin("show info").split("Pid: ")[1].split()[0] == pid
+            deadline = time.time() + 30  # the new server must pass its checks and serve
+            while time.time() < deadline and not second.seen:
+                with contextlib.suppress(OSError, http.client.HTTPException):
+                    p.status("GET", "/new", {"Authorization": SIGV4}, src="127.0.2.251")
+                time.sleep(0.5)
+            assert second.seen
+    finally:
+        second.shutdown()
+        second.server_close()

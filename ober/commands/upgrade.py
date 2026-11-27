@@ -35,8 +35,9 @@ console = Console()
     is_flag=True,
     help="Only check for updates, don't install.",
 )
+@click.option("-y", "--yes", is_flag=True, help="Install updates without asking.")
 @click.pass_context
-def upgrade(ctx: click.Context, check_only: bool) -> None:
+def upgrade(ctx: click.Context, check_only: bool, yes: bool) -> None:
     """Check for and install component updates.
 
     Checks for available updates to HAProxy and ExaBGP.
@@ -106,12 +107,7 @@ def upgrade(ctx: click.Context, check_only: bool) -> None:
         return
 
     # Confirm upgrade
-    confirm = inquirer.confirm(
-        "Install available updates?",
-        default=True,
-    )
-
-    if not confirm:
+    if not yes and not inquirer.confirm("Install available updates?", default=True):
         console.print("[yellow]Upgrade cancelled.[/yellow]")
         return
 

@@ -186,3 +186,64 @@ def test_push_refuses_per_node_values(temp_dir: Path) -> None:
     result, sent = _push(temp_dir, "bgp:\n  router_id: 10.0.0.1\n", {"b": 0})
     assert result.exit_code == 1 and sent == []
     assert "bgp.router_id" in result.output and "ober.local.yaml" in result.output
+
+
+def _upgrade(
+    temp_dir: Path, fail: str = "", drained: bool = True, upgrade_out: str = "", mode: str = "bgp"
+) -> tuple[Any, list[tuple[str, str]]]:
+    config = OberConfig(
+        install_path=temp_dir, local_ip="10.0.0.1", nodes=["10.0.0.1", "b"], ha_mode=mode
+    )
+    ran: list[tuple[str, str]] = []
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        node = "local" if cmd[:2] == ["sh", "-c"] else cmd[cmd.index("--") + 1]
+        ran.append((node, cmd[-1]))
+        rc = 1 if fail and fail in cmd[-1] else 0
+        out = upgrade_out if cmd[-1].endswith("ober upgrade -y") else "ok"
+        return subprocess.CompletedProcess(cmd, rc, out, "")
+
+    held = _node(announced=[] if drained else ["v"])
+    with (
+        patch("ober.cli.SystemInfo", return_value=MagicMock(is_root=True)),
+        patch("ober.commands.cluster.load_config_safe", return_value=(config, None)),
+        patch("ober.commands.cluster.subprocess.run", side_effect=fake_run),
+        patch(
+            "ober.commands.cluster.gather", side_effect=lambda _c, ns, _t: dict.fromkeys(ns, held)
+        ),
+        patch("ober.commands.cluster.time.sleep"),
+    ):
+        return CliRunner().invoke(main, ["cluster", "upgrade", "-y", "--timeout", "0"]), ran
+
+
+def test_cluster_upgrade_runs_runbook_this_node_last(temp_dir: Path) -> None:
+    result, ran = _upgrade(temp_dir)
+    assert result.exit_code == 0, result.output
+    steps = [cmd for node, cmd in ran if node == "b"]
+    assert steps == [
+        "sudo -n ober maintenance on",
+        "sudo -n sh -c 'PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx upgrade herr-ober'",
+        "sudo -n ober upgrade -y",
+        "sudo -n ober restart --hard",  # always in BGP mode
+        "sudo -n ober doctor",
+        "sudo -n ober maintenance off",
+    ]
+    assert [node for node, _ in ran] == ["b"] * 6 + ["local"] * 6
+
+
+def test_cluster_upgrade_restarts_keepalived_only_when_asked(temp_dir: Path) -> None:
+    result, ran = _upgrade(temp_dir, mode="keepalived")
+    assert result.exit_code == 0 and not any("restart" in c for _, c in ran)
+    out = "Run 'sudo ober restart --hard' once, in a maintenance window"
+    result, ran = _upgrade(temp_dir, mode="keepalived", upgrade_out=out)
+    assert sum("restart --hard" in c for _, c in ran) == 2
+
+
+def test_cluster_upgrade_stops_in_maintenance(temp_dir: Path) -> None:
+    result, ran = _upgrade(temp_dir, fail="doctor")
+    assert result.exit_code == 1
+    assert ran[-1] == ("b", "sudo -n ober doctor")  # no maintenance off, no next node
+    assert "b stays in maintenance" in result.output
+    result, ran = _upgrade(temp_dir, drained=False)  # still announces: no upgrade
+    assert result.exit_code == 1 and "did not leave" in result.output
+    assert ran == [("b", "sudo -n ober maintenance on")]
