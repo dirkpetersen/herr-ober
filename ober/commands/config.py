@@ -1410,10 +1410,11 @@ def _server_tls(backend: BackendConfig, server: str) -> str:
     """
     if not backend.tls:
         return ""
+    # check-ssl: a server added over the runtime API (apply) does not imply it from ssl
     if backend.tls_verify:
-        opts = f" ssl verify required ca-file {backend.tls_ca_file or _system_ca()}"
+        opts = f" ssl check-ssl verify required ca-file {backend.tls_ca_file or _system_ca()}"
     else:
-        opts = " ssl verify none"
+        opts = " ssl check-ssl verify none"
     host = _server_host(server)
     if not _is_ip(host):
         opts += f" sni str({host}) check-sni {host}"

@@ -61,7 +61,7 @@ BACKEND="{name: s3, servers: ['$S3:443'], tls: true, health_check_expect: 'rstat
 {
     echo "ha_mode: $MODE"
     echo "nodes: [$NODES_CSV]"
-    echo "bgp: {local_as: 65001, peer_as: 65000, neighbors: [$HELPER], bfd_enabled: false}"
+    echo "bgp: {local_as: 65001, peer_as: 65000, neighbors: [$HELPER], bfd_enabled: true}"
     echo "keepalived: {peers: [$NODES_CSV]}"
     echo "vips:"
     for v in "${VIPS[@]}"; do echo "  - {address: $v}"; done

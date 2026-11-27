@@ -90,7 +90,7 @@ def test_render_aws_s3_tls_backend(temp_dir: Path, monkeypatch: pytest.MonkeyPat
     assert "resolvers sys\n    parse-resolv-conf\n" in text
     assert "    http-check expect rstatus ^[234]\n" in text
     assert (
-        f"    server {aws}_443 {aws}:443 ssl verify required ca-file @system-ca"
+        f"    server {aws}_443 {aws}:443 ssl check-ssl verify required ca-file @system-ca"
         f" sni str({aws}) check-sni {aws}"
         " resolvers sys init-addr last,libc,none resolve-prefer ipv4\n"
     ) in text
@@ -119,7 +119,7 @@ def test_render_tls_ip_server_with_private_ca(temp_dir: Path) -> None:
     ]
     text = _render(config)
     assert (
-        "    server 10.0.2.1_443 10.0.2.1:443 ssl verify required ca-file /etc/ober/rgw-ca.pem\n"
+        "    server 10.0.2.1_443 10.0.2.1:443 ssl check-ssl verify required ca-file /etc/ober/rgw-ca.pem\n"
         in text
     )
     assert "resolvers" not in text and "http-check expect" not in text
@@ -128,7 +128,7 @@ def test_render_tls_ip_server_with_private_ca(temp_dir: Path) -> None:
 def test_render_tls_no_verify_and_plain_unchanged(temp_dir: Path) -> None:
     config = _config(temp_dir, tls=True, tls_verify=False)
     text = _render(config)
-    assert " rgw1:7480 ssl verify none sni str(rgw1) check-sni rgw1 resolvers sys" in text
+    assert " rgw1:7480 ssl check-ssl verify none sni str(rgw1) check-sni rgw1 resolvers sys" in text
     plain = _render(_config(temp_dir / "plain"))
     assert "    server rgw1_7480 rgw1:7480\n" in plain and "resolvers" not in plain
 

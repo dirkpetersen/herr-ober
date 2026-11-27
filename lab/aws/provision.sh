@@ -45,7 +45,9 @@ dnf -y -q install bird awscli2 jq iproute tcpdump >/dev/null
 # update when a route grows from 1 to more paths; the kernel scan repairs it, so scan often.
 {
     printf 'router id %s;\nlog syslog all;\n\n' "$HELPER_IP"
-    printf 'protocol device {}\n\nprotocol bfd {}\n\n'
+    printf 'protocol device {}\n\n'
+    # same timers as the ober defaults (bgp.bfd_interval_ms 300, bgp.bfd_multiplier 3)
+    printf 'protocol bfd {\n  interface "*" { min rx interval 300 ms; min tx interval 300 ms; multiplier 3; };\n}\n\n'
     printf 'protocol kernel {\n  ipv4 { import none; export all; };\n  merge paths on;\n  scan time 2;\n}\n\n'
     i=0
     for ip in "${NODE_IPS[@]}"; do
