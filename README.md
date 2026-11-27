@@ -80,8 +80,8 @@ only `lo-vip`; the ENI configuration of amazon-ec2-net-utils is not changed.
 **Upgrading from v0.3.0 or earlier:** re-run the one-liner. The old install lived under
 `/root/.local/pipx`; the installer prints how to keep it
 (`sudo ober bootstrap /root/.local/pipx/venvs/herr-ober`) or copy its `etc/` to
-`/opt/pipx/venvs/herr-ober/etc`. Because the `hostlist` dependency was replaced by
-`python-hostlist`, reinstall into a clean venv so that no stale `hostlist` package stays:
+`/opt/pipx/venvs/herr-ober/etc`. Herr Ober no longer depends on a hostlist package, so reinstall
+into a clean venv so that no stale `hostlist` package stays:
 ```bash
 PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx reinstall herr-ober
 sudo ober upgrade   # installs ExaBGP again if the reinstall removed it, and rewrites the units
@@ -187,6 +187,7 @@ problem. `ober stop`, `ober status` and `ober logs` still work. `local_ip` sets 
 for keepalived `unicast_src_ip` and the BGP router-id/local-address when the default route
 uses another NIC.
 
+<!-- --8<-- [start:operations] -->
 ### One ober.yaml for the whole cluster
 
 Values that must differ between nodes go in `ober.local.yaml` next to `ober.yaml` on each
@@ -297,6 +298,8 @@ keeps your SSH rules. If `sshd -T` fails, bootstrap stops before it changes the 
 rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every
 client and RGW connection.
+
+<!-- --8<-- [end:operations] -->
 
 ### Checking Health
 

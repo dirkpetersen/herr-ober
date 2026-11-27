@@ -16,9 +16,10 @@ docs_dir = "docs"
 site_dir = "site"
 
 # Pages that pull in files from outside docs/ through pymdownx.snippets
-# (architecture.md and deploy/sentinel/README.md). Rebuild when they change.
+# (architecture.md, README.md and deploy/sentinel/README.md). Rebuild when they change.
 watch = [
   "architecture.md",
+  "README.md",
   "deploy/sentinel/README.md",
 ]
 
@@ -26,6 +27,7 @@ nav = [
   { "Home" = "index.md" },
   { "Getting started" = "getting-started.md" },
   { "Configuration" = "configuration.md" },
+  { "Operations" = "operations.md" },
   { "CLI reference" = "cli.md" },
   { "Architecture" = "architecture.md" },
   { "Proxmox deployment" = "proxmox-deployment.md" },

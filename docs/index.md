@@ -8,13 +8,14 @@
 [![Tests](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml/badge.svg)](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml)
 
 Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller
-designed for Ceph RGW clusters. It uses **HAProxy 3.3 (AWS-LC)** for SSL offloading and one of
-two high-availability modes:
+designed for Ceph RGW clusters. It uses **HAProxy 3.3** for SSL offloading (the Ubuntu PPA and distro builds use OpenSSL;
+`ober doctor` shows the TLS library) and one of two high-availability modes:
 
 - **BGP/ECMP mode** uses **ExaBGP** for Layer 3 HA via BGP (requires a BGP-capable router).
 - **Keepalived mode** uses **VRRP** for VIP failover (no BGP required).
 
-**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM). Python 3.12+. IPv4 only.
+**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2.
+Python 3.12+. IPv4 only.
 
 The whole stack is installed and managed by one CLI, `ober`, published on PyPI as
 [`herr-ober`](https://pypi.org/project/herr-ober/).
@@ -24,7 +25,7 @@ The whole stack is installed and managed by one CLI, `ober`, published on PyPI a
 Herr Ober is a "shared nothing" cluster: each node runs the same stack and works on its own.
 
 ```text
-       [ Upstream Router (ECMP + BFD) ]          (BGP mode)
+       [ Upstream Router (ECMP) ]               (BGP mode)
               |        |        |
       +-------+        |        +-------+
       |                |                |
@@ -39,8 +40,8 @@ Each node runs these systemd services:
 
 | Service | Component | Role |
 |---------|-----------|------|
-| `ober-http` | HAProxy 3.3 (AWS-LC) | SSL offloading, S3 frontends, proxying to the Ceph RGW backends |
-| `ober-bgp` | ExaBGP | BGP mode only: announces the shared VIP(s) to the router, with BFD |
+| `ober-http` | HAProxy 3.3 | SSL offloading, S3 frontends, proxying to the Ceph RGW backends |
+| `ober-bgp` | ExaBGP | BGP mode only: announces the shared VIP(s) to the router |
 | `ober-ha` | Keepalived | Keepalived mode only: VRRP failover of one VIP per node |
 
 `ober-bgp` and `ober-ha` are bound to `ober-http` (`BindsTo=`): if HAProxy stops, the BGP routes
@@ -53,7 +54,7 @@ The two modes are mutually exclusive and are selected with `ha_mode` in the conf
 
 | | BGP/ECMP (`ha_mode: bgp`) | Keepalived (`ha_mode: keepalived`) |
 |---|---|---|
-| Network requirement | BGP-capable upstream router with ECMP (and BFD) | No router support; the nodes exchange VRRP (unicast by default) |
+| Network requirement | BGP-capable upstream router with ECMP | No router support; the nodes exchange VRRP (unicast by default) |
 | VIPs | All nodes announce the same shared VIP(s) | One VIP per node, owned by one node at a time |
 | Load spreading | Router ECMP across all healthy nodes | DNS round-robin over the VIPs (managed by you) |
 | Failover | Route withdrawn, router stops sending traffic | VIP moves to a backup node |
@@ -69,7 +70,7 @@ See [Configuration](configuration.md#ha-modes) for the details of each mode.
     | **Node crash** | Traffic fails over via ECMP (instant) |
     | **OS freeze** | Proxmox watchdog hard-resets the VM (10s) |
     | **HAProxy crash** | BGP withdraws immediately (`BindsTo=`) |
-    | **Network cut** | BFD detects it and tears down the route (~150ms) |
+    | **Network cut** | BGP hold timer expires and the router removes the route (3s default hold time) |
 
 === "Keepalived mode"
 
@@ -94,6 +95,8 @@ optionally, Defender for Endpoint. See [Security monitoring](security-monitoring
 
 - [Getting started](getting-started.md): VM prerequisites, install, bootstrap, configure, start.
 - [Configuration](configuration.md): HA modes, `ober.yaml` reference, file locations, secrets.
+- [Operations](operations.md): apply and roll back changes, maintenance, one `ober.yaml` for
+  the cluster, metrics, certificates, rolling upgrade.
 - [CLI reference](cli.md): every `ober` command and option.
 - [Architecture](architecture.md): kernel tuning, watchdog, components and failure handling.
 - [Proxmox deployment](proxmox-deployment.md): host BIOS, SR-IOV, hugepages, VM definition.
