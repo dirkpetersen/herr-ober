@@ -215,3 +215,8 @@ These were not in the list above. Each one is the default the work used.
 - `ober doctor` recommends 3.4+. 3.3 still works (all live tests pass on it).
 - A live test fails when `haproxy -c` prints any WARNING for the generated config, so a new release
   that deprecates a keyword shows up in CI.
+- **amd64v3 hosts** (Ubuntu 26.04 architecture variant, seen on the GitHub `ubuntu-26.04` runner):
+  apt reads only the PPA's `binary-amd64v3` index, which has no haproxy, so the distro 3.2 package
+  was installed without a warning. Bootstrap writes `Architectures: <dpkg arch>` into the PPA
+  `.sources` file (permanent, so PPA updates stay visible); CI does the same and fails unless
+  `haproxy -v` shows 3.4.

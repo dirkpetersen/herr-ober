@@ -243,3 +243,7 @@ Findings:
 2. Fedora's spec puts halog/iprange in `%{_bindir}` (Fedora merged `/usr/sbin`); on EL10 they are
    in `%{_sbindir}`. `build-rpm.sh` fixes the three `%files` lines; nothing else changes.
 3. `ausearch` without a terminal reads stdin and hangs; use `ausearch --input-logs`.
+4. CI (GitHub `ubuntu-26.04`, an amd64v3 runner) installed the distro HAProxy 3.2.25 although the
+   3.4 PPA was added: apt reads only the PPA's amd64v3 index, and the PPA builds no amd64v3
+   haproxy. Fixed in bootstrap (`Architectures:` in the PPA `.sources`) and in CI. The arm64 lab
+   nodes were not affected.

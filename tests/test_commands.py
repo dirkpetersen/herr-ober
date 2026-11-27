@@ -1281,7 +1281,10 @@ class TestBootstrapMoreTests:
         system = SystemInfo()
         system.os_family = OSFamily.DEBIAN
 
-        with patch("ober.commands.bootstrap.run_command") as mock_run:
+        with (
+            patch("ober.commands.bootstrap.run_command") as mock_run,
+            patch("ober.commands.bootstrap._pin_ppa_arch"),
+        ):
             _install_packages(system)
             # Check that install command includes both haproxy and keepalived
             assert mock_run.called
@@ -1301,9 +1304,26 @@ class TestBootstrapMoreTests:
             system.os_family = OSFamily.DEBIAN
             system.os_name = "Ubuntu"
             system.os_codename = codename
-            with patch("ober.commands.bootstrap.run_command") as mock_run:
+            with (
+                patch("ober.commands.bootstrap.run_command") as mock_run,
+                patch("ober.commands.bootstrap._pin_ppa_arch"),
+            ):
                 _install_packages(system)
             assert mock_run.call_args_list[0].args[0] == ["add-apt-repository", "-y", ppa]
+
+    def test_pin_ppa_arch(self, tmp_path: Path) -> None:
+        """The PPA source gets the host arch once, so amd64v3 hosts read its amd64 index."""
+        from ober.commands.bootstrap import _pin_ppa_arch
+
+        src = tmp_path / "vbernat-ubuntu-haproxy-3_4-resolute.sources"
+        src.write_text("Types: deb\nURIs: https://ppa.launchpadcontent.net/x/\nSuites: resolute\n")
+        other = tmp_path / "ubuntu.sources"
+        other.write_text("Types: deb\n")
+        _pin_ppa_arch("amd64", tmp_path)
+        _pin_ppa_arch("amd64", tmp_path)
+        assert src.read_text().startswith("Types: deb\nArchitectures: amd64\nURIs:")
+        assert src.read_text().count("Architectures:") == 1
+        assert other.read_text() == "Types: deb\n"
 
     def test_install_packages_rhel_includes_keepalived(self) -> None:
         """Test _install_packages installs both HAProxy and Keepalived on RHEL."""

@@ -361,6 +361,20 @@ def _apply_kernel_tuning() -> None:
     run_command(["sysctl", "--system"], check=False)
 
 
+def _pin_ppa_arch(arch: str, sources_dir: Path) -> None:
+    """Make apt read the plain index of the HAProxy PPA.
+
+    On an amd64v3 host (Ubuntu 26.04 architecture variant, e.g. GitHub runners) apt reads only
+    the PPA's amd64v3 index, which has no haproxy, so the older distro package wins silently.
+    """
+    if not arch:
+        return
+    for f in sources_dir.glob("vbernat-ubuntu-haproxy-*.sources"):
+        text = f.read_text()
+        if "\nArchitectures:" not in "\n" + text:
+            f.write_text(text.replace("Types: deb\n", f"Types: deb\nArchitectures: {arch}\n", 1))
+
+
 def _install_packages(system: SystemInfo) -> None:
     """Install HAProxy and keepalived using the appropriate package manager."""
     if system.os_family == OSFamily.DEBIAN:
@@ -373,6 +387,9 @@ def _install_packages(system: SystemInfo) -> None:
                     f"[yellow]Warning:[/yellow] cannot add {ppa}, using the "
                     "distro HAProxy. Check its version with 'haproxy -v'."
                 )
+            else:
+                arch = run_command(["dpkg", "--print-architecture"], check=False).stdout.strip()
+                _pin_ppa_arch(arch, Path("/etc/apt/sources.list.d"))
         run_command(["apt-get", "update"], check=False)
         # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
         # frr: bfdd for BFD in BGP mode (ober-bfd); the distro frr.service stays off
