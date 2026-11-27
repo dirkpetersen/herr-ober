@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from ober.cli import main
@@ -75,7 +76,8 @@ def _render(config: OberConfig) -> str:
     return config.haproxy_config_path.read_text()
 
 
-def test_render_aws_s3_tls_backend(temp_dir: Path) -> None:
+def test_render_aws_s3_tls_backend(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ober.commands.config.SYSTEM_CA_BUNDLES", ())
     config = OberConfig(install_path=temp_dir)
     aws = "s3.us-west-2.amazonaws.com"
     config.backends = [
@@ -94,6 +96,18 @@ def test_render_aws_s3_tls_backend(temp_dir: Path) -> None:
     ) in text
     # SigV4 signs Host: the proxy never rewrites it
     assert "set-header host" not in text.lower() and "replace-header host" not in text.lower()
+
+
+def test_system_ca_prefers_distro_bundle(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ober.commands.config import _system_ca
+
+    bundle = temp_dir / "tls-ca-bundle.pem"
+    monkeypatch.setattr(
+        "ober.commands.config.SYSTEM_CA_BUNDLES", (str(temp_dir / "x"), str(bundle))
+    )
+    assert _system_ca() == "@system-ca"
+    bundle.write_text("pem")
+    assert _system_ca() == str(bundle)
 
 
 def test_render_tls_ip_server_with_private_ca(temp_dir: Path) -> None:

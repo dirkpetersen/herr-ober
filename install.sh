@@ -102,6 +102,13 @@ case "$OBER_TARGET" in
         ;;
 esac
 
+# RHEL sudo has no /usr/local/bin in secure_path. Without this link 'sudo ober' fails, and so
+# do push, cluster status and --all-nodes (they run 'ssh NODE sudo -n ober ...').
+case ":$(sudo -n sh -c 'echo "$PATH"' 2>/dev/null):" in
+    *:/usr/local/bin:*) ;;
+    *) [ -e /usr/bin/ober ] || ln -s /usr/local/bin/ober /usr/bin/ober ;;
+esac
+
 if [ "$LEGACY_NOTICE" -eq 1 ]; then
     echo ""
     echo "NOTE: A configuration from a previous install was found at:"

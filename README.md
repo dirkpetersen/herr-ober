@@ -318,7 +318,7 @@ backends:
   - name: aws_s3
     servers: ["s3.us-west-2.amazonaws.com:443"]
     tls: true                     # HTTPS to the servers
-    tls_verify: true              # default: verify with the system CAs (@system-ca)
+    tls_verify: true              # default: verify with the distro CA bundle
     tls_ca_file: ""               # or a CA bundle for an RGW with a private CA
     health_check_expect: "rstatus ^[234]"   # optional: S3 answers GET / with 307 or 403
 ```

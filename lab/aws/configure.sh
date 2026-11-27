@@ -3,7 +3,7 @@
 # each ingress node, render the configs and start ober. Then install the lab server cert for
 # the AWS S3 names on all nodes with `ober cert install --all-nodes`, and copy the lab CA to
 # the helper (~ec2-user/lab-ca.pem, for AWS_CA_BUNDLE). Run after deploy.sh.
-# Backend: AWS S3 over HTTPS when this ober has the backend `tls` field, else plain HTTP on 80.
+# Backend: AWS S3 over HTTPS (needs ober with backends[].tls, 0.5+).
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
@@ -57,12 +57,7 @@ if [ ! -f $I/etc/certs/server.pem ]; then
     cat /tmp/c.pem /tmp/k.pem >$I/etc/certs/server.pem && rm -f /tmp/k.pem /tmp/c.pem
     chmod 600 $I/etc/certs/server.pem
 fi
-if $I/bin/python -c 'import dataclasses as d, ober.config as c, sys
-sys.exit("tls" not in {f.name for f in d.fields(c.BackendConfig)})'; then
-    BACKEND="{name: s3, servers: ['$S3:443'], tls: true, health_check_path: /}"
-else
-    BACKEND="{name: s3, servers: ['$S3:80'], health_check_path: /}"
-fi
+BACKEND="{name: s3, servers: ['$S3:443'], tls: true, health_check_expect: 'rstatus ^[234]'}"
 {
     echo "ha_mode: $MODE"
     echo "nodes: [$NODES_CSV]"

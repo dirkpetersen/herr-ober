@@ -136,7 +136,7 @@ class BackendConfig:
     health_check_expect: str = ""  # e.g. "rstatus ^[234]"; empty = HAProxy default (2xx/3xx)
     tls: bool = False  # HTTPS to the servers (AWS S3, RGW behind TLS)
     tls_verify: bool = True  # verify the server cert (CA chain, and the host name for hostnames)
-    tls_ca_file: str = ""  # CA bundle for a private CA; empty = the system CAs (@system-ca)
+    tls_ca_file: str = ""  # CA bundle for a private CA; empty = the distro CA bundle
 
 
 @dataclass

@@ -285,6 +285,8 @@ class TestUninstall:
                 return real_path(str(temp_dir) + a[0])
             if a == ("/usr/local/bin/ober",):
                 return temp_dir / "nonexistent-ober"
+            if a == ("/usr/bin/ober",):
+                return temp_dir / "usr-bin-ober"
             return real_path(*a)
 
         fake_path.home = lambda: home  # type: ignore[attr-defined]
@@ -312,6 +314,12 @@ class TestUninstall:
         assert not (sysd / "ober-ha.service").exists()
         assert ["systemctl", "stop", "ober-ha"] in calls
         assert ["systemctl", "disable", "ober-ha"] in calls
+
+    def test_removes_sudo_path_link(self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        (temp_dir / "usr-bin-ober").symlink_to(temp_dir / "nonexistent-ober")
+        result, _, _, _ = self._run(temp_dir, monkeypatch, None)
+        assert result.exit_code == 0, result.output
+        assert not (temp_dir / "usr-bin-ober").is_symlink()
 
     def test_pipx_env_global(self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         venv = Path("/opt/pipx/venvs/herr-ober")
