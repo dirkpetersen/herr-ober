@@ -181,5 +181,6 @@ Every node announces the same VIP(s). Run `sudo ober bootstrap` and `sudo ober c
 node, select BGP/ECMP mode and enter the local and peer AS numbers, the BGP neighbor IP(s), the
 router ID and the local address. Then run `sudo ober test`, which checks that TCP port 179 is
 reachable on every neighbor, and `sudo ober start`. On the router, configure the nodes as BGP
-neighbors with ECMP. ExaBGP has no BFD, so a link failure is detected by the BGP hold time
-(3 s by default).
+neighbors with ECMP. A link failure is detected by the BGP hold time (3 s by default). For
+0.9 s, set `bgp.bfd_enabled: true` (FRR `bfdd` next to ExaBGP) and enable BFD for the BGP
+neighbors on the router (bird2: `protocol bfd { }` and `bfd on;`).

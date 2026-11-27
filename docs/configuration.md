@@ -58,7 +58,8 @@ and stops the unit of the other mode.
 
     - The ExaBGP config (`<install_path>/etc/bgp/config.ini`) has one `neighbor` block per entry
       in `bgp.neighbors`, with IPv4 unicast and the configured hold time. ExaBGP has no BFD, so
-      a link failure is detected by the hold time (3 s by default).
+      a link failure is detected by the hold time (3 s by default), or in 0.9 s with
+      `bgp.bfd_enabled` (FRR `bfdd`, unit `ober-bfd`, config `/etc/frr/bfdd.conf`).
     - ExaBGP spawns the health checker `<venv>/bin/python -m ober.commands.health`. It polls
       HAProxy's `http://127.0.0.1:<stats_port>/health` and announces `<vip>/32 next-hop self`
       for every configured VIP after `bgp.health_rise` good probes (not before
@@ -157,7 +158,9 @@ Used when `ha_mode: bgp`.
 | `health_rise` | `3` | Good `/health` probes before the routes are announced |
 | `health_fall` | `2` | Failed probes before the routes are withdrawn |
 | `health_holddown` | `5` | Seconds after the start before the first announcement |
-| `bfd_enabled` | `true` | Ignored: ExaBGP has no BFD |
+| `bfd_enabled` | `false` | Run FRR `bfdd` (unit `ober-bfd`) with one BFD peer per neighbor. Needs the `frr` package and BFD on the router |
+| `bfd_interval_ms` | `300` | BFD transmit and receive interval (10-60000) |
+| `bfd_multiplier` | `3` | Missed BFD packets before the peer is down (2-255) |
 
 ### keepalived
 

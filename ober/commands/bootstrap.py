@@ -162,6 +162,32 @@ ReadWritePaths=/run -{state_dir}
 WantedBy=multi-user.target ober-http.service
 """
 
+# FRR bfdd alone (no zebra, no bgpd): BFD toward the BGP neighbors, ExaBGP has none.
+# Not the distro frr.service: it always starts zebra, mgmtd and staticd.
+BFD_SERVICE = """[Unit]
+Description=Herr Ober BFD (FRR bfdd)
+After=network-online.target ober-bgp.service
+Documentation=https://github.com/dirkpetersen/herr-ober
+# SAFETY LINK: when ober-bgp stops (also when HAProxy stops), stop BFD too
+BindsTo=ober-bgp.service
+
+[Service]
+Type=simple
+# bfdd drops to user frr and puts its vty socket here; -Z sets the SELinux type (frr_var_run_t)
+ExecStartPre=/usr/bin/install -d -Z -o frr -g frr -m 0755 /run/frr
+ExecStart={bfdd} -f {config_path} --log syslog --limit-fds 1024
+Restart=on-failure
+RestartSec=1s
+
+# Security. No NoNewPrivileges: on SELinux hosts it blocks the switch to frr_t.
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+# Started and stopped with ober-bgp (enabled only when bgp.bfd_enabled and FRR is installed)
+WantedBy=ober-bgp.service
+"""
+
 
 @click.command()
 @click.argument("path", required=False, type=click.Path())
@@ -169,7 +195,7 @@ WantedBy=multi-user.target ober-http.service
 @click.option(
     "--firewall",
     is_flag=True,
-    help="Enable ufw or firewalld and allow only SSH, 443/tcp and VRRP.",
+    help="Enable ufw or firewalld and allow only SSH, 443/tcp, VRRP and BFD (3784/udp).",
 )
 @click.pass_context
 def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -> None:
@@ -310,8 +336,8 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
 
     if not firewall:
         console.print(
-            "[yellow]Note:[/yellow] firewall not changed. Allow inbound 443/tcp and, in "
-            "keepalived mode, VRRP (IP protocol 112), or re-run with --firewall."
+            "[yellow]Note:[/yellow] firewall not changed. Allow inbound 443/tcp, in keepalived "
+            "mode VRRP (IP protocol 112), with BFD 3784/udp, or re-run with --firewall."
         )
 
     console.print()
@@ -348,7 +374,8 @@ def _install_packages(system: SystemInfo) -> None:
                 )
         run_command(["apt-get", "update"], check=False)
         # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
-        run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping"])
+        # frr: bfdd for BFD in BGP mode (ober-bfd); the distro frr.service stays off
+        run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping", "frr"])
     elif system.os_family == OSFamily.RHEL:
         run_command(
             [
@@ -358,6 +385,7 @@ def _install_packages(system: SystemInfo) -> None:
                 "haproxy",
                 "keepalived",
                 "iputils",
+                "frr",  # bfdd for BFD in BGP mode (AppStream)
                 "policycoreutils-python-utils",
                 "checkpolicy",  # checkmodule builds the herr_ober SELinux module
             ]
@@ -469,12 +497,12 @@ def _install_selinux_module(install_path: Path) -> bool:
 
 
 def _disable_distro_units() -> None:
-    """Stop the distro haproxy/keepalived units; ober-http and ober-ha replace them.
+    """Stop the distro haproxy/keepalived/frr units; ober-http, ober-ha and ober-bfd replace them.
 
     The Debian package enables and starts haproxy.service, and package upgrades restart that
-    unit instead of ober-http.
+    unit instead of ober-http. frr.service would start zebra, which ober never uses.
     """
-    run_command(["systemctl", "disable", "--now", "haproxy", "keepalived"], check=False)
+    run_command(["systemctl", "disable", "--now", "haproxy", "keepalived", "frr"], check=False)
 
 
 def _setup_venv(venv_path: Path) -> None:
@@ -529,7 +557,7 @@ def _create_systemd_services(
     Bootstrap and ``ober upgrade`` both call this, so nodes get new unit templates.
 
     Returns:
-        Names of the ober-http/ober-bgp/ober-ha units whose content changed.
+        Names of the ober-http/ober-bgp/ober-ha/ober-bfd units whose content changed.
     """
 
     protect_home = "true"
@@ -557,6 +585,11 @@ def _create_systemd_services(
             state_dir=config.vrrp_state_path.parent,
         ),
     }
+    bfdd = ober_config.bfdd_path()
+    if bfdd:  # no frr package, no unit: BFD stays off (see OberConfig.bfd_active)
+        units["ober-bfd.service"] = BFD_SERVICE.format(
+            bfdd=bfdd, config_path=config.bfdd_config_path
+        )
     changed = []
     for name, content in units.items():
         unit_path = systemd_path / name
@@ -734,12 +767,14 @@ def _ssh_ports() -> list[str]:
 
 
 def _firewall_commands() -> list[list[str]] | None:
-    """Commands that allow 443/tcp and VRRP, and SSH plus enable when the firewall was off.
+    """Commands that allow 443/tcp, VRRP and BFD, and SSH plus enable when the firewall was off.
 
     A firewall that is already active keeps its own SSH rules (they can be narrower than
     "allow from anywhere") and is not enabled again. All rules are persistent and safe to add
     again. Port 80 is not opened (HAProxy binds only 443). BGP needs no inbound rule (ExaBGP
-    connects out, replies are tracked). The stats port stays closed (health checks are local).
+    connects out, replies are tracked). BFD does (3784/udp): the router sends its own control
+    packets to that port, they are not replies; bfdd accepts only its configured peers. The
+    stats port stays closed (health checks are local).
     Returns None when neither ufw nor firewalld exists.
     """
     if check_command_exists("ufw"):
@@ -750,19 +785,20 @@ def _firewall_commands() -> list[list[str]] | None:
             *ssh,
             ["ufw", "allow", "443/tcp"],
             ["ufw", "allow", "proto", "vrrp", "from", "any", "to", "any"],
+            ["ufw", "allow", "3784/udp"],
             *([] if active else [["ufw", "--force", "enable"]]),
         ]
     if check_command_exists("firewall-cmd"):
         running = run_command(["systemctl", "is-active", "--quiet", "firewalld"], check=False)
         if running.returncode == 0:
-            rules = ["--add-service=https", "--add-protocol=vrrp"]
+            rules = ["--add-service=https", "--add-protocol=vrrp", "--add-port=3784/udp"]
             return [
                 *(["firewall-cmd", "--permanent", r] for r in rules),
                 ["firewall-cmd", "--reload"],
             ]
         # firewall-offline-cmd edits the permanent config before firewalld first starts
         rules = [f"--add-port={port}/tcp" for port in _ssh_ports()]
-        rules += ["--add-service=https", "--add-protocol=vrrp"]
+        rules += ["--add-service=https", "--add-protocol=vrrp", "--add-port=3784/udp"]
         return [
             *(["firewall-offline-cmd", r] for r in rules),
             ["systemctl", "enable", "--now", "firewalld"],

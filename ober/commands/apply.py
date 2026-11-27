@@ -11,7 +11,8 @@ uses the HAProxy runtime API (``add server`` / ``del server``) instead of a relo
 failure there falls back to the normal reload.
 
 Not in a snapshot: certificates (keys must not be copied around), the blocklist (it is
-managed by ``ober blocklist sync``) and the ``lo-vip`` network files outside the install path.
+managed by ``ober blocklist sync``) and the ``lo-vip`` network files and ``/etc/frr/bfdd.conf``
+outside the install path (rollback renders those two from the restored ober.yaml).
 """
 
 import difflib
@@ -363,10 +364,12 @@ def _install(ctx: click.Context, config: OberConfig, text: str) -> OberConfig:
 
 
 def _sync_vips() -> None:
-    """Make lo-vip match the restored ober.yaml (it is outside the snapshot)."""
-    from ober.commands.config import _configure_vip_interface
+    """Make lo-vip and the bfdd config match the restored ober.yaml (outside the snapshot)."""
+    from ober.commands.config import _configure_vip_interface, _generate_bfdd_config, sync_bfd_unit
 
-    _configure_vip_interface(OberConfig.load())
+    config = OberConfig.load()
+    _configure_vip_interface(config)
+    sync_bfd_unit(config, _generate_bfdd_config(config))
 
 
 def _plan(config: OberConfig, before: dict[str, str], after: dict[str, str]) -> ServerPlan | None:

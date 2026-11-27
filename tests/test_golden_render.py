@@ -167,7 +167,7 @@ def test_exabgp_validate(cluster: list[OberConfig]) -> None:
         # 4.x has a --validate flag, 5.x a validate subcommand
         flag = "--validate" if re.search(r"ExaBGP : 4\.", version) else "validate"
         for config in cluster:
-            assert "bfd" not in config.bgp_config_path.read_text()
+            assert "bfd {" not in config.bgp_config_path.read_text()
             _run([exabgp, flag, str(config.bgp_config_path)])
 
 

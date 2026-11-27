@@ -136,11 +136,6 @@ These were not in the list above. Each one is the default the work used.
 - **Generic loader (10.1) and pure renderers (10.3), skipped:** no user gain now. The loader is
   already generic over the dataclass fields (wave 1). The keepalived renderer still reads the
   node identity itself; tests mock it.
-- **BFD (3.6), decision only:** no BFD. ExaBGP has none, and failure detection is the BGP hold
-  time (`bgp.hold_time`, default 3 s) plus the health process (withdraw after `health_fall`
-  failed probes). `bgp.bfd_enabled` (default true) is still in `BGPConfig` only so old files
-  load: nothing reads it, and no `bfd {}` block is written. If 3 s is too slow, run FRR `bfdd`
-  next to ExaBGP or replace ExaBGP with FRR; that is a separate project.
 - **VIP owners (3.7, 4.1).** `vips[].owner` is optional and holds a node IP (same identity as
   `local_ip` and `keepalived.peers`, not a hostname). Unset keeps the md5 rule, so existing
   configs do not change. No round-robin default is written into the file and the wizard has no
@@ -178,3 +173,21 @@ These were not in the list above. Each one is the default the work used.
   chain is verified. Checked with HAProxy 3.3 (OpenSSL) against the real
   `s3.us-west-2.amazonaws.com`: L7OK (GET / gives 307), bucket requests reach AWS with Host
   kept. Not checked with an AWS-LC build.
+
+## Decisions made during wave 3 (2026-11-27)
+
+- **BFD (3.6), replaces the wave 2 "no BFD" entry.** FRR `bfdd` runs alone (unit `ober-bfd`,
+  not the distro `frr.service`, which always starts zebra) with one single-hop peer per
+  `bgp.neighbors` entry; timers `bgp.bfd_interval_ms` 300 and `bgp.bfd_multiplier` 3 (0.9 s).
+  Default of `bgp.bfd_enabled` changed from `true` to `false`. Because `save()` writes every
+  field, old files carry `bfd_enabled: true`; so BFD also needs the FRR `bfdd` binary. `ober
+  upgrade` installs no package, so an upgraded node gets no new daemon. Bootstrap installs
+  `frr` always (small, like keepalived), so a node that runs bootstrap again with an old
+  `bfd_enabled: true` gets BFD at the next `ober apply` or `ober start`: set it to `false`
+  first when the router has no BFD (else the node stays WARN). Config is `/etc/frr/bfdd.conf`,
+  because FRR 10 daemons refuse other paths ("Permission denied", checked with FRR 10.4.1); it
+  is outside the apply snapshot, and rollback renders it again from the restored ober.yaml.
+  A change restarts `ober-bfd`, which takes the BGP sessions down for about a second.
+  `--firewall` opens 3784/udp (the router sends its own BFD packets, they are not replies).
+  Single-hop only; multihop (4784/udp) is not supported. SELinux on AlmaLinux 10 is not yet
+  checked on a node (expected: bfdd runs as `frr_t`, `/etc/frr` is `frr_conf_t`).

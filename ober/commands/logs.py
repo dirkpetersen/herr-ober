@@ -12,6 +12,7 @@ console = Console()
 UNITS = {
     "http": "ober-http",
     "bgp": "ober-bgp",
+    "bfd": "ober-bfd",
     "ha": "ober-ha",
     "blocklist": "ober-blocklist",
     "watch": "ober-watch",

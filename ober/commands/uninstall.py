@@ -75,7 +75,9 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     console.print("[bold yellow]Ober Uninstall[/bold yellow]")
     console.print()
     console.print("This will remove:")
-    console.print("  - Systemd services (ober-http, ober-bgp, ober-ha, ober-watch, ober-blocklist)")
+    console.print(
+        "  - Systemd services (ober-http, ober-bgp, ober-bfd, ober-ha, ober-watch, ober-blocklist)"
+    )
     console.print(f"  - Installation directory: {config.install_path}")
     if has_local_venv:
         console.print(f"  - Python venv (with ExaBGP): {local_venv}")
@@ -107,6 +109,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
         "ober-blocklist.timer",
         "ober-blocklist.service",
         "ober-watch.service",
+        "ober-bfd",
         "ober-bgp",
         "ober-ha",
         "ober-http",
@@ -128,6 +131,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
     for service_file in [
         "ober-http.service",
         "ober-bgp.service",
+        "ober-bfd.service",
         "ober-ha.service",
         "ober-watch.service",
         "ober-blocklist.service",
@@ -140,6 +144,7 @@ def uninstall(ctx: click.Context, yes: bool, keep_config: bool) -> None:
 
     # Reload systemd
     run_command(["systemctl", "daemon-reload"], check=False)
+    config.bfdd_config_path.unlink(missing_ok=True)  # written by ober, outside install_path
 
     # Step 3: Remove kernel tuning
     console.print("Removing kernel tuning...")

@@ -24,7 +24,10 @@ class BGPConfig:
     router_id: str = ""
     local_address: str = ""
     hold_time: int = 3
-    bfd_enabled: bool = True
+    # BFD toward the neighbors through FRR bfdd (ExaBGP has no BFD); needs the frr package
+    bfd_enabled: bool = False
+    bfd_interval_ms: int = 300  # transmit and receive interval
+    bfd_multiplier: int = 3  # missed packets before the session is down (300 ms x 3 = 900 ms)
     health_rise: int = 3  # good probes in a row before routes are announced
     health_fall: int = 2  # failed probes in a row before routes are withdrawn
     health_holddown: int = 5  # seconds after health start before the first announce
@@ -163,6 +166,15 @@ class KeepalivedConfig:
 
 INSTALL_POINTER_PATH = Path("/etc/ober/install_path")
 
+# FRR daemons only read <sysconfdir>/<daemon>.conf (or frr.conf); SELinux labels it frr_conf_t
+BFDD_CONFIG_PATH = Path("/etc/frr/bfdd.conf")
+BFDD_PATHS = (Path("/usr/lib/frr/bfdd"), Path("/usr/libexec/frr/bfdd"))  # Debian, RHEL
+
+
+def bfdd_path() -> Path | None:
+    """FRR bfdd binary, or None when the frr package is not installed."""
+    return next((p for p in BFDD_PATHS if p.exists()), None)
+
 
 def _read_install_pointer() -> Path | None:
     """Read the install path recorded by ``ober bootstrap``, if any."""
@@ -251,6 +263,18 @@ class OberConfig:
     def bgp_config_path(self) -> Path:
         """Path to ExaBGP config file."""
         return self.install_path / "etc" / "bgp" / "config.ini"
+
+    @property
+    def bfdd_config_path(self) -> Path:
+        """FRR bfdd config (BGP mode with bfd_enabled)."""
+        return BFDD_CONFIG_PATH
+
+    def bfd_active(self) -> bool:
+        """True when this node runs BFD: BGP mode, bfd_enabled, neighbors and FRR installed."""
+        bgp = self.bgp
+        return (
+            self.ha_mode == "bgp" and bgp.bfd_enabled and bool(bgp.neighbors) and bool(bfdd_path())
+        )
 
     @property
     def keepalived_config_path(self) -> Path:
@@ -687,6 +711,20 @@ def _check_values(cfg: "OberConfig", errors: list[str]) -> None:
         "bgp.hold_time",
         "must be 0 or 3-65535",
         bgp.hold_time,
+    )
+
+    # FRR bfdd limits
+    need(
+        _in_range(bgp.bfd_interval_ms, 10, 60000),
+        "bgp.bfd_interval_ms",
+        "must be 10-60000",
+        bgp.bfd_interval_ms,
+    )
+    need(
+        _in_range(bgp.bfd_multiplier, 2, 255),
+        "bgp.bfd_multiplier",
+        "must be 2-255",
+        bgp.bfd_multiplier,
     )
 
     need(_in_range(bgp.health_rise, 1, 1000), "bgp.health_rise", "must be >= 1", bgp.health_rise)

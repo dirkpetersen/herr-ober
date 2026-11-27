@@ -77,6 +77,7 @@ def test_firewalld_running_keeps_ssh_rules_and_reloads() -> None:
     assert calls[1:] == [
         ["firewall-cmd", "--permanent", "--add-service=https"],
         ["firewall-cmd", "--permanent", "--add-protocol=vrrp"],
+        ["firewall-cmd", "--permanent", "--add-port=3784/udp"],
         ["firewall-cmd", "--reload"],
     ]
 
@@ -87,6 +88,7 @@ def test_ufw_active_keeps_ssh_rules_and_is_not_reenabled() -> None:
     assert calls == [
         ["ufw", "allow", "443/tcp"],
         ["ufw", "allow", "proto", "vrrp", "from", "any", "to", "any"],
+        ["ufw", "allow", "3784/udp"],
     ]
 
 

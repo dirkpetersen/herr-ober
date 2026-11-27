@@ -75,7 +75,7 @@ class TestConfigGeneration:
         assert "local-as 65001" in content
         assert "peer-as 65000" in content
         assert "hold-time 3" in content
-        assert "bfd" not in content  # ExaBGP has no BFD
+        assert "bfd {" not in content  # ExaBGP has no BFD
 
     def test_haproxy_config_without_ssl(self, temp_config: OberConfig) -> None:
         """Without a certificate no S3 frontend can exist, so generation fails."""

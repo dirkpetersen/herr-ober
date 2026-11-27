@@ -277,7 +277,7 @@ Shows the systemd journal of the Ober services.
 |--------|---------|-------------|
 | `-f`, `--follow` | off | Follow the log output in real time |
 | `-n`, `--lines INTEGER` | `50` (all with `--since`) | Number of lines to show |
-| `--service [http\|bgp\|ha\|blocklist\|watch\|all]` | `all` | One service, or all |
+| `--service [http\|bgp\|bfd\|ha\|blocklist\|watch\|all]` | `all` | One service, or all |
 | `--since TEXT` | | Entries since this time, for example `'1 hour ago'` |
 
 ## ober doctor
