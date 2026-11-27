@@ -41,6 +41,14 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} announces {{ $labels.vip }} but HAProxy is down"
 
+      - alert: OberBfdPeerDown
+        expr: ober_bfd_peer_up == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }}: BFD session to {{ $labels.peer }} is down"
+          description: "The router drops the BGP session of this node while BFD is down. Run 'ober status'."
+
       - alert: OberVipNoMaster
         expr: sum by (vip) (ober_vrrp_master) == 0
         for: 1m

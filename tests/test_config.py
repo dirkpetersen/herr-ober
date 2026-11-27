@@ -28,7 +28,8 @@ class TestBGPConfig:
         assert config.peer_as == 65000
         assert config.neighbors == []
         assert config.hold_time == 3
-        assert config.bfd_enabled is True
+        assert config.bfd_enabled is False  # BFD needs FRR and a router with BFD
+        assert (config.bfd_interval_ms, config.bfd_multiplier) == (300, 3)
 
     def test_custom_values(self) -> None:
         """Test BGPConfig with custom values."""

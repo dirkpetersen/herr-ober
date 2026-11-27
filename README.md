@@ -166,7 +166,7 @@ ober cert install PEM [--all-nodes]  # Check cert+key, swap into HAProxy without
 ober backend list|drain|maint|ready <server> [--all-nodes]  # RGW servers (this node or all)
 ober start|stop|restart   # Service management (stop gracefully withdraws routes/releases VIPs)
                           # restart = validated zero-downtime reload; restart --hard = full restart
-ober logs [-f] [-n N]     # View logs (--service http|bgp|ha|all to filter)
+ober logs [-f] [-n N]     # View logs (--service http|bgp|bfd|ha|all to filter)
 ober doctor               # Diagnostic checks
 ober test                 # Test BGP connectivity without starting services
 ober upgrade              # Re-render units, install HAProxy/ExaBGP updates (see Rolling upgrade)
@@ -297,9 +297,9 @@ in BGP mode.
 ### Host firewall
 
 `ober bootstrap` changes no firewall unless you add `--firewall`. With it, bootstrap allows the
-SSH port(s) from `sshd -T` first, then 443/tcp and VRRP, and then enables ufw (Debian/Ubuntu) or
-firewalld (RHEL). When the firewall is already active, bootstrap adds only 443/tcp and VRRP and
-keeps your SSH rules. If `sshd -T` fails, bootstrap stops before it changes the firewall. All
+SSH port(s) from `sshd -T` first, then 443/tcp, VRRP and BFD (3784/udp), and then enables ufw
+(Debian/Ubuntu) or firewalld (RHEL). When the firewall is already active, bootstrap adds only
+443/tcp, VRRP and 3784/udp and keeps your SSH rules. If `sshd -T` fails, bootstrap stops before it changes the firewall. All
 rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every
 client and RGW connection.
@@ -358,7 +358,24 @@ curl http://127.0.0.1:8404/health
 | **Node Crash** | Traffic fails over via ECMP (instant) |
 | **OS Freeze** | Proxmox Watchdog hard-resets VM (10s) |
 | **HAProxy Crash** | BGP withdraws immediately (`BindsTo=`) |
-| **Network Cut** | BGP hold timer expires and the router removes the route (3s default hold-time) |
+| **Network Cut** | BGP hold timer expires and the router removes the route (3s default hold-time); with BFD 0.9 s |
+
+### BFD (BGP mode, optional)
+
+ExaBGP has no BFD. With `bgp.bfd_enabled: true` each node also runs FRR `bfdd` alone (unit
+`ober-bfd`, no FRR bgpd or zebra, so FRR never changes routes) with one single-hop BFD session
+per `bgp.neighbors` entry, from `bgp.local_address` (or the node IP). The timers are
+`bgp.bfd_interval_ms` (300) and `bgp.bfd_multiplier` (3): a dead node or link is detected in
+0.9 s. `ober-bfd` has `BindsTo=ober-bgp`, so it stops with ExaBGP and HAProxy.
+
+- Bootstrap installs the `frr` package and keeps the distro `frr.service` off. BFD stays off
+  until FRR is installed, also when `bfd_enabled` is true (default `false`).
+- The config is `/etc/frr/bfdd.conf` (bfdd reads no other path). `ober config` and `ober apply`
+  write it and restart `ober-bfd` when it changes, which takes the BGP sessions down for a moment.
+- The router must tie BFD to the BGP session, for example bird2: `protocol bfd { }` and
+  `bfd on;` in each `protocol bgp`. It must accept UDP 3784 from the node addresses.
+- `ober status` and `ober doctor` show the peer state (`vtysh -d bfdd -c 'show bfd peers'`);
+  a peer that is down is WARN. `ober metrics` exports `ober_bfd_peer_up{peer}`.
 
 ### Keepalived Mode
 | Event | Recovery |

@@ -33,3 +33,17 @@ tests:
           - exp_labels: {severity: warning}
             exp_annotations:
               summary: "haproxy.cfg differs between nodes; run 'ober cluster status' and 'ober push'"
+  - interval: 30s
+    input_series:
+      - series: 'ober_bfd_peer_up{instance="a",peer="10.0.0.1"}'
+        values: "1x10"
+      - series: 'ober_bfd_peer_up{instance="a",peer="10.0.0.2"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OberBfdPeerDown
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: a, peer: 10.0.0.2}
+            exp_annotations:
+              summary: "a: BFD session to 10.0.0.2 is down"
+              description: "The router drops the BGP session of this node while BFD is down. Run 'ober status'."

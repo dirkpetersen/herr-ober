@@ -64,6 +64,13 @@ def render(s: dict[str, Any]) -> str:
                 if v.get("announced") is not None
             ],
         )
+        bfd = (s.get("bgp") or {}).get("bfd")
+        if bfd is not None:
+            metric(
+                "ober_bfd_peer_up",
+                "1 when the BFD session (FRR bfdd) to the BGP neighbor is up.",
+                [({"peer": peer}, up) for peer, up in bfd.items()],
+            )
     else:
         metric(
             "ober_vrrp_master",

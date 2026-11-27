@@ -73,7 +73,8 @@ def collect_status(config: OberConfig, config_error: str | None = None) -> dict[
     """Collect the node state into one dict (also used by ``--json``)."""
     ha_name = "ober-bgp" if config.ha_mode == "bgp" else "ober-ha"
     services: dict[str, Any] = {}
-    for name in ("ober-http", ha_name):
+    units = ["ober-http", ha_name] + (["ober-bfd"] if config.bfd_active() else [])
+    for name in units:
         svc = ServiceInfo.from_service_name(name)
         services[name] = {
             "active": svc.is_active,
@@ -102,6 +103,8 @@ def collect_status(config: OberConfig, config_error: str | None = None) -> dict[
             "version": get_exabgp_version(),
             "sessions": bgp_sessions(neighbors) if neighbors else {},
         }
+        if config.bfd_active():
+            result["bgp"]["bfd"] = bfd_peers(neighbors)
     else:
         from ober.system import get_keepalived_version
 
@@ -196,6 +199,24 @@ def bgp_sessions(neighbors: list[str]) -> dict[str, bool] | None:
         for field in line.split()[2:]:  # Recv-Q Send-Q Local:Port Peer:Port
             hosts.add(field.rsplit(":", 1)[0].strip("[]").removeprefix("::ffff:"))
     return {n: n in hosts for n in neighbors}
+
+
+def bfd_peers(neighbors: list[str]) -> dict[str, bool] | None:
+    """Return per neighbor whether its BFD session (FRR bfdd) is up, None if unknown."""
+    try:
+        out = subprocess.run(
+            ["vtysh", "-d", "bfdd", "-c", "show bfd peers json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        peers = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(peers, list):
+        return None
+    up = {p.get("peer") for p in peers if isinstance(p, dict) and p.get("status") == "up"}
+    return {n: n in up for n in neighbors}
 
 
 def _expected_owner(config: OberConfig, vip: str, owner: str = "") -> str:
@@ -293,6 +314,13 @@ def evaluate(result: dict[str, Any]) -> dict[str, Any]:
         if not up:
             problems.append(("WARN", f"BGP neighbor {neighbor}: no established session"))
 
+    bfd = result.get("bgp", {}).get("bfd", {})
+    if bfd is None:
+        problems.append(("WARN", "BFD state unknown (vtysh failed)"))
+    for peer, up in (bfd or {}).items():
+        if not up:
+            problems.append(("WARN", f"BFD peer {peer}: down"))
+
     for vip in result["vips"]:
         addr = vip["address"]
         if "announced" in vip:
@@ -324,6 +352,10 @@ def _fmt_bool(value: bool | None) -> str:
     if value is None:
         return "[dim]unknown[/dim]"
     return "[green]yes[/green]" if value else "[red]no[/red]"
+
+
+def _fmt_up(up: bool) -> str:
+    return "[green]up[/green]" if up else "[red]down[/red]"
 
 
 def _ago(seconds: int) -> str:
@@ -363,6 +395,12 @@ def _print_status(result: dict[str, Any]) -> None:
         for neighbor, up in (sessions or {}).items():
             state = "[green]established[/green]" if up else "[red]not established[/red]"
             console.print(f"[bold]BGP {neighbor}:[/bold] {state}")
+        if "bfd" in result["bgp"]:
+            bfd = result["bgp"]["bfd"]
+            if bfd is None:
+                console.print("[bold]BFD peers:[/bold] [dim]unknown (vtysh failed)[/dim]")
+            for peer, up in (bfd or {}).items():
+                console.print(f"[bold]BFD {peer}:[/bold] {_fmt_up(up)}")
     else:
         ka_ver = result["keepalived"]["version"] or "not installed"
         console.print(f"[bold]Keepalived:[/bold] {ka_ver}")

@@ -8,6 +8,7 @@ import click
 from rich.console import Console
 
 from ober.commands.backend import save_server_state
+from ober.commands.config import sync_bfd_unit
 from ober.commands.maintenance import is_maintenance, read_json, set_maintenance
 from ober.config import OberConfig, exit_if_invalid
 from ober.system import ServiceInfo, SystemInfo, run_command
@@ -161,6 +162,11 @@ def start(ctx: click.Context) -> None:
                 ctx.exit(1)
         else:
             console.print("[yellow]Skipping ober-ha (not configured)[/yellow]")
+
+    # BFD (FRR bfdd) runs with ober-bgp only when active; otherwise its unit is turned off
+    sync_bfd_unit(config)
+    if config.bfd_active():
+        console.print("[green]Started ober-bfd (FRR bfdd)[/green]")
 
     # Pull the blocklist from ober watch, if one is configured (failure is not fatal)
     if config.watch.url:

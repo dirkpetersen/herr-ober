@@ -83,7 +83,7 @@ def test_stats_bind_rejects_garbage(sample_config: OberConfig) -> None:
 def test_exabgp_has_no_bfd_block(sample_config: OberConfig) -> None:
     sample_config.bgp.bfd_enabled = True
     _generate_exabgp_config(sample_config)
-    assert "bfd" not in sample_config.bgp_config_path.read_text()
+    assert "bfd {" not in sample_config.bgp_config_path.read_text()
 
 
 def test_netplan_uses_dummy_devices(sample_config: OberConfig) -> None:

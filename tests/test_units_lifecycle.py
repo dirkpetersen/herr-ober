@@ -61,7 +61,7 @@ def test_bootstrap_disables_distro_units() -> None:
     with patch.object(bs, "run_command") as run:
         bs._disable_distro_units()
     run.assert_called_once_with(
-        ["systemctl", "disable", "--now", "haproxy", "keepalived"], check=False
+        ["systemctl", "disable", "--now", "haproxy", "keepalived", "frr"], check=False
     )
 
 

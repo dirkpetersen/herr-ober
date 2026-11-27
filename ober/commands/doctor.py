@@ -13,6 +13,7 @@ from rich.table import Table
 from ober.certs import check_cert_expiry
 from ober.commands.maintenance import is_maintenance
 from ober.commands.status import (
+    bfd_peers,
     load_config_safe,
     local_ipv4_addresses,
     read_vrrp_state,
@@ -67,6 +68,8 @@ def doctor(ctx: click.Context) -> None:
     checks.append(_check_unit_off(other_unit, "other HA mode's unit"))
     checks.append(_check_unit_off("haproxy", "distro unit, conflicts with ober-http"))
     checks.append(_check_unit_off("keepalived", "distro unit, conflicts with ober-ha"))
+    if config.ha_mode == "bgp" and config.bgp.bfd_enabled:
+        checks.append(_check_bfd(config))
     checks.append(_check_restart_pending(config, http_service))
     if config.config_path.exists() and not config_error:
         checks.append(_check_haproxy_syntax(config))
@@ -320,6 +323,22 @@ def _check_service(name: str) -> dict[str, Any]:
         "message": "Service not installed",
         "critical": False,
     }
+
+
+def _check_bfd(config: OberConfig) -> dict[str, Any]:
+    """BFD (FRR bfdd): installed, ober-bfd running, and the state of each peer."""
+    check = {"name": "BFD (ober-bfd)", "passed": False, "status": "off", "critical": False}
+    if not config.bfd_active():
+        why = "no bgp.neighbors" if config.bgp.neighbors == [] else "FRR (bfdd) not installed"
+        return {**check, "message": f"bfd_enabled but {why}: BFD is off"}
+    if not ServiceInfo.from_service_name("ober-bfd").is_active:
+        return {**check, "status": "inactive", "message": "ober-bfd not running ('ober start')"}
+    peers = bfd_peers(config.bgp.neighbors)
+    if peers is None:
+        return {**check, "status": "unknown", "message": "vtysh -d bfdd failed"}
+    down = [p for p, up in peers.items() if not up]
+    message = f"down: {', '.join(down)}" if down else f"{len(peers)} peer(s) up"
+    return {**check, "passed": not down, "status": "down" if down else "up", "message": message}
 
 
 def _check_unit_off(name: str, why: str) -> dict[str, Any]:

@@ -20,6 +20,10 @@ def _isolate_install_pointer(
     pointer = tmp_path_factory.mktemp("pointer") / "etc" / "ober" / "install_path"
     monkeypatch.setattr("ober.config.INSTALL_POINTER_PATH", pointer)
     monkeypatch.delenv("OBER_INSTALL_PATH", raising=False)
+    # No real /etc/frr; FRR counts as not installed unless a test creates the fake bfdd
+    frr = tmp_path_factory.mktemp("frr")
+    monkeypatch.setattr("ober.config.BFDD_CONFIG_PATH", frr / "bfdd.conf")
+    monkeypatch.setattr("ober.config.BFDD_PATHS", (frr / "bfdd",))
 
 
 @pytest.fixture
