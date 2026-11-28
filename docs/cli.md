@@ -13,6 +13,7 @@ success and `1` for errors.
 | [`config`](#ober-config) | Configuration wizard, or render `ober.yaml` without prompts | yes, except `--dry-run` |
 | [`apply`, `rollback`](#ober-apply-rollback) | Apply `ober.yaml` with check, reload and health gate; go back | yes |
 | [`push`](#ober-push) | `ober apply` on the other nodes, one at a time | SSH user needs `sudo -n ober` |
+| [`cluster init`](#ober-cluster-init) | Set up all nodes from IPs, backend and cert | SSH user needs `sudo -n` |
 | [`cluster status`](#ober-cluster-status) | All nodes: VIP placement and drift | SSH user needs `sudo -n ober` |
 | [`cluster upgrade`](#ober-cluster-upgrade) | Rolling upgrade, one node at a time | SSH user needs `sudo -n` |
 | [`status`](#ober-status) | Show the current state | no |
@@ -136,6 +137,23 @@ the same on all nodes. Exit 0 (OK), 1 (WARN) or 2 (CRIT), like `ober status --ch
 |--------|---------|-------------|
 | `--nodes` | `nodes` in `ober.yaml` (keepalived: `local_ip` plus the peers) | Comma-separated nodes |
 | `--timeout` | `10` | SSH connect timeout in seconds |
+
+## ober cluster init
+
+```text
+ober cluster init IP... --backend HOST[:PORT] [--backend ...] [--cert PEM] [--allow CIDR ...] [-y]
+```
+
+Sets up a keepalived cluster. It logs in to each IP over SSH: an IP that a host has on a NIC
+(shorter than /32) is a node, every other IP is a floating IP (VIP). It stops when two node IPs
+are the same host (`/etc/machine-id`), when there are fewer than 2 nodes or no floating IP, and
+when a floating IP that no node has answers ping or ARP. Without `--cert` it uses the
+certificate that a node already has (`ober --json status`). The S3 hostnames come from the
+certificate SAN. Public VIPs get `exposure: internet` and need `--allow`. For each node, one at
+a time: install ober if missing, `ober bootstrap -y` if not bootstrapped, write the certificate,
+`ober.local.yaml` (`local_ip`) and `ober.yaml`, then `ober apply -f -` when keepalived mode
+already runs (else `ober stop`, `ober config --non-interactive`), and `ober start`. It stops at
+the first failure. All nodes must use the same install path.
 
 ## ober cluster upgrade
 

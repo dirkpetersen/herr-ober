@@ -46,7 +46,7 @@ For host BIOS and kernel settings, a full VM config and a verification checklist
 [releases](https://github.com/dirkpetersen/herr-ober/releases)), not `main`, so you run a
 reviewed script. The script installs the newest herr-ober from PyPI.
 ```bash
-OBER_TAG=v0.5.0
+OBER_TAG=v0.6.0
 curl -fsSL "https://raw.githubusercontent.com/dirkpetersen/herr-ober/$OBER_TAG/install.sh" | sudo bash
 sudo ober bootstrap
 ```
@@ -100,7 +100,39 @@ sudo ober upgrade   # installs ExaBGP again if the reinstall removed it, and rew
 
 ### 3. Configure
 
-Interactive wizard to select HA mode (BGP or Keepalived) and configure VIPs, backends, and certificates.
+**Quickest way: the whole cluster in one command.** On one node, or on any host with ober that
+can SSH to the nodes as a user with `sudo -n`:
+
+```bash
+sudo ober cluster init 10.0.0.11 10.0.0.12 10.0.0.13 10.0.0.100 10.0.0.101 10.0.0.102 \
+    --backend s3.example.org --cert /path/fullchain-and-key.pem
+```
+
+- **IPs:** give the node IPs and the floating IPs in one list. Init logs in to each IP. An IP
+  that a host has on a NIC is a node. An IP that no host has is a floating IP (a keepalived VIP).
+  Init stops when a floating IP answers ping or ARP but is not on one of the nodes. Give one
+  floating IP per node, so all nodes carry traffic (DNS round robin). With one floating IP, only
+  one node serves at a time.
+- **Backend:** `host[:port]` or `https://host`. Port 443 (the default) uses TLS. Repeat
+  `--backend` for more servers. Init shows the NIC and source address that each node uses for
+  each backend (`ip route get`). Linux already sends backend traffic out of the NIC on the
+  backend VLAN, so ober does not set this. Init warns when backend traffic goes out of the
+  frontend NIC on a host that has more NICs.
+- **Certificate:** without `--cert`, init uses the certificate that the nodes already have. The
+  S3 hostnames come from the certificate SAN.
+- **Public VIPs** need `--allow CIDR` for the client networks, because internet VIPs deny all
+  other sources.
+- Init installs ober (from this version's release tag) and runs `ober bootstrap` where needed,
+  writes `ober.yaml` and `ober.local.yaml` (`local_ip`) on each node, and starts ober, one node
+  at a time. It always uses keepalived mode: BGP needs the AS numbers and the router address
+  from your network team. On RHEL 10, install the HAProxy 3.4 RPM first (see above).
+- Init shows its plan and asks before it changes anything (`-y` skips the question). A node that
+  is down looks like a free IP, so check the plan.
+
+`sudo ober config` on a node with no `ober.yaml` asks the same four things (IPs, backend,
+certificate, client CIDRs) and runs `ober cluster init`. Answer "no" for the full wizard.
+
+**Full wizard:** interactive wizard to select HA mode (BGP or Keepalived) and configure VIPs, backends, and certificates.
 
 ```bash
 sudo ober config
@@ -169,6 +201,7 @@ ober config --non-interactive  # Validate ober.yaml and render all configs, no p
 ober status               # Show current state (--json for scripting)
 ober metrics [--output F] # Node state for Prometheus (deploy/prometheus/alerts.yml)
 ober cluster status       # All nodes over SSH: VIP placement, drift (set nodes: in ober.yaml)
+ober cluster init IPS --backend HOST [--cert PEM]  # Set up all nodes (see Configure)
 ober cluster upgrade      # Rolling upgrade of all nodes, this node last (see Rolling upgrade)
 ober apply [-f FILE|-]    # Apply ober.yaml: diff, check, reload, health gate, auto roll back
 ober push                 # ober apply on the other nodes, one at a time; stops at a failure

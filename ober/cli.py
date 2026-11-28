@@ -133,6 +133,7 @@ from ober.commands.backend import backend  # noqa: E402
 from ober.commands.bootstrap import bootstrap  # noqa: E402
 from ober.commands.cert import cert  # noqa: E402
 from ober.commands.cluster import cluster, push  # noqa: E402
+from ober.commands.cluster_init import init  # noqa: E402
 from ober.commands.config import config  # noqa: E402
 from ober.commands.doctor import doctor  # noqa: E402
 from ober.commands.health import health  # noqa: E402
@@ -153,6 +154,7 @@ main.add_command(backend)
 main.add_command(rollback)
 main.add_command(bootstrap)
 main.add_command(cert)
+cluster.add_command(init)
 main.add_command(cluster)
 main.add_command(push)
 main.add_command(config)
