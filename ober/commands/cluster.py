@@ -300,11 +300,13 @@ def push(ctx: click.Context, nodes: str | None, timeout: int, yes: bool) -> None
     console.print(f"[green]Applied on {len(targets)} node(s).[/green] Check: ober cluster status")
 
 
-def _run_on(node: str, config: OberConfig, cmd: str, timeout: int = 900) -> tuple[int, str]:
+def _run_on(
+    node: str, config: OberConfig, cmd: str, timeout: int = 900, stdin: str | None = None
+) -> tuple[int, str]:
     """Run a shell command on ``node``: over SSH, or with sh on this node."""
     argv = ["sh", "-c", cmd] if _is_local(node, config) else [*_ssh(node, 10), cmd]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
     return proc.returncode, proc.stdout + proc.stderr

@@ -214,6 +214,12 @@ def config(ctx: click.Context, dry_run: bool, non_interactive: bool) -> None:
         if not config.config_path.exists():
             console.print(f"[red]Error:[/red] {config.config_path} not found.")
             ctx.exit(1)
+    elif not config.config_path.exists() and not dry_run and _quick_setup_wanted():
+        try:
+            ok = _quick_setup()
+        except KeyboardInterrupt:
+            ok = False
+        ctx.exit(0 if ok else 1)
     else:
         try:
             _run_wizard(config, system)
@@ -259,6 +265,29 @@ def config(ctx: click.Context, dry_run: bool, non_interactive: bool) -> None:
     else:
         console.print("  1. Run [bold]ober test[/bold] to validate keepalived configuration")
     console.print("  2. Run [bold]ober start[/bold] to start services")
+
+
+def _quick_setup_wanted() -> bool:
+    return bool(
+        inquirer.confirm(
+            "Set up all nodes now (asks only for the IPs, the backend and the certificate)?"
+            " No = the full wizard for this node.",
+            default=True,
+        )
+    )
+
+
+def _quick_setup() -> bool:
+    """The minimum questions, then ``ober cluster init`` (see ``cluster_init.run_init``)."""
+    from ober.commands.cluster_init import run_init
+
+    split = lambda text: [x.strip() for x in text.split(",") if x.strip()]  # noqa: E731
+    ips = split(inquirer.text(message="All IPs: the nodes and the floating IPs (comma-separated)"))
+    backends = split(inquirer.text(message="S3 backend: host[:port] or https://host"))
+    cert = inquirer.text(message="Certificate PEM file (empty = use the one the nodes have)")
+    allow = split(inquirer.text(message="Client CIDRs for public VIPs (empty for private VIPs)"))
+    text = Path(cert).read_text() if cert.strip() else None
+    return run_init(ips, backends, text, allow, yes=False)
 
 
 def _run_wizard(config: OberConfig, system: SystemInfo) -> None:
