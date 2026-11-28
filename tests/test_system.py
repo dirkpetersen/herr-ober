@@ -52,11 +52,23 @@ class TestSystemInfo:
             result = info._parse_os_release()
             assert result.get("ID") == "rhel"
 
-    def test_is_supported_debian(self) -> None:
-        """Test that Debian/Ubuntu is supported."""
+    @pytest.mark.parametrize(
+        ("os_id", "version", "supported"),
+        [
+            ("ubuntu", "26.04", True),
+            ("ubuntu", "26.10", True),
+            ("ubuntu", "24.04", False),
+            ("debian", "13", False),
+            ("ubuntu", "", False),
+        ],
+    )
+    def test_is_supported_debian_family(self, os_id: str, version: str, supported: bool) -> None:
+        """Only Ubuntu 26.04+ is supported: the HAProxy 3.4 PPA has no older build."""
         info = SystemInfo()
         info.os_family = OSFamily.DEBIAN
-        assert info.is_supported is True
+        info.os_id = os_id
+        info.os_version = version
+        assert info.is_supported is supported
 
     def test_is_supported_rhel_10(self) -> None:
         """Test that RHEL 10+ is supported."""

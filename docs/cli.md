@@ -61,7 +61,7 @@ venv is created at `PATH/venv`.
 |--------|-------------|
 | `PATH` | Installation path (required when `ober` is not running in a venv) |
 | `-y`, `--yes` | Skip confirmation prompts |
-| `--firewall` | Enable ufw or firewalld and allow only SSH, 443/tcp and VRRP |
+| `--firewall` | Enable ufw or firewalld and allow only SSH, 443/tcp, VRRP and BFD (3784/udp) |
 
 ## ober config
 
@@ -329,9 +329,9 @@ the [rolling upgrade](operations.md#rolling-upgrade).
 ober uninstall [OPTIONS]
 ```
 
-Removes the systemd services (`ober-http`, `ober-bgp`, `ober-ha`, `ober-watch`,
+Removes the systemd services (`ober-http`, `ober-bgp`, `ober-ha`, `ober-bfd`, `ober-watch`,
 `ober-blocklist`), the kernel tuning file, the VIP interface configuration, the installation
-directory, the install pointer, `~/.ober` (secrets), the `/usr/local/bin/ober` symlink and the
+directory, the install pointer, `~/.ober` (secrets), the `/usr/local/bin/ober` and `/usr/bin/ober` links and the
 pipx package, if present. It lists what it will remove and asks for confirmation first. Run it
 before retrying a bootstrap that failed midway.
 

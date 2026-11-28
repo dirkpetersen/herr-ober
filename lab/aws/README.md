@@ -2,7 +2,7 @@
 
 A small lab in us-west-2 to test herr-ober on real nodes: 3 ingress nodes (t4g.medium) and one
 helper (t4g.small). OS: AlmaLinux 10 (newest official arm64 AMI, owner 764336703387), SELinux
-enforcing, login `ec2-user`. Cost: about $0.12 per hour while it runs.
+enforcing, login `ec2-user` (`ubuntu` on Ubuntu nodes; the helper is always AlmaLinux). Cost: about $0.12 per hour while it runs.
 
 - **Backend:** AWS S3 itself (`s3.us-west-2.amazonaws.com:443`, TLS), bucket `hcic-townhall`.
   The nodes reach S3 through an S3 gateway VPC endpoint (private, no charge).
@@ -23,6 +23,8 @@ public IP. VIPs are `10.99.0.100` and `10.99.0.101`, outside the VPC CIDR `10.77
 ```bash
 export AWS_PROFILE=iam-dirk          # default in lib.sh
 lab/aws/up.sh                        # create or reconcile, then provision.sh
+NODE_OS=ubuntu lab/aws/up.sh         # ingress nodes on Ubuntu 26.04 instead (helper stays Alma)
+NODE_OS=al2027 lab/aws/up.sh         # or on Amazon Linux 2027
 lab/aws/deploy.sh HEAD               # build a wheel of a git ref, install on the nodes
 lab/aws/configure.sh bgp             # bootstrap, ober.yaml + ober.local.yaml, cert, start
 lab/aws/configure.sh keepalived      # switch mode (rewrites ober.yaml)
@@ -37,8 +39,11 @@ vars over ssh stdin; nothing is written on the helper. **Tests write and delete 
 `herr-ober-test/`.** The other objects (80-300 MB videos) are read-only test data.
 
 `up.sh` writes `inventory`, `ssh_config`, `known_hosts` and `node_key` (root on each node uses it
-to reach the others as ec2-user, for `ober push`, `cluster status` and `--all-nodes`) here
+to reach the others as the login user, for `ober push`, `cluster status` and `--all-nodes`) here
 (git-ignored) and the key to `~/.ssh/herr-ober-lab.pem`. `teardown.sh` removes all of them.
+
+`NODE_OS` (alma, ubuntu or al2027) is saved in `node_os` for the later scripts. To switch, terminate the
+three ingress nodes first (up.sh refuses a node with another `LabOS` tag), then run up.sh.
 
 ## Known limits
 
@@ -47,6 +52,6 @@ to reach the others as ec2-user, for `ober push`, `cluster status` and `--all-no
 - BIRD 3.4 misses the kernel update when a route grows from one path to more. The kernel
   protocol scans every 2 s (`scan time 2`), which repairs it. `export settle time 0 ms 10 ms`
   on the table removes BIRD's default 1 s delay before routes reach the kernel.
-- AlmaLinux 10 ships HAProxy 3.0.5 and keepalived 2.2.8 (no 3.3 package); `ober doctor` warns.
+- AlmaLinux 10 ships HAProxy 3.0.5 and keepalived 2.2.8 (no 3.4 package); `ober doctor` warns. `deploy/el10-haproxy/build-rpm.sh` builds 3.4.
 - `deploy.sh` uses a plain venv at `/opt/herr-ober` (not pipx) and links `ober` into
   `/usr/local/bin` and `/usr/bin` (RHEL sudo has no `/usr/local/bin` in `secure_path`).

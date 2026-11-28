@@ -213,7 +213,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
     # Check prerequisites
     if not system.is_supported:
         console.print(f"[red]Error:[/red] {system.os_name} {system.os_version} is not supported.")
-        console.print("Supported: Ubuntu, Debian, RHEL 10+, Amazon Linux 2023/2027")
+        console.print("Supported: Ubuntu 26.04+, RHEL 10+ (AlmaLinux, Rocky), Amazon Linux 2027")
         ctx.exit(1)
 
     if not system.is_root:
@@ -361,31 +361,51 @@ def _apply_kernel_tuning() -> None:
     run_command(["sysctl", "--system"], check=False)
 
 
+def _pin_ppa_arch(arch: str, sources_dir: Path) -> None:
+    """Make apt read the plain index of the HAProxy PPA.
+
+    On an amd64v3 host (Ubuntu 26.04 architecture variant, e.g. GitHub runners) apt reads only
+    the PPA's amd64v3 index, which has no haproxy, so the older distro package wins silently.
+    """
+    if not arch:
+        return
+    for f in sources_dir.glob("vbernat-ubuntu-haproxy-*.sources"):
+        text = f.read_text()
+        if "\nArchitectures:" not in "\n" + text:
+            f.write_text(text.replace("Types: deb\n", f"Types: deb\nArchitectures: {arch}\n", 1))
+
+
 def _install_packages(system: SystemInfo) -> None:
     """Install HAProxy and keepalived using the appropriate package manager."""
     if system.os_family == OSFamily.DEBIAN:
-        # Add HAProxy PPA for 3.3 on Ubuntu (the PPA build uses OpenSSL, not AWS-LC)
+        # HAProxy 3.4 PPA on Ubuntu 26.04+ (OpenSSL build); is_supported refuses older releases.
+        ppa = "ppa:vbernat/haproxy-3.4"
         if "ubuntu" in system.os_name.lower():
-            ppa = run_command(["add-apt-repository", "-y", "ppa:vbernat/haproxy-3.3"], check=False)
-            if ppa.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
+            added = run_command(["add-apt-repository", "-y", ppa], check=False)
+            if added.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
                 console.print(
-                    "[yellow]Warning:[/yellow] cannot add ppa:vbernat/haproxy-3.3, using the "
+                    f"[yellow]Warning:[/yellow] cannot add {ppa}, using the "
                     "distro HAProxy. Check its version with 'haproxy -v'."
                 )
+            else:
+                arch = run_command(["dpkg", "--print-architecture"], check=False).stdout.strip()
+                _pin_ppa_arch(arch, Path("/etc/apt/sources.list.d"))
         run_command(["apt-get", "update"], check=False)
         # iputils-ping: the optional keepalived chk_gateway script runs /usr/bin/ping.
         # frr: bfdd for BFD in BGP mode (ober-bfd); the distro frr.service stays off
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping", "frr"])
     elif system.os_family == OSFamily.RHEL:
+        # Amazon Linux 2027: name the AWS-LC build (its "haproxy" may pull haproxy-ossl), and it
+        # has no frr package, so no BFD there.
+        amzn = system.os_id == "amzn"
         run_command(
             [
                 "dnf",
                 "install",
                 "-y",
-                "haproxy",
+                *(["haproxy-awslc"] if amzn else ["haproxy", "frr"]),  # frr: bfdd (AppStream)
                 "keepalived",
                 "iputils",
-                "frr",  # bfdd for BFD in BGP mode (AppStream)
                 "policycoreutils-python-utils",
                 "checkpolicy",  # checkmodule builds the herr_ober SELinux module
             ]

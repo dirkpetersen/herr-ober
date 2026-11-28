@@ -56,7 +56,7 @@ class TestDoctorCommand:
             mock_instance = MagicMock()
             mock_instance.os_family.value = "debian"
             mock_instance.os_name = "Ubuntu"
-            mock_instance.os_version = "24.04"
+            mock_instance.os_version = "26.04"
             mock_instance.python_version = "3.12.3"
             mock_instance.is_root = False
             mock_instance.is_supported = True
@@ -75,7 +75,7 @@ class TestDoctorCommand:
             mock_instance = MagicMock()
             mock_instance.os_family.value = "debian"
             mock_instance.os_name = "Ubuntu"
-            mock_instance.os_version = "24.04"
+            mock_instance.os_version = "26.04"
             mock_instance.python_version = "3.12.3"
             mock_instance.is_root = False
             mock_instance.is_supported = True

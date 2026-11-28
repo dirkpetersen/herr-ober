@@ -85,7 +85,7 @@ These were not in the list above. Each one is the default the work used.
   `<install>/var/run/haproxy-server-state` after each change and before each `ober restart`
   or `ober stop`, so a drain survives a reload, restart and reboot. A plain
   `systemctl reload ober-http` does not save it first.
-- **PPA (9.4):** when `ppa:vbernat/haproxy-3.3` cannot be added, bootstrap warns and uses the
+- **PPA (9.4):** when the HAProxy PPA cannot be added, bootstrap warns and uses the
   distro HAProxy instead of failing (Ubuntu 26.04 has no PPA build but ships 3.2).
 - **Apply (2.2, 2.5):** `ober apply` is a new command; `ober config --non-interactive` plus
   `ober restart` still work. A failed apply keeps the edit in `ober.yaml` (so it can be fixed and
@@ -120,7 +120,7 @@ These were not in the list above. Each one is the default the work used.
   `ober restart --hard` runs always in BGP mode (the health process gets the new code) and in
   keepalived mode only when `ober upgrade` asks for a restart. Each wait (drain, cluster OK) has
   `--timeout`, default 300 s. `ober upgrade` got `-y`, because the prompt cannot work over SSH.
-- **PPA (9.4), kept:** when `ppa:vbernat/haproxy-3.3` cannot be added, bootstrap warns and uses
+- **PPA (9.4), kept:** when the HAProxy PPA cannot be added, bootstrap warns and uses
   the distro HAProxy. Failing would block every new Ubuntu release until the PPA has a build.
   `ober doctor` shows the HAProxy version and TLS library, and `ober cluster status` shows
   version drift between nodes.
@@ -170,7 +170,7 @@ These were not in the list above. Each one is the default the work used.
   (SigV4). Only TLS servers given by name get runtime DNS (`resolvers sys`, `parse-resolv-conf`,
   `init-addr last,libc,none`, `resolve-prefer ipv4`); plain backends keep resolve-at-start, so
   names only in /etc/hosts never go to MAINT on a DNS NX. IP servers get no SNI: only the CA
-  chain is verified. Checked with HAProxy 3.3 (OpenSSL) against the real
+  chain is verified. Checked with HAProxy 3.3 and 3.4 (OpenSSL) and 3.4 (AWS-LC) against the real
   `s3.us-west-2.amazonaws.com`: L7OK (GET / gives 307), bucket requests reach AWS with Host
   kept. Not checked with an AWS-LC build.
 
@@ -198,8 +198,28 @@ These were not in the list above. Each one is the default the work used.
   links `/usr/bin/ober` when sudo's `secure_path` lacks `/usr/local/bin` (RHEL default), so
   `sudo ober` and the remote `sudo -n ober` work; `ober uninstall` removes only that link.
   (c) RHEL 10 ships HAProxy 3.0.5 and keepalived 2.2.8; bootstrap installs them as is
-  (default: no third-party repo), `ober doctor` warns "recommend 3.3+". (d) TLS server lines
+  (default: no third-party repo), `ober doctor` warns "recommend 3.4+". (d) TLS server lines
   carry `check-ssl` (runtime-added servers do not imply it). (e) `ober cluster upgrade` ignores
   ober and HAProxy version drift while it waits for OK; config drift still blocks. (f) `ober
   upgrade` renders the units with the running venv when `<install>/venv` is not a venv (an
   ober.yaml without `venv_path`).
+
+## HAProxy 3.4 (LTS) is the target (2026-11-27)
+
+- **Ubuntu:** `ppa:vbernat/haproxy-3.4` builds only for 26.04 (resolute) and later. Ubuntu 24.04
+  and Debian are not supported (decided 2026-11-27): bootstrap and doctor refuse them, because
+  their distro HAProxy (2.8 on 24.04) fails 17 of 41 live tests. CI runs on `ubuntu-26.04`.
+- **EL10:** no 3.4 package exists (AlmaLinux 10 ships 3.0.5). `deploy/el10-haproxy/build-rpm.sh`
+  rebuilds the Fedora rawhide source RPM (Fedora packaging, upstream source, system OpenSSL 3.5);
+  the only change is the admin tool paths (Fedora merged `/usr/sbin`). Not a third-party COPR.
+- `ober doctor` recommends 3.4+.
+- A live test fails when `haproxy -c` prints any WARNING for the generated config, so a new release
+  that deprecates a keyword shows up in CI.
+- **amd64v3 hosts** (Ubuntu 26.04 architecture variant, seen on the GitHub `ubuntu-26.04` runner):
+  apt reads only the PPA's `binary-amd64v3` index, which has no haproxy, so the distro 3.2 package
+  was installed without a warning. Bootstrap writes `Architectures: <dpkg arch>` into the PPA
+  `.sources` file (permanent, so PPA updates stay visible); CI does the same and fails unless
+  `haproxy -v` shows 3.4.
+- **Amazon Linux 2027:** its own `haproxy-awslc` (3.4.7, AWS-LC FIPS). Bootstrap names it, because
+  the `haproxy` meta package may pick `haproxy-ossl`. AL2027 has no `frr`, so bootstrap does not
+  ask for it (before, `dnf install` failed there) and BFD stays off.

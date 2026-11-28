@@ -214,3 +214,4 @@ lab/aws/node_key
 lab/aws/node_key.pub
 lab/aws/lab-ca.pem
 lab/aws/server.pem
+lab/aws/node_os

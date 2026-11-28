@@ -8,13 +8,14 @@
 [![Tests](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml/badge.svg)](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml)
 
 Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller
-designed for Ceph RGW clusters. It uses **HAProxy 3.3** for SSL offloading (the Ubuntu PPA and distro builds use OpenSSL;
-`ober doctor` shows the TLS library) and one of two high-availability modes:
+designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading (Ubuntu 26.04 PPA, a rebuilt Fedora RPM on RHEL 10,
+`haproxy-awslc` with AWS-LC FIPS on Amazon Linux 2027; other releases use the distro
+HAProxy; `ober doctor` shows the version and TLS library) and one of two high-availability modes:
 
 - **BGP/ECMP mode** uses **ExaBGP** for Layer 3 HA via BGP (requires a BGP-capable router).
 - **Keepalived mode** uses **VRRP** for VIP failover (no BGP required).
 
-**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2.
+**Supported:** Ubuntu 26.04+, RHEL 10+ (AlmaLinux 10, Rocky 10) on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2.
 Python 3.12+. IPv4 only.
 
 The whole stack is installed and managed by one CLI, `ober`, published on PyPI as
@@ -40,7 +41,7 @@ Each node runs these systemd services:
 
 | Service | Component | Role |
 |---------|-----------|------|
-| `ober-http` | HAProxy 3.3 | SSL offloading, S3 frontends, proxying to the Ceph RGW backends |
+| `ober-http` | HAProxy 3.4 | SSL offloading, S3 frontends, proxying to the Ceph RGW backends |
 | `ober-bgp` | ExaBGP | BGP mode only: announces the shared VIP(s) to the router |
 | `ober-ha` | Keepalived | Keepalived mode only: VRRP failover of one VIP per node |
 
@@ -78,7 +79,7 @@ See [Configuration](configuration.md#ha-modes) for the details of each mode.
     |-------|----------|
     | **Node crash** | VIP fails over to a backup node (instant) |
     | **OS freeze** | Proxmox watchdog resets the VM, VRRP timeout triggers failover (3-10s) |
-    | **HAProxy crash** | Health check fails, priority drops, VIP fails over (4-6s) |
+    | **HAProxy crash** | keepalived stops with it (`BindsTo=`), VIPs move at once; a hung HAProxy fails the health check (about 4 s) |
     | **Keepalived crash** | VRRP advertisements stop, VIP fails over (3s) |
     | **Network partition** | Risk of split-brain (both nodes may claim the VIP) |
 

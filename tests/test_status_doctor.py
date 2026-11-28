@@ -382,19 +382,19 @@ def checks_by_name(cli_runner: CliRunner) -> dict[str, dict[str, object]]:
 
 class TestDoctor:
     def test_version_compare(self) -> None:
-        for version, status_str in (("4.0.1", "installed"), ("3.3.0", "installed")):
+        for version, status_str in (("4.0.1", "installed"), ("3.4.0", "installed")):
             with patch.object(doctor, "get_haproxy_version", return_value=version):
                 assert doctor._check_haproxy()["status"] == status_str
-        with patch.object(doctor, "get_haproxy_version", return_value="3.2.25"):
+        with patch.object(doctor, "get_haproxy_version", return_value="3.3.9"):
             assert doctor._check_haproxy()["status"] == "installed (old)"
 
     def test_tls_library_shown(self) -> None:
         vv = "Built with SSL library version : X\nRunning on SSL library version : OpenSSL 3.0.13\n"
         with (
-            patch.object(doctor, "get_haproxy_version", return_value="3.3.18"),
+            patch.object(doctor, "get_haproxy_version", return_value="3.4.9"),
             patch("ober.system.subprocess.run", return_value=MagicMock(stdout=vv)),
         ):
-            assert doctor._check_haproxy()["message"] == "Version 3.3.18, TLS: OpenSSL 3.0.13"
+            assert doctor._check_haproxy()["message"] == "Version 3.4.9, TLS: OpenSSL 3.0.13"
 
     def test_root_is_not_critical(self) -> None:
         from ober.system import SystemInfo

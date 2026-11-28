@@ -215,3 +215,53 @@ first node in, then the others: the kernel kept 1 next hop until the 60 s scan).
   ("BFD session down"); it comes back without BFD after the error wait.
 - HAProxy 3.0.5 is the only HAProxy on EL10; no HAProxy 3.3 build was tested on Alma.
 - The lab cert expires after 30 days, the lab CA after 90.
+
+# 2026-11-27: HAProxy 3.4 on AlmaLinux 10 and Ubuntu 26.04
+
+Same lab (3 x t4g.medium arm64, bird helper with BFD, AWS S3 backend over TLS, BGP mode).
+First AlmaLinux 10.3 (HAProxy 3.0.5 rolled to 3.4.8), then the nodes replaced with Ubuntu 26.04
+(`NODE_OS=ubuntu`, fresh bootstrap).
+
+| Test | AlmaLinux 10.3 | Ubuntu 26.04 |
+|---|---|---|
+| HAProxy source | `deploy/el10-haproxy/build-rpm.sh` on the helper: Fedora 3.4.8 SRPM, ~6 min on t4g.small | `ppa:vbernat/haproxy-3.4` (3.4.9), added by `ober bootstrap` |
+| TLS library (`ober doctor`) | OpenSSL 3.5.9 | OpenSSL 3.5.5 |
+| Install | `ober cluster upgrade --command "dnf install -y <rpm>"` from 3.0.5, 95 s | fresh `ober bootstrap` (also installed `frr` itself, first time tested) |
+| Probe every 0.2 s during the rolling upgrade | 479 / 479 OK | 430 / 430 OK (`--reinstall haproxy`, 75 s) |
+| SELinux | 0 AVC denials (the RPM keeps `/usr/sbin/haproxy`, `haproxy_exec_t`) | n/a |
+| `haproxy -c`, cluster status, BFD peers up, 3-way ECMP | pass | pass |
+| S3 GET 168 MB video / PUT+GET 64 MiB under `herr-ober-test/` | 1.2 s / identical | 1.5 s / identical |
+| Runtime add + del of a TLS server (`ober apply`) | no reload, UP L7OK, same master PID | same |
+| BFD: node loses the router | route removed after 1.5 s | 1.0 s |
+| Reboot ober2 | not repeated | services up, route back to 3 paths, `ober status` OK |
+| Distro `haproxy`/`frr` units after the package (re)install | stay disabled | stay disabled |
+
+Findings:
+
+1. The 3.4 PPA builds only for 26.04 (resolute). Adding it on 24.04 makes `apt-get update` fail
+   ("does not have a Release file"), so bootstrap keeps the 3.3 PPA on noble.
+2. Fedora's spec puts halog/iprange in `%{_bindir}` (Fedora merged `/usr/sbin`); on EL10 they are
+   in `%{_sbindir}`. `build-rpm.sh` fixes the three `%files` lines; nothing else changes.
+3. `ausearch` without a terminal reads stdin and hangs; use `ausearch --input-logs`.
+4. CI (GitHub `ubuntu-26.04`, an amd64v3 runner) installed the distro HAProxy 3.2.25 although the
+   3.4 PPA was added: apt reads only the PPA's amd64v3 index, and the PPA builds no amd64v3
+   haproxy. Fixed in bootstrap (`Architectures:` in the PPA `.sources`) and in CI. The arm64 lab
+   nodes were not affected.
+
+## Amazon Linux 2027 (same day, `NODE_OS=al2027`, AMI al2027-preview-ami-2027.0.20261127.0)
+
+| Test | Result |
+|---|---|
+| Fresh `ober bootstrap` | pass after fix 5; installs `haproxy-awslc` 3.4.7 (meta `haproxy` too), SELinux enforcing, 0 AVC denials |
+| `ober doctor` | "Version 3.4.7, TLS: AWS-LC FIPS"; BFD "off: FRR (bfdd) not installed" although `bfd_enabled: true` |
+| BGP, 3-way ECMP, cluster status OK | pass |
+| TLS backend to AWS S3 with AWS-LC (was not checked before) | L7OK; 168 MB GET 1.5 s; 64 MiB PUT/GET identical |
+| Runtime add + del of a TLS server | no reload, UP L7OK, same master PID |
+| `systemctl stop ober-http` on ober2 | route removed after 1.7 s |
+| Link loss without BFD (blackhole) | route removed after 2.9 s (BGP hold time 3 s) |
+| `ober cluster upgrade --command "dnf reinstall -y haproxy-awslc"` | 81 s, probe 369 / 369 OK |
+| `dnf upgrade haproxy` (what `ober upgrade` runs) | works: the meta package pins `haproxy-awslc` to its version |
+
+5. AL2027 has no `frr` package. Bootstrap asked for it in the same `dnf install` as haproxy, so
+   bootstrap failed on AL2027 since BFD was added. It now installs `haproxy-awslc` by name and no
+   `frr` there.

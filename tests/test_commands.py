@@ -28,11 +28,12 @@ class TestDoctorChecks:
     """Tests for individual doctor check functions."""
 
     def test_check_os_debian(self) -> None:
-        """Test OS check for Debian."""
+        """Test OS check for Ubuntu."""
         system = SystemInfo()
         system.os_family = OSFamily.DEBIAN
+        system.os_id = "ubuntu"
         system.os_name = "Ubuntu"
-        system.os_version = "24.04"
+        system.os_version = "26.04"
 
         result = _check_os(system)
         assert result["passed"] is True
@@ -919,6 +920,7 @@ class TestDoctorPrintResults:
         result = _check_os(system)
         assert result["passed"] is False
         assert "not supported" in result["message"]
+        assert result["critical"] is False  # an old running node must not fail cluster upgrade
 
     def test_check_python_too_old(self) -> None:
         """Test Python version check for old version."""
@@ -934,7 +936,7 @@ class TestDoctorPrintResults:
             result = _check_haproxy()
             assert result["passed"] is True
             assert "old" in result["status"]
-            assert "3.3+" in result["message"]
+            assert "3.4+" in result["message"]
 
     def test_check_haproxy_invalid_version(self) -> None:
         """Test HAProxy check with invalid version string."""
@@ -1281,13 +1283,48 @@ class TestBootstrapMoreTests:
         system = SystemInfo()
         system.os_family = OSFamily.DEBIAN
 
-        with patch("ober.commands.bootstrap.run_command") as mock_run:
+        with (
+            patch("ober.commands.bootstrap.run_command") as mock_run,
+            patch("ober.commands.bootstrap._pin_ppa_arch"),
+        ):
             _install_packages(system)
             # Check that install command includes both haproxy and keepalived
             assert mock_run.called
             calls = [str(call) for call in mock_run.call_args_list]
             # Should have called apt-get install with both packages
             assert any("haproxy" in str(call) and "keepalived" in str(call) for call in calls)
+
+    def test_install_packages_ubuntu_ppa(self) -> None:
+        """Ubuntu adds the 3.4 PPA first."""
+        from ober.commands.bootstrap import _install_packages
+
+        system = SystemInfo()
+        system.os_family = OSFamily.DEBIAN
+        system.os_name = "Ubuntu"
+        with (
+            patch("ober.commands.bootstrap.run_command") as mock_run,
+            patch("ober.commands.bootstrap._pin_ppa_arch"),
+        ):
+            _install_packages(system)
+        assert mock_run.call_args_list[0].args[0] == [
+            "add-apt-repository",
+            "-y",
+            "ppa:vbernat/haproxy-3.4",
+        ]
+
+    def test_pin_ppa_arch(self, tmp_path: Path) -> None:
+        """The PPA source gets the host arch once, so amd64v3 hosts read its amd64 index."""
+        from ober.commands.bootstrap import _pin_ppa_arch
+
+        src = tmp_path / "vbernat-ubuntu-haproxy-3_4-resolute.sources"
+        src.write_text("Types: deb\nURIs: https://ppa.launchpadcontent.net/x/\nSuites: resolute\n")
+        other = tmp_path / "ubuntu.sources"
+        other.write_text("Types: deb\n")
+        _pin_ppa_arch("amd64", tmp_path)
+        _pin_ppa_arch("amd64", tmp_path)
+        assert src.read_text().startswith("Types: deb\nArchitectures: amd64\nURIs:")
+        assert src.read_text().count("Architectures:") == 1
+        assert other.read_text() == "Types: deb\n"
 
     def test_install_packages_rhel_includes_keepalived(self) -> None:
         """Test _install_packages installs both HAProxy and Keepalived on RHEL."""
@@ -1304,6 +1341,22 @@ class TestBootstrapMoreTests:
             calls = [str(call) for call in mock_run.call_args_list]
             # Should have called dnf install with both packages
             assert any("haproxy" in str(call) and "keepalived" in str(call) for call in calls)
+
+    def test_install_packages_amazon_linux(self) -> None:
+        """AL2027: the AWS-LC HAProxy by name, and no frr (it has no such package)."""
+        from ober.commands.bootstrap import _install_packages
+
+        for os_id, want, absent in (
+            ("amzn", "haproxy-awslc", "frr"),
+            ("almalinux", "frr", "haproxy-awslc"),
+        ):
+            system = SystemInfo()
+            system.os_family = OSFamily.RHEL
+            system.os_id = os_id
+            with patch("ober.commands.bootstrap.run_command") as mock_run:
+                _install_packages(system)
+            cmd = mock_run.call_args_list[0].args[0]
+            assert want in cmd and absent not in cmd
 
 
 class TestCLIEdgeCases:

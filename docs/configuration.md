@@ -27,7 +27,7 @@ The wizard then shows a summary and, after confirmation:
 1. saves `ober.yaml` (keys that `ober.local.yaml` has are saved there);
 2. writes the security lists and `haproxy.cfg`;
 3. in BGP mode, writes the ExaBGP config and the `lo-vip` dummy interface that holds the VIPs
-   (netplan `/etc/netplan/60-vip.yaml` on Ubuntu/Debian, `nmcli` on RHEL, systemd-networkd
+   (netplan `/etc/netplan/60-vip.yaml` on Ubuntu, `nmcli` on RHEL, systemd-networkd
    files `/etc/systemd/network/60-lo-vip.*` when neither exists, for example on Amazon Linux);
    in keepalived mode, writes `keepalived.conf` and removes a `lo-vip` left from BGP mode
    (keepalived manages the VIPs itself);

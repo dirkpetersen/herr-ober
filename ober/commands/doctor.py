@@ -111,7 +111,7 @@ def _check_os(system: SystemInfo) -> dict[str, Any]:
             "name": "Operating System",
             "passed": False,
             "status": "unsupported",
-            "message": f"Unknown OS: {system.os_name}. Supported: Ubuntu, Debian, RHEL 10+, Amazon Linux 2023/2027",
+            "message": f"Unknown OS: {system.os_name}. Supported: Ubuntu 26.04+, RHEL 10+, Amazon Linux 2027",
             "critical": True,
         }
 
@@ -120,8 +120,9 @@ def _check_os(system: SystemInfo) -> dict[str, Any]:
             "name": "Operating System",
             "passed": False,
             "status": "unsupported",
-            "message": f"{system.os_name} {system.os_version} is not supported. RHEL requires 10+, Amazon Linux 2023 or 2027",
-            "critical": True,
+            "message": f"{system.os_name} {system.os_version} is not supported. Supported: Ubuntu 26.04+, RHEL 10+, Amazon Linux 2027",
+            # Not critical: bootstrap refuses new installs; a running node must not fail upgrades.
+            "critical": False,
         }
 
     return {
@@ -177,10 +178,10 @@ def _check_haproxy() -> dict[str, Any]:
     if version:
         tls = get_haproxy_tls_library()  # distro and PPA builds use OpenSSL, not AWS-LC
         shown = f"{version}, TLS: {tls}" if tls else version
-        # Recommend version 3.3+
+        # Recommend version 3.4+ (LTS)
         try:
             major, minor = map(int, version.split(".")[:2])
-            if (major, minor) >= (3, 3):
+            if (major, minor) >= (3, 4):
                 return {
                     "name": "HAProxy",
                     "passed": True,
@@ -192,7 +193,7 @@ def _check_haproxy() -> dict[str, Any]:
                 "name": "HAProxy",
                 "passed": True,
                 "status": "installed (old)",
-                "message": f"Version {shown} (recommend 3.3+)",
+                "message": f"Version {shown} (recommend 3.4+)",
                 "critical": False,
             }
         except (ValueError, IndexError):

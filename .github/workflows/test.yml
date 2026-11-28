@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04  # the haproxy-3.4 PPA builds only for 26.04
     strategy:
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
@@ -28,9 +28,12 @@ jobs:
 
       - name: Install config validators (haproxy, keepalived, netplan, ExaBGP 4.2 and 5.0)
         run: |
-          sudo add-apt-repository -y ppa:vbernat/haproxy-3.3
+          sudo add-apt-repository -y ppa:vbernat/haproxy-3.4
+          # the runner is amd64v3; the PPA has no amd64v3 haproxy (same fix as ober bootstrap)
+          sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/vbernat-ubuntu-haproxy-*.sources
           sudo apt-get update
           sudo apt-get install -y haproxy keepalived netplan.io
+          haproxy -v | grep -q 'version 3\.4\.'
           python -m venv "$RUNNER_TEMP"/exabgp42 && "$RUNNER_TEMP"/exabgp42/bin/pip install -q "exabgp>=4.2,<4.3"
           python -m venv "$RUNNER_TEMP"/exabgp50 && "$RUNNER_TEMP"/exabgp50/bin/pip install -q "exabgp>=5.0,<5.1"
           echo "OBER_TEST_EXABGP=$RUNNER_TEMP/exabgp42/bin/exabgp:$RUNNER_TEMP/exabgp50/bin/exabgp" >> "$GITHUB_ENV"

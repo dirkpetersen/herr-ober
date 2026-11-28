@@ -5,7 +5,7 @@ cluster.
 
 ## Requirements
 
-- Ubuntu, Debian or RHEL 10+ running in a Proxmox (KVM) VM, or Amazon Linux 2027 on EC2.
+- Ubuntu 26.04+, RHEL 10+ (AlmaLinux 10, Rocky 10) running in a Proxmox (KVM) VM, or Amazon Linux 2027 on EC2.
 - Python 3.12 or newer, and root access.
 - Internet access during installation (packages, PyPI, and the HAProxy PPA on Ubuntu).
 - For BGP mode, a BGP-capable upstream router with ECMP.
@@ -96,16 +96,21 @@ For later upgrades of a running cluster, follow the
    `/etc/ober/install_path`.
 2. Writes kernel tuning to `/etc/sysctl.d/99-herr-ober.conf` (including conntrack limits) and
    applies it (see [Architecture](architecture.md)).
-3. Installs `haproxy` and `keepalived` from the OS packages and disables their distro units.
-   On Ubuntu it first adds `ppa:vbernat/haproxy-3.3`. On RHEL it keeps SELinux enforcing and
+3. Installs `haproxy`, `keepalived` and `frr` (only its `bfdd` is used, for BFD) from the OS
+   packages and disables their distro units. On Ubuntu it first adds `ppa:vbernat/haproxy-3.4`
+   (it builds only for Ubuntu 26.04 and later, so bootstrap refuses 24.04 and Debian). On Amazon Linux 2027
+   it installs `haproxy-awslc` and no `frr` (AL2027 has no such package, so no BFD). RHEL 10
+   ships HAProxy 3.0: install the 3.4 RPM first, see
+   [HAProxy 3.4 on RHEL 10](https://github.com/dirkpetersen/herr-ober#haproxy-34-on-rhel-10). On RHEL it keeps SELinux enforcing and
    loads the `herr_ober` policy module (see [Architecture](architecture.md#d-selinux-rhel-only)).
 4. Installs ExaBGP with pip into the venv `ober` runs from (`exabgp>=4.2,<5`).
 5. Writes the systemd units `ober-http`, `ober-bgp` and `ober-ha` (plus the `ober watch` and
    blocklist sync units, which are enabled only when needed).
 6. Writes initial configuration templates.
 7. Arms the systemd hardware watchdog with a drop-in (`RuntimeWatchdogSec=10s`).
-8. Only with `--firewall`: enables ufw (Debian/Ubuntu) or firewalld (RHEL) and allows the SSH
-   port(s) first, then 443/tcp and VRRP. An already active firewall gets only 443/tcp and VRRP.
+8. Only with `--firewall`: enables ufw (Ubuntu) or firewalld (RHEL) and allows the SSH
+   port(s) first, then 443/tcp, VRRP and BFD (3784/udp). An already active firewall gets only
+   443/tcp, VRRP and 3784/udp.
    Port 80, BGP and the stats port are not opened. Without `--firewall` no firewall is changed.
 
 When `ober` runs from a venv (the pipx install above), bootstrap reuses an existing install
