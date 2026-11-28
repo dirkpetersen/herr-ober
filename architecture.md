@@ -3,7 +3,7 @@
 **High-Performance S3 Ingress Controller Architecture**
 
 **Target Throughput:** 50GB/s+ (Aggregate)
-**Supported OS:** Ubuntu, Debian, RHEL 10+
+**Supported OS:** Ubuntu, Debian, RHEL 10+, Amazon Linux 2027
 **Infrastructure:** Proxmox VMs (KVM)
 **Topology:** Layer 3 BGP ECMP (Active/Active)
 **Network:** IPv4 only
@@ -32,7 +32,7 @@
 
 ### The Component Stack (Per Node)
 
-1. **`ober-http` (HAProxy 3.4, OpenSSL):** SSL offloading, S3 headers, ACLs, proxies to Ceph RGW backends.
+1. **`ober-http` (HAProxy 3.4, OpenSSL or AWS-LC):** SSL offloading, S3 headers, ACLs, proxies to Ceph RGW backends.
 2. **HA Component (Mode-Dependent):**
     - **BGP Mode:** `ober-bgp` (ExaBGP) - Announces VIP(s) to router via BGP
     - **Keepalived Mode:** `ober-ha` (Keepalived) - VRRP-based VIP failover between nodes

@@ -8,7 +8,7 @@
 
 **High-Performance S3 Ingress Controller (BGP/ECMP or VRRP)**
 
-Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.4** (the Ubuntu PPA and distro builds use OpenSSL; `ober doctor` shows the TLS library) for SSL offloading with two HA modes:
+Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading: from the PPA on Ubuntu 26.04, from a rebuilt Fedora RPM on RHEL 10 (see below), and `haproxy-awslc` (AWS-LC FIPS) on Amazon Linux 2027. On other releases (Ubuntu 24.04, Debian) it uses the distro HAProxy, and `ober doctor` reports it as old and shows the TLS library. It has two HA modes:
 
 - **BGP/ECMP Mode** - Uses **ExaBGP** for Layer 3 HA via BGP (requires BGP-capable router)
 - **Keepalived Mode** - Uses **VRRP** for VIP failover (no BGP required)
@@ -79,13 +79,14 @@ only `lo-vip`; the ENI configuration of amazon-ec2-net-utils is not changed.
 
 **HAProxy 3.4 on RHEL 10:** RHEL, AlmaLinux and Rocky 10 ship only HAProxy 3.0. Before
 `ober bootstrap`, build the 3.4 RPM from the Fedora source RPM on one EL10 host of the same CPU
-architecture, and install it on each node (`dnf` then keeps it, because it is newer than 3.0):
+architecture, and install it on each node (`dnf` then keeps it, because it is newer than 3.0). It
+was tested on AlmaLinux 10; on RHEL it enables the CodeReady Builder repo with subscription-manager:
 ```bash
 sudo deploy/el10-haproxy/build-rpm.sh      # prints /var/tmp/haproxy-rpm.*/RPMS/<arch>/haproxy-3.4*.rpm
 sudo dnf install -y /var/tmp/haproxy-rpm.*/RPMS/*/haproxy-3.4*.rpm
 ```
 On Ubuntu, bootstrap uses `ppa:vbernat/haproxy-3.4`. That PPA builds only for 26.04 and later, so
-24.04 gets the 3.3 PPA.
+use Ubuntu 26.04. On 24.04 bootstrap adds no PPA, warns, and installs the distro HAProxy.
 
 **Upgrading from v0.3.0 or earlier:** re-run the one-liner. The old install lived under
 `/root/.local/pipx`; the installer prints how to keep it
@@ -298,6 +299,14 @@ steps by hand, on each node:
 6. `sudo ober maintenance off`.
 7. Wait until `sudo ober cluster status` exits 0 again, then go to the next node.
 
+**Moving existing nodes to HAProxy 3.4:** `ober upgrade` only updates the installed package; it
+does not change the PPA or install the EL10 RPM. Use `--command` for this:
+- Ubuntu 26.04: `sudo ober cluster upgrade --command "rm -f /etc/apt/sources.list.d/vbernat-ubuntu-haproxy-*.sources && add-apt-repository -y ppa:vbernat/haproxy-3.4 && DEBIAN_FRONTEND=noninteractive apt-get install -y haproxy"` (it replaces the older HAProxy PPA; checked on 26.04).
+  On an amd64v3 host, add `Architectures: amd64` to the new PPA `.sources` file, as bootstrap does.
+- RHEL 10: copy the RPM from `deploy/el10-haproxy/build-rpm.sh` to each node, then
+  `sudo ober cluster upgrade --command "dnf install -y /root/haproxy-3.4.8-1.el10.<arch>.rpm"`
+  (tested in the AWS lab: 0 failed requests).
+
 BGP mode: the health process that ExaBGP started keeps running the old code until ExaBGP
 restarts. A health process from an ober version without SIGHUP support dies on the SIGHUP that
 `ober apply`, `ober rollback` and `ober push` send, and ExaBGP starts it again with the new
@@ -393,7 +402,7 @@ per `bgp.neighbors` entry, from `bgp.local_address` (or the node IP). The timers
 |-------|----------|
 | **Node Crash** | VIP fails over to backup node (instant) |
 | **OS Freeze** | Proxmox Watchdog resets VM, VRRP timeout triggers failover (3-10s) |
-| **HAProxy Crash** | Health check fails, priority drops, VIP fails over (4-6s) |
+| **HAProxy Crash** | keepalived stops with it (`BindsTo=`), VIPs move at once; a hung HAProxy fails the health check (about 4 s) |
 | **Keepalived Crash** | VRRP advertisements stop, VIP fails over (3s) |
 | **Network Partition** | Risk of split-brain (both nodes may claim VIP) |
 

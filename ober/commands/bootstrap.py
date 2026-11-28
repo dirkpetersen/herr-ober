@@ -378,9 +378,15 @@ def _pin_ppa_arch(arch: str, sources_dir: Path) -> None:
 def _install_packages(system: SystemInfo) -> None:
     """Install HAProxy and keepalived using the appropriate package manager."""
     if system.os_family == OSFamily.DEBIAN:
-        # HAProxy PPA on Ubuntu (OpenSSL build). The 3.4 PPA has no 24.04 (noble) build.
-        if "ubuntu" in system.os_name.lower():
-            ppa = "ppa:vbernat/haproxy-" + ("3.3" if system.os_codename == "noble" else "3.4")
+        # HAProxy 3.4 PPA on Ubuntu (OpenSSL build). It builds only for 26.04 and later, and a
+        # PPA without a build for the release makes "apt-get update" fail, so skip it on 24.04.
+        ppa = "ppa:vbernat/haproxy-3.4"
+        if "ubuntu" in system.os_name.lower() and system.os_codename == "noble":
+            console.print(
+                f"[yellow]Warning:[/yellow] {ppa} has no Ubuntu 24.04 build, using the distro "
+                "HAProxy. Use Ubuntu 26.04 for HAProxy 3.4."
+            )
+        elif "ubuntu" in system.os_name.lower():
             added = run_command(["add-apt-repository", "-y", ppa], check=False)
             if added.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
                 console.print(

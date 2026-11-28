@@ -65,8 +65,9 @@ watch:
 
 ### Semantics
 
-* **Allowlist vs. trusted networks.** The allowlist only grants permission to connect. In
-  phase 1 every Internet client is allowlisted, so it does not restrict anyone yet.
+* **Allowlist vs. trusted networks.** The allowlist only grants permission to connect. With
+  `allowlist_enabled: true` (default) an Internet VIP accepts only sources in `allowlist`, and an
+  empty list denies all. In phase 1 you list all expected client ranges, so it blocks no one yet.
   `trusted_networks` are exempt from all automatic blocking and limits (auto-ban,
   connection limits, blocklist). If a shared campus NAT address must never be banned, put
   its range in both `allowlist` and `trusted_networks`.

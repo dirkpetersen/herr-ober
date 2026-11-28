@@ -2,7 +2,7 @@
 
 A small lab in us-west-2 to test herr-ober on real nodes: 3 ingress nodes (t4g.medium) and one
 helper (t4g.small). OS: AlmaLinux 10 (newest official arm64 AMI, owner 764336703387), SELinux
-enforcing, login `ec2-user`. Cost: about $0.12 per hour while it runs.
+enforcing, login `ec2-user` (`ubuntu` on Ubuntu nodes; the helper is always AlmaLinux). Cost: about $0.12 per hour while it runs.
 
 - **Backend:** AWS S3 itself (`s3.us-west-2.amazonaws.com:443`, TLS), bucket `hcic-townhall`.
   The nodes reach S3 through an S3 gateway VPC endpoint (private, no charge).
@@ -39,7 +39,7 @@ vars over ssh stdin; nothing is written on the helper. **Tests write and delete 
 `herr-ober-test/`.** The other objects (80-300 MB videos) are read-only test data.
 
 `up.sh` writes `inventory`, `ssh_config`, `known_hosts` and `node_key` (root on each node uses it
-to reach the others as ec2-user, for `ober push`, `cluster status` and `--all-nodes`) here
+to reach the others as the login user, for `ober push`, `cluster status` and `--all-nodes`) here
 (git-ignored) and the key to `~/.ssh/herr-ober-lab.pem`. `teardown.sh` removes all of them.
 
 `NODE_OS` (alma, ubuntu or al2027) is saved in `node_os` for the later scripts. To switch, terminate the

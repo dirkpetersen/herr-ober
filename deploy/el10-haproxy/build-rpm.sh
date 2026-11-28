@@ -6,7 +6,11 @@ set -eu
 SRPM_URL=${SRPM_URL:-https://kojipkgs.fedoraproject.org/packages/haproxy/3.4.8/1.fc46/src/haproxy-3.4.8-1.fc46.src.rpm}
 
 dnf -y install rpm-build dnf-plugins-core
-dnf config-manager --set-enabled crb
+if command -v subscription-manager >/dev/null && grep -q "Red Hat" /etc/redhat-release; then
+    subscription-manager repos --enable "codeready-builder-for-rhel-10-$(arch)-rpms"  # RHEL
+else
+    dnf config-manager --set-enabled crb  # AlmaLinux, Rocky
+fi
 top=$(mktemp -d /var/tmp/haproxy-rpm.XXXXXX)
 cd "$top"
 curl -fsSLO "$SRPM_URL"

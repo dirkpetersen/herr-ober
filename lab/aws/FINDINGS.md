@@ -247,3 +247,21 @@ Findings:
    3.4 PPA was added: apt reads only the PPA's amd64v3 index, and the PPA builds no amd64v3
    haproxy. Fixed in bootstrap (`Architectures:` in the PPA `.sources`) and in CI. The arm64 lab
    nodes were not affected.
+
+## Amazon Linux 2027 (same day, `NODE_OS=al2027`, AMI al2027-preview-ami-2027.0.20261127.0)
+
+| Test | Result |
+|---|---|
+| Fresh `ober bootstrap` | pass after fix 5; installs `haproxy-awslc` 3.4.7 (meta `haproxy` too), SELinux enforcing, 0 AVC denials |
+| `ober doctor` | "Version 3.4.7, TLS: AWS-LC FIPS"; BFD "off: FRR (bfdd) not installed" although `bfd_enabled: true` |
+| BGP, 3-way ECMP, cluster status OK | pass |
+| TLS backend to AWS S3 with AWS-LC (was not checked before) | L7OK; 168 MB GET 1.5 s; 64 MiB PUT/GET identical |
+| Runtime add + del of a TLS server | no reload, UP L7OK, same master PID |
+| `systemctl stop ober-http` on ober2 | route removed after 1.7 s |
+| Link loss without BFD (blackhole) | route removed after 2.9 s (BGP hold time 3 s) |
+| `ober cluster upgrade --command "dnf reinstall -y haproxy-awslc"` | 81 s, probe 369 / 369 OK |
+| `dnf upgrade haproxy` (what `ober upgrade` runs) | works: the meta package pins `haproxy-awslc` to its version |
+
+5. AL2027 has no `frr` package. Bootstrap asked for it in the same `dnf install` as haproxy, so
+   bootstrap failed on AL2027 since BFD was added. It now installs `haproxy-awslc` by name and no
+   `frr` there.

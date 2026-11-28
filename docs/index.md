@@ -8,8 +8,9 @@
 [![Tests](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml/badge.svg)](https://github.com/dirkpetersen/herr-ober/actions/workflows/test.yml)
 
 Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller
-designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading (the Ubuntu PPA and distro builds use OpenSSL;
-`ober doctor` shows the TLS library) and one of two high-availability modes:
+designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading (Ubuntu 26.04 PPA, a rebuilt Fedora RPM on RHEL 10,
+`haproxy-awslc` with AWS-LC FIPS on Amazon Linux 2027; other releases use the distro
+HAProxy; `ober doctor` shows the version and TLS library) and one of two high-availability modes:
 
 - **BGP/ECMP mode** uses **ExaBGP** for Layer 3 HA via BGP (requires a BGP-capable router).
 - **Keepalived mode** uses **VRRP** for VIP failover (no BGP required).
@@ -78,7 +79,7 @@ See [Configuration](configuration.md#ha-modes) for the details of each mode.
     |-------|----------|
     | **Node crash** | VIP fails over to a backup node (instant) |
     | **OS freeze** | Proxmox watchdog resets the VM, VRRP timeout triggers failover (3-10s) |
-    | **HAProxy crash** | Health check fails, priority drops, VIP fails over (4-6s) |
+    | **HAProxy crash** | keepalived stops with it (`BindsTo=`), VIPs move at once; a hung HAProxy fails the health check (about 4 s) |
     | **Keepalived crash** | VRRP advertisements stop, VIP fails over (3s) |
     | **Network partition** | Risk of split-brain (both nodes may claim the VIP) |
 

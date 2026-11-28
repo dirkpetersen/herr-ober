@@ -111,7 +111,7 @@ def _check_os(system: SystemInfo) -> dict[str, Any]:
             "name": "Operating System",
             "passed": False,
             "status": "unsupported",
-            "message": f"Unknown OS: {system.os_name}. Supported: Ubuntu, Debian, RHEL 10+, Amazon Linux 2023/2027",
+            "message": f"Unknown OS: {system.os_name}. Supported: Ubuntu, Debian, RHEL 10+, Amazon Linux 2027",
             "critical": True,
         }
 
@@ -120,7 +120,7 @@ def _check_os(system: SystemInfo) -> dict[str, Any]:
             "name": "Operating System",
             "passed": False,
             "status": "unsupported",
-            "message": f"{system.os_name} {system.os_version} is not supported. RHEL requires 10+, Amazon Linux 2023 or 2027",
+            "message": f"{system.os_name} {system.os_version} is not supported. RHEL requires 10+, Amazon Linux 2027",
             "critical": True,
         }
 
