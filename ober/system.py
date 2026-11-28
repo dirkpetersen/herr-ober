@@ -79,13 +79,14 @@ class SystemInfo:
             return False
         if self.os_id == "amzn":
             return self.os_version == "2027"  # 2023 ships python3 3.9, the package needs 3.12
+        try:
+            version = tuple(int(x) for x in self.os_version.split(".")[:2])
+        except ValueError:
+            return False
         if self.os_family == OSFamily.RHEL:
-            try:
-                major_version = int(self.os_version.split(".")[0])
-                return major_version >= 10
-            except (ValueError, IndexError):
-                return False
-        return True
+            return version >= (10,)
+        # Ubuntu 26.04+ only: the HAProxy 3.4 PPA has no older build, and Debian ships no 3.4.
+        return self.os_id == "ubuntu" and version >= (26, 4)
 
     @property
     def package_manager(self) -> str:

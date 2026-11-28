@@ -8,12 +8,12 @@
 
 **High-Performance S3 Ingress Controller (BGP/ECMP or VRRP)**
 
-Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading: from the PPA on Ubuntu 26.04, from a rebuilt Fedora RPM on RHEL 10 (see below), and `haproxy-awslc` (AWS-LC FIPS) on Amazon Linux 2027. On other releases (Ubuntu 24.04, Debian) it uses the distro HAProxy, and `ober doctor` reports it as old and shows the TLS library. It has two HA modes:
+Herr Ober ("Head Waiter") is a lightweight, high-throughput (50GB/s+) ingress controller designed for Ceph RGW clusters. It uses **HAProxy 3.4** for SSL offloading: from the PPA on Ubuntu 26.04, from a rebuilt Fedora RPM on RHEL 10 (see below), and `haproxy-awslc` (AWS-LC FIPS) on Amazon Linux 2027. Other releases (Ubuntu 24.04, Debian) have no HAProxy 3.4 package and are not supported; bootstrap refuses them. It has two HA modes:
 
 - **BGP/ECMP Mode** - Uses **ExaBGP** for Layer 3 HA via BGP (requires BGP-capable router)
 - **Keepalived Mode** - Uses **VRRP** for VIP failover (no BGP required)
 
-**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2
+**Supported:** Ubuntu 26.04+, RHEL 10+ (AlmaLinux 10, Rocky 10) on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2
 
 ---
 
@@ -86,7 +86,7 @@ sudo deploy/el10-haproxy/build-rpm.sh      # prints /var/tmp/haproxy-rpm.*/RPMS/
 sudo dnf install -y /var/tmp/haproxy-rpm.*/RPMS/*/haproxy-3.4*.rpm
 ```
 On Ubuntu, bootstrap uses `ppa:vbernat/haproxy-3.4`. That PPA builds only for 26.04 and later, so
-use Ubuntu 26.04. On 24.04 bootstrap adds no PPA, warns, and installs the distro HAProxy.
+bootstrap and `ober doctor` refuse Ubuntu 24.04 and Debian.
 
 **Upgrading from v0.3.0 or earlier:** re-run the one-liner. The old install lived under
 `/root/.local/pipx`; the installer prints how to keep it
@@ -317,7 +317,7 @@ in BGP mode.
 
 `ober bootstrap` changes no firewall unless you add `--firewall`. With it, bootstrap allows the
 SSH port(s) from `sshd -T` first, then 443/tcp, VRRP and BFD (3784/udp), and then enables ufw
-(Debian/Ubuntu) or firewalld (RHEL). When the firewall is already active, bootstrap adds only
+(Ubuntu) or firewalld (RHEL). When the firewall is already active, bootstrap adds only
 443/tcp, VRRP and 3784/udp and keeps your SSH rules. If `sshd -T` fails, bootstrap stops before it changes the firewall. All
 rules are persistent. Port 80, BGP and the stats port are not opened.
 Bootstrap also raises `nf_conntrack_max` to 1048576, because a stateful firewall tracks every

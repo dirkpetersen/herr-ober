@@ -206,9 +206,9 @@ These were not in the list above. Each one is the default the work used.
 
 ## HAProxy 3.4 (LTS) is the target (2026-11-27)
 
-- **Ubuntu:** `ppa:vbernat/haproxy-3.4` builds only for 26.04 (resolute) and later. Bootstrap adds
-  no PPA on 24.04 (noble) and warns, because adding a PPA without a build for the release breaks
-  `apt-get update`; 24.04 gets the distro HAProxy. CI runs on `ubuntu-26.04`.
+- **Ubuntu:** `ppa:vbernat/haproxy-3.4` builds only for 26.04 (resolute) and later. Ubuntu 24.04
+  and Debian are not supported (decided 2026-11-27): bootstrap and doctor refuse them, because
+  their distro HAProxy (2.8 on 24.04) fails 17 of 41 live tests. CI runs on `ubuntu-26.04`.
 - **EL10:** no 3.4 package exists (AlmaLinux 10 ships 3.0.5). `deploy/el10-haproxy/build-rpm.sh`
   rebuilds the Fedora rawhide source RPM (Fedora packaging, upstream source, system OpenSSL 3.5);
   the only change is the admin tool paths (Fedora merged `/usr/sbin`). Not a third-party COPR.

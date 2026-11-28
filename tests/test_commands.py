@@ -28,11 +28,12 @@ class TestDoctorChecks:
     """Tests for individual doctor check functions."""
 
     def test_check_os_debian(self) -> None:
-        """Test OS check for Debian."""
+        """Test OS check for Ubuntu."""
         system = SystemInfo()
         system.os_family = OSFamily.DEBIAN
+        system.os_id = "ubuntu"
         system.os_name = "Ubuntu"
-        system.os_version = "24.04"
+        system.os_version = "26.04"
 
         result = _check_os(system)
         assert result["passed"] is True
@@ -919,6 +920,7 @@ class TestDoctorPrintResults:
         result = _check_os(system)
         assert result["passed"] is False
         assert "not supported" in result["message"]
+        assert result["critical"] is False  # an old running node must not fail cluster upgrade
 
     def test_check_python_too_old(self) -> None:
         """Test Python version check for old version."""
@@ -1292,25 +1294,23 @@ class TestBootstrapMoreTests:
             # Should have called apt-get install with both packages
             assert any("haproxy" in str(call) and "keepalived" in str(call) for call in calls)
 
-    def test_install_packages_ubuntu_ppa_by_release(self) -> None:
-        """The 3.4 PPA has no noble build: noble adds no PPA, 26.04 adds the 3.4 PPA."""
+    def test_install_packages_ubuntu_ppa(self) -> None:
+        """Ubuntu adds the 3.4 PPA first."""
         from ober.commands.bootstrap import _install_packages
 
-        for codename, ppa in (("noble", None), ("resolute", "ppa:vbernat/haproxy-3.4")):
-            system = SystemInfo()
-            system.os_family = OSFamily.DEBIAN
-            system.os_name = "Ubuntu"
-            system.os_codename = codename
-            with (
-                patch("ober.commands.bootstrap.run_command") as mock_run,
-                patch("ober.commands.bootstrap._pin_ppa_arch"),
-            ):
-                _install_packages(system)
-            first = mock_run.call_args_list[0].args[0]
-            if ppa:
-                assert first == ["add-apt-repository", "-y", ppa]
-            else:
-                assert first == ["apt-get", "update"]
+        system = SystemInfo()
+        system.os_family = OSFamily.DEBIAN
+        system.os_name = "Ubuntu"
+        with (
+            patch("ober.commands.bootstrap.run_command") as mock_run,
+            patch("ober.commands.bootstrap._pin_ppa_arch"),
+        ):
+            _install_packages(system)
+        assert mock_run.call_args_list[0].args[0] == [
+            "add-apt-repository",
+            "-y",
+            "ppa:vbernat/haproxy-3.4",
+        ]
 
     def test_pin_ppa_arch(self, tmp_path: Path) -> None:
         """The PPA source gets the host arch once, so amd64v3 hosts read its amd64 index."""

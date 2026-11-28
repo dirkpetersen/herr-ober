@@ -213,7 +213,7 @@ def bootstrap(ctx: click.Context, path: str | None, yes: bool, firewall: bool) -
     # Check prerequisites
     if not system.is_supported:
         console.print(f"[red]Error:[/red] {system.os_name} {system.os_version} is not supported.")
-        console.print("Supported: Ubuntu, Debian, RHEL 10+, Amazon Linux 2023/2027")
+        console.print("Supported: Ubuntu 26.04+, RHEL 10+ (AlmaLinux, Rocky), Amazon Linux 2027")
         ctx.exit(1)
 
     if not system.is_root:
@@ -378,15 +378,9 @@ def _pin_ppa_arch(arch: str, sources_dir: Path) -> None:
 def _install_packages(system: SystemInfo) -> None:
     """Install HAProxy and keepalived using the appropriate package manager."""
     if system.os_family == OSFamily.DEBIAN:
-        # HAProxy 3.4 PPA on Ubuntu (OpenSSL build). It builds only for 26.04 and later, and a
-        # PPA without a build for the release makes "apt-get update" fail, so skip it on 24.04.
+        # HAProxy 3.4 PPA on Ubuntu 26.04+ (OpenSSL build); is_supported refuses older releases.
         ppa = "ppa:vbernat/haproxy-3.4"
-        if "ubuntu" in system.os_name.lower() and system.os_codename == "noble":
-            console.print(
-                f"[yellow]Warning:[/yellow] {ppa} has no Ubuntu 24.04 build, using the distro "
-                "HAProxy. Use Ubuntu 26.04 for HAProxy 3.4."
-            )
-        elif "ubuntu" in system.os_name.lower():
+        if "ubuntu" in system.os_name.lower():
             added = run_command(["add-apt-repository", "-y", ppa], check=False)
             if added.returncode != 0:  # e.g. no PPA build yet for a new Ubuntu release
                 console.print(

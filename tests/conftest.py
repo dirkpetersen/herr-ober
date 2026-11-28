@@ -54,8 +54,8 @@ def mock_system_info() -> Generator[MagicMock, None, None]:
         instance = mock.return_value
         instance.os_family.value = "debian"
         instance.os_name = "Ubuntu"
-        instance.os_version = "24.04"
-        instance.os_codename = "noble"
+        instance.os_version = "26.04"
+        instance.os_codename = "resolute"
         instance.python_version = "3.12.3"
         instance.is_root = False
         instance.hostname = "test-host"

@@ -15,7 +15,7 @@ HAProxy; `ober doctor` shows the version and TLS library) and one of two high-av
 - **BGP/ECMP mode** uses **ExaBGP** for Layer 3 HA via BGP (requires a BGP-capable router).
 - **Keepalived mode** uses **VRRP** for VIP failover (no BGP required).
 
-**Supported:** Ubuntu, Debian, RHEL 10+ on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2.
+**Supported:** Ubuntu 26.04+, RHEL 10+ (AlmaLinux 10, Rocky 10) on Proxmox VMs (KVM), and Amazon Linux 2027 on EC2.
 Python 3.12+. IPv4 only.
 
 The whole stack is installed and managed by one CLI, `ober`, published on PyPI as
