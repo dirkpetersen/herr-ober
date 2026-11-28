@@ -20,7 +20,8 @@ KNOWN_HOSTS="$LAB_DIR/known_hosts"
 AMI_OWNER="764336703387"
 AMI_PATTERN="AlmaLinux OS 10.* aarch64"
 
-# Ingress node OS: alma (default) or ubuntu (26.04: the haproxy-3.4 PPA builds only for 26.04).
+# Ingress node OS: alma (default), ubuntu (26.04: the haproxy-3.4 PPA builds only for 26.04) or
+# al2027 (Amazon Linux 2027 preview, haproxy-awslc).
 # The helper always runs AlmaLinux. up.sh records the choice in node_os for the later scripts.
 NODE_OS="${NODE_OS:-$(cat "$LAB_DIR/node_os" 2>/dev/null || echo alma)}"
 case "$NODE_OS" in
@@ -28,7 +29,10 @@ case "$NODE_OS" in
     ubuntu)  # Canonical
         NODE_AMI_OWNER=099720109477 NODE_USER=ubuntu
         NODE_AMI_PATTERN="ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64-server-*" ;;
-    *) echo "NODE_OS must be alma or ubuntu" >&2; exit 1 ;;
+    al2027)  # Amazon
+        NODE_AMI_OWNER=137112412989 NODE_USER=ec2-user
+        NODE_AMI_PATTERN="al2027-preview-ami-2027.*-kernel-*-arm64" ;;
+    *) echo "NODE_OS must be alma, ubuntu or al2027" >&2; exit 1 ;;
 esac
 
 # AWS S3 is the backend. Tests write and delete only under BUCKET/TEST_PREFIX.

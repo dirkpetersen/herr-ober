@@ -395,15 +395,17 @@ def _install_packages(system: SystemInfo) -> None:
         # frr: bfdd for BFD in BGP mode (ober-bfd); the distro frr.service stays off
         run_command(["apt-get", "install", "-y", "haproxy", "keepalived", "iputils-ping", "frr"])
     elif system.os_family == OSFamily.RHEL:
+        # Amazon Linux 2027: name the AWS-LC build (its "haproxy" may pull haproxy-ossl), and it
+        # has no frr package, so no BFD there.
+        amzn = system.os_id == "amzn"
         run_command(
             [
                 "dnf",
                 "install",
                 "-y",
-                "haproxy",
+                *(["haproxy-awslc"] if amzn else ["haproxy", "frr"]),  # frr: bfdd (AppStream)
                 "keepalived",
                 "iputils",
-                "frr",  # bfdd for BFD in BGP mode (AppStream)
                 "policycoreutils-python-utils",
                 "checkpolicy",  # checkmodule builds the herr_ober SELinux module
             ]

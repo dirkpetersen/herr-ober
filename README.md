@@ -379,7 +379,8 @@ per `bgp.neighbors` entry, from `bgp.local_address` (or the node IP). The timers
 0.9 s. `ober-bfd` has `BindsTo=ober-bgp`, so it stops with ExaBGP and HAProxy.
 
 - Bootstrap installs the `frr` package and keeps the distro `frr.service` off. BFD stays off
-  until FRR is installed, also when `bfd_enabled` is true (default `false`).
+  until FRR is installed, also when `bfd_enabled` is true (default `false`). Amazon Linux 2027
+  has no `frr` package, so there is no BFD there (BGP hold timer only).
 - The config is `/etc/frr/bfdd.conf` (bfdd reads no other path). `ober config` and `ober apply`
   write it and restart `ober-bfd` when it changes, which takes the BGP sessions down for a moment.
 - The router must tie BFD to the BGP session, for example bird2: `protocol bfd { }` and

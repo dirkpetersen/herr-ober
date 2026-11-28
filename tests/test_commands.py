@@ -1341,6 +1341,22 @@ class TestBootstrapMoreTests:
             # Should have called dnf install with both packages
             assert any("haproxy" in str(call) and "keepalived" in str(call) for call in calls)
 
+    def test_install_packages_amazon_linux(self) -> None:
+        """AL2027: the AWS-LC HAProxy by name, and no frr (it has no such package)."""
+        from ober.commands.bootstrap import _install_packages
+
+        for os_id, want, absent in (
+            ("amzn", "haproxy-awslc", "frr"),
+            ("almalinux", "frr", "haproxy-awslc"),
+        ):
+            system = SystemInfo()
+            system.os_family = OSFamily.RHEL
+            system.os_id = os_id
+            with patch("ober.commands.bootstrap.run_command") as mock_run:
+                _install_packages(system)
+            cmd = mock_run.call_args_list[0].args[0]
+            assert want in cmd and absent not in cmd
+
 
 class TestCLIEdgeCases:
     """Edge cases for CLI commands."""

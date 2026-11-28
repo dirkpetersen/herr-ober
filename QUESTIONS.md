@@ -220,3 +220,6 @@ These were not in the list above. Each one is the default the work used.
   was installed without a warning. Bootstrap writes `Architectures: <dpkg arch>` into the PPA
   `.sources` file (permanent, so PPA updates stay visible); CI does the same and fails unless
   `haproxy -v` shows 3.4.
+- **Amazon Linux 2027:** its own `haproxy-awslc` (3.4.7, AWS-LC FIPS). Bootstrap names it, because
+  the `haproxy` meta package may pick `haproxy-ossl`. AL2027 has no `frr`, so bootstrap does not
+  ask for it (before, `dnf install` failed there) and BFD stays off.
