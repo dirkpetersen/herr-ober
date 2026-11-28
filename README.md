@@ -46,7 +46,7 @@ For host BIOS and kernel settings, a full VM config and a verification checklist
 [releases](https://github.com/dirkpetersen/herr-ober/releases)), not `main`, so you run a
 reviewed script. The script installs the newest herr-ober from PyPI.
 ```bash
-OBER_TAG=v0.4.0
+OBER_TAG=v0.5.0
 curl -fsSL "https://raw.githubusercontent.com/dirkpetersen/herr-ober/$OBER_TAG/install.sh" | sudo bash
 sudo ober bootstrap
 ```
